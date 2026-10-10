@@ -1,76 +1,337 @@
-- name: default_assistance_group_passes_gross_income_test
+- name: broad_based_categorical_sfu_passes_above_standard_gross_limit
   period: 2026-01
   input:
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_contains_elderly_or_disabled_member
-    : false
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_is_categorically_eligible
-    : false
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.standard_filing_unit_is_broad_based_categorically_eligible
-    : false
-    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_monthly_income: 900
-    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_gross_income_limit: 1000
-    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.net_monthly_income: 1200
-    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_net_income_limit: 700
-  output:
-    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#separate_assistance_group_minimum_age: 60
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#children_required_with_disabled_individual_age_limit
-    : 18
-    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#need_standard_income_limit_rate: 1.65
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#broad_based_categorical_gross_income_limit_rate
-    : 2.0
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_net_income_limit
-    : not_holds
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_gross_income_standard
-    : holds
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#broad_based_categorical_gross_income_limit
-    : 2000
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#standard_filing_unit_satisfies_200_percent_gross_income_test
-    : holds
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_gross_income_test
-    : holds
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_net_income_limit
-    : holds
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_income_test_satisfied_for_food_stamps
-    : holds
-- name: broad_based_categorical_sfu_fails_at_200_percent_limit
-  period: 2026-01
-  input:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_200_percent_gross_income_limit
+    : 4442
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_gross_income_limit: 2888
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_net_income_limit: 2221
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_monthly_income: 3300
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.net_monthly_income: 2300
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_contains_elderly_or_disabled_member
     : false
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_is_categorically_eligible
     : true
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.standard_filing_unit_is_broad_based_categorically_eligible
     : true
-    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_monthly_income: 2000
-    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_gross_income_limit: 1000
-    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.net_monthly_income: 600
-    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_net_income_limit: 700
   output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#broad_based_categorical_gross_income_limit
+    : 4442
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#standard_filing_unit_satisfies_200_percent_gross_income_test
+    : holds
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_net_income_limit
     : not_holds
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_gross_income_standard
     : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_gross_income_test
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_income_test_satisfied_for_food_stamps
+    : holds
+- name: non_bbce_group_fails_standard_test_at_3300
+  period: 2026-01
+  input:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_200_percent_gross_income_limit
+    : 4442
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_gross_income_limit: 2888
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_net_income_limit: 2221
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_monthly_income: 3300
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.net_monthly_income: 2300
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_contains_elderly_or_disabled_member
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_is_categorically_eligible
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.standard_filing_unit_is_broad_based_categorically_eligible
+    : false
+  output:
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#broad_based_categorical_gross_income_limit
-    : 2000
+    : 4442
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#standard_filing_unit_satisfies_200_percent_gross_income_test
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_gross_income_standard
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_gross_income_test
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_income_test_satisfied_for_food_stamps
+    : not_holds
+- name: broad_based_categorical_sfu_passes_below_200_percent_limit
+  period: 2026-01
+  input:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_200_percent_gross_income_limit
+    : 4442
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_gross_income_limit: 2888
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_net_income_limit: 2221
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_monthly_income: 4441
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.net_monthly_income: 2300
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_contains_elderly_or_disabled_member
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_is_categorically_eligible
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.standard_filing_unit_is_broad_based_categorically_eligible
+    : true
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#broad_based_categorical_gross_income_limit
+    : 4442
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#standard_filing_unit_satisfies_200_percent_gross_income_test
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_gross_income_standard
     : not_holds
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_gross_income_test
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_income_test_satisfied_for_food_stamps
     : holds
+- name: broad_based_categorical_sfu_passes_at_200_percent_limit
+  period: 2026-01
+  input:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_200_percent_gross_income_limit
+    : 4442
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_gross_income_limit: 2888
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_net_income_limit: 2221
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_monthly_income: 4442
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.net_monthly_income: 2300
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_contains_elderly_or_disabled_member
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_is_categorically_eligible
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.standard_filing_unit_is_broad_based_categorically_eligible
+    : true
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#broad_based_categorical_gross_income_limit
+    : 4442
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#standard_filing_unit_satisfies_200_percent_gross_income_test
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_gross_income_standard
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_gross_income_test
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_income_test_satisfied_for_food_stamps
+    : holds
+- name: broad_based_categorical_sfu_fails_above_200_percent_limit
+  period: 2026-01
+  input:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_200_percent_gross_income_limit
+    : 4442
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_gross_income_limit: 2888
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_net_income_limit: 2221
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_monthly_income: 4443
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.net_monthly_income: 2300
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_contains_elderly_or_disabled_member
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_is_categorically_eligible
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.standard_filing_unit_is_broad_based_categorically_eligible
+    : true
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#broad_based_categorical_gross_income_limit
+    : 4442
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#standard_filing_unit_satisfies_200_percent_gross_income_test
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_gross_income_standard
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_gross_income_test
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_income_test_satisfied_for_food_stamps
+    : not_holds
+- name: ordinary_group_passes_below_gross_limit
+  period: 2026-01
+  input:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_200_percent_gross_income_limit
+    : 4442
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_gross_income_limit: 2888
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_net_income_limit: 2221
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_monthly_income: 2887
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.net_monthly_income: 2300
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_contains_elderly_or_disabled_member
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_is_categorically_eligible
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.standard_filing_unit_is_broad_based_categorically_eligible
+    : false
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#broad_based_categorical_gross_income_limit
+    : 4442
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#standard_filing_unit_satisfies_200_percent_gross_income_test
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_gross_income_standard
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_gross_income_test
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_income_test_satisfied_for_food_stamps
+    : holds
+- name: ordinary_group_fails_at_gross_limit
+  period: 2026-01
+  input:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_200_percent_gross_income_limit
+    : 4442
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_gross_income_limit: 2888
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_net_income_limit: 2221
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_monthly_income: 2888
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.net_monthly_income: 2300
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_contains_elderly_or_disabled_member
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_is_categorically_eligible
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.standard_filing_unit_is_broad_based_categorically_eligible
+    : false
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#broad_based_categorical_gross_income_limit
+    : 4442
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#standard_filing_unit_satisfies_200_percent_gross_income_test
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_gross_income_standard
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_gross_income_test
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_income_test_satisfied_for_food_stamps
+    : not_holds
+- name: elderly_disabled_noncategorical_group_passes_at_net_limit
+  period: 2026-01
+  input:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_200_percent_gross_income_limit
+    : 4442
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_gross_income_limit: 2888
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_net_income_limit: 2221
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_monthly_income: 3300
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.net_monthly_income: 2221
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_contains_elderly_or_disabled_member
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_is_categorically_eligible
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.standard_filing_unit_is_broad_based_categorically_eligible
+    : false
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#broad_based_categorical_gross_income_limit
+    : 4442
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#standard_filing_unit_satisfies_200_percent_gross_income_test
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_net_income_limit
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_gross_income_standard
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_gross_income_test
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_net_income_limit
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_income_test_satisfied_for_food_stamps
+    : holds
+- name: elderly_disabled_noncategorical_group_fails_above_net_limit
+  period: 2026-01
+  input:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_200_percent_gross_income_limit
+    : 4442
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_gross_income_limit: 2888
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_net_income_limit: 2221
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_monthly_income: 3300
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.net_monthly_income: 2222
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_contains_elderly_or_disabled_member
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_is_categorically_eligible
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.standard_filing_unit_is_broad_based_categorically_eligible
+    : false
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#broad_based_categorical_gross_income_limit
+    : 4442
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#standard_filing_unit_satisfies_200_percent_gross_income_test
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_net_income_limit
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_gross_income_standard
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_gross_income_test
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_income_test_satisfied_for_food_stamps
+    : not_holds
+- name: absence_of_elderly_disabled_member_removes_net_exception
+  period: 2026-01
+  input:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_200_percent_gross_income_limit
+    : 4442
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_gross_income_limit: 2888
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_net_income_limit: 2221
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_monthly_income: 3300
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.net_monthly_income: 2221
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_contains_elderly_or_disabled_member
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_is_categorically_eligible
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.standard_filing_unit_is_broad_based_categorically_eligible
+    : false
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#broad_based_categorical_gross_income_limit
+    : 4442
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#standard_filing_unit_satisfies_200_percent_gross_income_test
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_gross_income_standard
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_gross_income_test
+    : not_holds
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_net_income_limit
     : holds
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_income_test_satisfied_for_food_stamps
     : not_holds
-- name: elderly_disabled_individual_may_be_separate_assistance_group
+- name: categorical_status_removes_noncategorical_net_exception
+  period: 2026-01
+  input:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_200_percent_gross_income_limit
+    : 4442
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_gross_income_limit: 2888
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.allowable_net_income_limit: 2221
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_monthly_income: 3300
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.net_monthly_income: 2221
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_contains_elderly_or_disabled_member
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_is_categorically_eligible
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.standard_filing_unit_is_broad_based_categorically_eligible
+    : false
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#broad_based_categorical_gross_income_limit
+    : 4442
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#standard_filing_unit_satisfies_200_percent_gross_income_test
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_net_income_limit
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_gross_income_standard
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_gross_income_test
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_satisfies_net_income_limit
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_income_test_satisfied_for_food_stamps
+    : not_holds
+- name: separate_group_passes_at_three_others_need_standard
   period: 2026-01
   input:
     us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_age: 60
-    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.child_age: 60
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.child_lives_with_disabled_individual
-    : false
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.income_of_others_excluding_individual_and_spouse
-    : 1600
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_eligibility_standard_for_others
-    : 1000
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.otherwise_eligible_assistance_group_member
     : true
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_unable_to_purchase_and_prepare_meals
@@ -81,26 +342,146 @@
     : false
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.spouse_and_children_under_age_limit_living_with_individual_are_included_with_individual
     : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.income_of_others_excluding_individual_and_spouse
+    : 3665
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_165_percent_need_standard_for_others
+    : 3665
   output:
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#person_meets_age_requirement_for_elderly_disabled_separate_group
     : holds
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#child_under_age_limit_may_not_be_separate_from_disabled_individual
-    : not_holds
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#income_of_others_within_165_percent_need_standard
     : holds
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#elderly_disabled_individual_may_be_separate_assistance_group
     : holds
-- name: child_under_18_may_not_be_separate_and_income_above_165_blocks
+- name: separate_group_fails_above_three_others_need_standard
+  period: 2026-01
+  input:
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_age: 60
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.otherwise_eligible_assistance_group_member
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_unable_to_purchase_and_prepare_meals
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_has_permanent_disability_under_social_security_act
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_has_non_disease_related_permanent_disability
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.spouse_and_children_under_age_limit_living_with_individual_are_included_with_individual
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.income_of_others_excluding_individual_and_spouse
+    : 3666
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_165_percent_need_standard_for_others
+    : 3665
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#person_meets_age_requirement_for_elderly_disabled_separate_group
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#income_of_others_within_165_percent_need_standard
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#elderly_disabled_individual_may_be_separate_assistance_group
+    : not_holds
+- name: separate_group_fails_below_minimum_age
   period: 2026-01
   input:
     us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_age: 59
-    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.child_age: 17
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.child_lives_with_disabled_individual
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.otherwise_eligible_assistance_group_member
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_unable_to_purchase_and_prepare_meals
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_has_permanent_disability_under_social_security_act
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_has_non_disease_related_permanent_disability
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.spouse_and_children_under_age_limit_living_with_individual_are_included_with_individual
     : true
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.income_of_others_excluding_individual_and_spouse
-    : 1700
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.gross_eligibility_standard_for_others
-    : 1000
+    : 3665
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_165_percent_need_standard_for_others
+    : 3665
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#person_meets_age_requirement_for_elderly_disabled_separate_group
+    : not_holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#income_of_others_within_165_percent_need_standard
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#elderly_disabled_individual_may_be_separate_assistance_group
+    : not_holds
+- name: separate_group_requires_otherwise_eligible_member
+  period: 2026-01
+  input:
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_age: 60
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.otherwise_eligible_assistance_group_member
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_unable_to_purchase_and_prepare_meals
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_has_permanent_disability_under_social_security_act
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_has_non_disease_related_permanent_disability
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.spouse_and_children_under_age_limit_living_with_individual_are_included_with_individual
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.income_of_others_excluding_individual_and_spouse
+    : 3665
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_165_percent_need_standard_for_others
+    : 3665
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#person_meets_age_requirement_for_elderly_disabled_separate_group
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#income_of_others_within_165_percent_need_standard
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#elderly_disabled_individual_may_be_separate_assistance_group
+    : not_holds
+- name: separate_group_requires_inability_to_purchase_and_prepare_meals
+  period: 2026-01
+  input:
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_age: 60
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.otherwise_eligible_assistance_group_member
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_unable_to_purchase_and_prepare_meals
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_has_permanent_disability_under_social_security_act
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_has_non_disease_related_permanent_disability
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.spouse_and_children_under_age_limit_living_with_individual_are_included_with_individual
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.income_of_others_excluding_individual_and_spouse
+    : 3665
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_165_percent_need_standard_for_others
+    : 3665
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#person_meets_age_requirement_for_elderly_disabled_separate_group
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#income_of_others_within_165_percent_need_standard
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#elderly_disabled_individual_may_be_separate_assistance_group
+    : not_holds
+- name: separate_group_requires_qualifying_permanent_disability
+  period: 2026-01
+  input:
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_age: 60
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.otherwise_eligible_assistance_group_member
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_unable_to_purchase_and_prepare_meals
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_has_permanent_disability_under_social_security_act
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_has_non_disease_related_permanent_disability
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.spouse_and_children_under_age_limit_living_with_individual_are_included_with_individual
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.income_of_others_excluding_individual_and_spouse
+    : 3665
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_165_percent_need_standard_for_others
+    : 3665
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#person_meets_age_requirement_for_elderly_disabled_separate_group
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#income_of_others_within_165_percent_need_standard
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#elderly_disabled_individual_may_be_separate_assistance_group
+    : not_holds
+- name: separate_group_accepts_non_disease_permanent_disability
+  period: 2026-01
+  input:
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_age: 60
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.otherwise_eligible_assistance_group_member
     : true
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_unable_to_purchase_and_prepare_meals
@@ -111,25 +492,66 @@
     : true
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.spouse_and_children_under_age_limit_living_with_individual_are_included_with_individual
     : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.income_of_others_excluding_individual_and_spouse
+    : 3665
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_165_percent_need_standard_for_others
+    : 3665
   output:
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#person_meets_age_requirement_for_elderly_disabled_separate_group
-    : not_holds
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#child_under_age_limit_may_not_be_separate_from_disabled_individual
     : holds
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#income_of_others_within_165_percent_need_standard
-    : not_holds
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#elderly_disabled_individual_may_be_separate_assistance_group
+    : holds
+- name: separate_group_requires_spouse_and_children_to_remain_with_individual
+  period: 2026-01
+  input:
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_age: 60
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.otherwise_eligible_assistance_group_member
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_unable_to_purchase_and_prepare_meals
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_has_permanent_disability_under_social_security_act
+    : true
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.person_has_non_disease_related_permanent_disability
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.spouse_and_children_under_age_limit_living_with_individual_are_included_with_individual
+    : false
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.income_of_others_excluding_individual_and_spouse
+    : 3665
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.monthly_165_percent_need_standard_for_others
+    : 3665
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#person_meets_age_requirement_for_elderly_disabled_separate_group
+    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#income_of_others_within_165_percent_need_standard
+    : holds
     ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#elderly_disabled_individual_may_be_separate_assistance_group
     : not_holds
-- name: auto_positive_assistance_group_must_meet_net_income_limit
-  period:
-    period_kind: tax_year
-    start: '2026-01-01'
-    end: '2026-12-31'
+- name: child_under_eighteen_living_with_individual_must_remain
+  period: 2026-01
   input:
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_contains_elderly_or_disabled_member
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.child_age: 17
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.child_lives_with_disabled_individual
     : true
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.assistance_group_is_categorically_eligible
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#child_under_age_limit_may_not_be_separate_from_disabled_individual
+    : holds
+- name: child_at_eighteen_outside_required_child_age
+  period: 2026-01
+  input:
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.child_age: 18
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.child_lives_with_disabled_individual
+    : true
+  output:
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#child_under_age_limit_may_not_be_separate_from_disabled_individual
+    : not_holds
+- name: child_not_living_with_individual_outside_required_child_condition
+  period: 2026-01
+  input:
+    us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.child_age: 17
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#input.child_lives_with_disabled_individual
     : false
   output:
-    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#assistance_group_must_meet_net_income_limit
-    : holds
+    ? us-fl:policies/dcf/ess-program-policy-manual/2600-calculation-of-benefits/page-8#child_under_age_limit_may_not_be_separate_from_disabled_individual
+    : not_holds
