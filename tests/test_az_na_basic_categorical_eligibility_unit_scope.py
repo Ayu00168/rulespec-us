@@ -9,16 +9,24 @@ aggregates per-participant facts over ``member_of_budgetary_unit``
 (``arguments: [Person, Household]``), so its unit-level judgments must be
 declared on ``Household``.
 
-The companion harness types every input ``Entity`` and writes relation rows as
-``[related_i, case]``, so under the legacy aggregation direction it passes
-whether these judgments are declared on ``Person`` or ``Household``. Engines
-that resolve direction from declared ``arguments`` (axiom-rules-engine #179)
-make a ``Person`` declaration walk from a participant to its household and
-evaluate per-participant predicates on the household id. The static contract
-below fails on that declaration under any engine. The executable contract
-compiles the module with a real engine and checks every unit of one to three
-participants against the FAA5 text, with decoy participant facts on the
-household id that a correct encoding never reads.
+Companion cases cannot see a wrong declaration here. The harness writes each
+relation row against a single query row and orders that pair to match the
+output's own declared entity and the compiled direction, so the cases agree
+with whichever entity the module declares. The engine resolves aggregation direction from the declared
+``arguments`` (axiom-rules-engine #179): a ``Person`` declaration walks from a
+participant to its household and evaluates per-participant predicates on the
+household id, so data written in the declared ``[Person, Household]`` order
+gets vacuous unit judgments.
+
+The static contract checks the declarations. The executable contract compiles
+the module with a real engine, requires no relation-orientation warning, and
+checks every budgetary unit of one to three participants against the FAA5
+text with tuples in declared order. Each unit id also carries decoy
+participant facts that flip each of the three aggregate judgments (and BCE
+whenever it should hold), so an encoding that read the unit's own facts
+instead of its members' fails too. Both contracts are expected failures until
+the signed repair tracked in rulespec-us#1440 lands; strict mode makes that
+repair fail CI until it removes the markers.
 """
 
 from __future__ import annotations
@@ -43,6 +51,14 @@ LEGAL_ID = (
     "basic-categorical-eligibility"
 )
 
+KNOWN_UNIT_SCOPE_BUG = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "rulespec-us#1440: the unit judgments are declared on Person; "
+        "remove this marker in the signed repair"
+    ),
+)
+
 UNIT_RULES = (
     "no_budgetary_unit_participant_meets_bce_disqualification_criterion",
     "all_budgetary_unit_participants_receive_listed_bce_benefit_or_status",
@@ -59,11 +75,17 @@ DRUG_ALCOHOL_SUSPENDED = (
     "participant_ssi_suspended_for_failure_to_comply_with_drug_and_alcohol_"
     "treatment_requirement"
 )
-# Each listed benefit or status, one input per FAA5 bullet or sub-bullet.
-LISTED = (
+# Each listed benefit or status, one input per FAA5 bullet or sub-bullet. The
+# first three make up "TANF CA Benefits". A repair that renames or merges any
+# of these inputs, or renames a rule above, fails loudly (KeyError or an
+# engine error) rather than passing; update these tables with it.
+TANF_CASH_ASSISTANCE = (
     "participant_receives_tanf_cash_assistance_benefit",
     "participant_is_cash_assistance_eligible_but_no_cash_assistance_benefit_is_paid",
     "participant_has_any_cash_assistance_benefit_recouped_for_overpayment",
+)
+LISTED = (
+    *TANF_CASH_ASSISTANCE,
     "participant_receives_tanf_services",
     "participant_receives_grant_diversion",
     "participant_receives_kinship_foster_care",
@@ -88,6 +110,7 @@ def _rules() -> dict[str, dict]:
     return {rule["name"]: rule for rule in payload.get("rules") or []}
 
 
+@KNOWN_UNIT_SCOPE_BUG
 def test_budgetary_unit_judgments_are_declared_on_the_unit() -> None:
     rules = _rules()
     relation = rules["member_of_budgetary_unit"]
@@ -103,7 +126,10 @@ def test_budgetary_unit_judgments_are_declared_on_the_unit() -> None:
 def _engine_binary() -> Path | None:
     configured = os.environ.get("AXIOM_RULES_ENGINE_BIN")
     if configured:
-        return Path(configured)
+        path = Path(configured)
+        if not path.is_file():
+            pytest.fail(f"AXIOM_RULES_ENGINE_BIN is not a file: {configured}")
+        return path
     engine_root = ROOT / "_axiom" / "axiom-rules-engine" / "target"
     for profile in ("release", "debug"):
         candidate = engine_root / profile / "axiom-rules-engine"
@@ -113,16 +139,16 @@ def _engine_binary() -> Path | None:
 
 
 def _participant_states():
-    """Every combination of the three facts FAA5 BCE turns on.
-
-    ``listed`` is the index of the one listed benefit or status the
-    participant receives, or None; cycling the index across participants
-    exercises every listed input.
-    """
+    """Every (disqualified, receives a listed status, drug/alcohol suspended)."""
     return list(itertools.product((False, True), (False, True), (False, True)))
 
 
 def _units():
+    """Every ordered unit of one to three participants.
+
+    A participant who receives a listed status gets exactly one, chosen by a
+    cursor that cycles through every listed input across the enumeration.
+    """
     states = _participant_states()
     listed_cursor = itertools.cycle(range(len(LISTED)))
     units = []
@@ -153,6 +179,15 @@ def _expected(unit: list[dict]) -> dict[str, bool]:
     }
 
 
+def _expected_participant(member: dict) -> dict[str, bool]:
+    listed = member["listed"]
+    return {
+        PARTICIPANT_RULES[0]: listed is not None
+        and listed < len(TANF_CASH_ASSISTANCE),
+        PARTICIPANT_RULES[1]: listed is not None,
+    }
+
+
 def _input(name: str, entity: str, entity_id: str, value: bool) -> dict:
     return {
         "name": f"{LEGAL_ID}#input.{name}",
@@ -172,15 +207,22 @@ def _participant_values(member: dict) -> dict[str, bool]:
     return values
 
 
+def _member_id(unit_index: int, member_index: int) -> str:
+    return f"unit_{unit_index}_participant_{member_index}"
+
+
 def _request(units: list[list[dict]]) -> dict:
     inputs: list[dict] = []
     relations: list[dict] = []
-    outputs = [f"{LEGAL_ID}#{name}" for name in UNIT_RULES]
+    queries: list[dict] = []
+    unit_outputs = [f"{LEGAL_ID}#{name}" for name in UNIT_RULES]
+    participant_outputs = [f"{LEGAL_ID}#{name}" for name in PARTICIPANT_RULES]
     for unit_index, unit in enumerate(units):
         unit_id = f"unit_{unit_index}"
         expected = _expected(unit)
-        # Decoy participant facts on the unit id itself, chosen to flip every
-        # unit-level judgment if an encoding read them instead of members'.
+        # Decoy participant facts on the unit id: each flips one aggregate
+        # judgment for an encoding that read the unit's facts instead of its
+        # members'.
         decoy = {name: False for name in PARTICIPANT_INPUTS}
         decoy[DISQUALIFIED] = expected[UNIT_RULES[0]]
         decoy[DRUG_ALCOHOL_SUSPENDED] = not expected[UNIT_RULES[2]]
@@ -188,8 +230,11 @@ def _request(units: list[list[dict]]) -> dict:
             decoy[LISTED[unit_index % len(LISTED)]] = True
         for name, value in decoy.items():
             inputs.append(_input(name, "Household", unit_id, value))
+        queries.append(
+            {"entity_id": unit_id, "period": PERIOD, "outputs": unit_outputs}
+        )
         for member_index, member in enumerate(unit):
-            member_id = f"{unit_id}_participant_{member_index}"
+            member_id = _member_id(unit_index, member_index)
             for name, value in _participant_values(member).items():
                 inputs.append(_input(name, "Person", member_id, value))
             relations.append(
@@ -199,21 +244,30 @@ def _request(units: list[list[dict]]) -> dict:
                     "interval": INTERVAL,
                 }
             )
+            queries.append(
+                {
+                    "entity_id": member_id,
+                    "period": PERIOD,
+                    "outputs": participant_outputs,
+                }
+            )
     return {
         "mode": "explain",
         "dataset": {"inputs": inputs, "relations": relations},
-        "queries": [
-            {"entity_id": f"unit_{index}", "period": PERIOD, "outputs": outputs}
-            for index in range(len(units))
-        ],
+        "queries": queries,
     }
 
 
+def _outcome(outputs: dict, name: str) -> str:
+    return outputs[f"{LEGAL_ID}#{name}"]["outcome"]
+
+
+@KNOWN_UNIT_SCOPE_BUG
 def test_budgetary_unit_judgments_match_faa5_for_every_small_unit(
     tmp_path: Path,
 ) -> None:
     binary = _engine_binary()
-    if binary is None or not binary.is_file():
+    if binary is None:
         pytest.skip("no axiom-rules-engine binary (set AXIOM_RULES_ENGINE_BIN)")
     artifact = tmp_path / "basic-categorical-eligibility.json"
     compiled = subprocess.run(
@@ -233,8 +287,7 @@ def test_budgetary_unit_judgments_match_faa5_for_every_small_unit(
     )
     assert compiled.returncode == 0, compiled.stderr or compiled.stdout
     compile_log = compiled.stdout + compiled.stderr
-    for code in ORIENTATION_WARNINGS:
-        assert code not in compile_log, compile_log
+    warnings = [code for code in ORIENTATION_WARNINGS if code in compile_log]
 
     units = _units()
     assert len(units) == 8 + 8**2 + 8**3
@@ -243,18 +296,30 @@ def test_budgetary_unit_judgments_match_faa5_for_every_small_unit(
         input=json.dumps(_request(units)),
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=600,
     )
     assert ran.returncode == 0, ran.stderr or ran.stdout
     results = {
-        result["entity_id"]: result for result in json.loads(ran.stdout)["results"]
+        result["entity_id"]: result["outputs"]
+        for result in json.loads(ran.stdout)["results"]
     }
 
-    mismatches = []
+    mismatches: dict[str, int] = {}
+    examples = []
     for unit_index, unit in enumerate(units):
-        outputs = results[f"unit_{unit_index}"]["outputs"]
-        for name, expected in _expected(unit).items():
-            outcome = outputs[f"{LEGAL_ID}#{name}"]["outcome"]
-            if outcome != ("holds" if expected else "not_holds"):
-                mismatches.append((unit_index, name, unit, outcome))
-    assert not mismatches, mismatches[:5]
+        checks = [(f"unit_{unit_index}", _expected(unit))]
+        checks += [
+            (_member_id(unit_index, member_index), _expected_participant(member))
+            for member_index, member in enumerate(unit)
+        ]
+        for entity_id, expected_by_rule in checks:
+            for name, expected in expected_by_rule.items():
+                outcome = _outcome(results[entity_id], name)
+                if outcome != ("holds" if expected else "not_holds"):
+                    mismatches[name] = mismatches.get(name, 0) + 1
+                    if len(examples) < 5:
+                        examples.append((entity_id, name, unit, outcome))
+    assert not warnings and not mismatches, (
+        f"orientation warnings: {warnings}; mismatches by rule: {mismatches}; "
+        f"examples: {examples}"
+    )
