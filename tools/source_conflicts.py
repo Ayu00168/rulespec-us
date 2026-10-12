@@ -610,7 +610,14 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
             if not (isinstance(name, str) and TEST_NAME_RE.fullmatch(name)):
                 issues.append(f"{t_label}.name must be a test function (optionally Class::function and [param]).")
                 name = None
-            _check_reading_ref(item.get("pins"), label=f"{t_label}.pins", alternatives=alternatives, issues=issues)
+            pins = item.get("pins")
+            if not (isinstance(pins, list) and pins):
+                issues.append(f"{t_label}.pins must be a non-empty list of `reading` or `alternatives[N]`.")
+            else:
+                for p_index, ref in enumerate(pins):
+                    _check_reading_ref(ref, label=f"{t_label}.pins[{p_index}]", alternatives=alternatives, issues=issues)
+                if len(set(map(str, pins))) != len(pins):
+                    issues.append(f"{t_label}.pins repeats a reading.")
             key = (item.get("repo"), path, name)
             if key in seen_tests and None not in key[1:]:
                 issues.append(f"{t_label} repeats {path}::{name}.")
@@ -622,9 +629,19 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
                 elif not test_exists(path, name, local.read_text(encoding="utf-8")):
                     issues.append(f"{t_label}.name {name} is not defined in {path}.")
 
-    if adopted or implementations:
-        if not any(isinstance(item, dict) and item.get("pins") == "reading" for item in tests or []):
-            issues.append(f"{label} has an adopter, so at least one test must pin `reading`.")
+    pinned = {
+        ref
+        for item in tests or []
+        if isinstance(item, dict) and isinstance(item.get("pins"), list)
+        for ref in item["pins"]
+        if isinstance(ref, str)
+    }
+    if adopted and "reading" not in pinned:
+        issues.append(f"{label} is adopted by a module, so at least one test must pin `reading`.")
+    for i_index, item in enumerate(implementations or []):
+        follows = item.get("follows") if isinstance(item, dict) else None
+        if isinstance(follows, str) and READING_REF_RE.fullmatch(follows) and follows not in pinned:
+            issues.append(f"{label}.implementations[{i_index}] follows {follows}, which no test pins.")
 
     if "money_case" in entry:
         money = entry["money_case"]

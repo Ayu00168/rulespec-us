@@ -110,14 +110,14 @@ def entry(**overrides):
                 "commit": COMMIT,
                 "path": "tests/test_g.py",
                 "name": "test__given_operational__then_pays",
-                "pins": "reading",
+                "pins": ["reading"],
             },
             {
                 "repo": "PolicyEngine/microcosm-dynamics",
                 "commit": COMMIT,
                 "path": "tests/test_g.py",
                 "name": "TestLiteral::test_refuses[child-ages-out]",
-                "pins": "alternatives[0]",
+                "pins": ["alternatives[0]"],
             },
         ],
         "money_case": {"description": "A survivor family after a child ages out.", "amount": "21.00", "currency": "USD", "period": "month"},
@@ -303,7 +303,7 @@ def test_outcome_enum(tmp_path):
 def test_reading_references(tmp_path):
     ctx = make_repo(tmp_path)
     bad = entry()
-    bad["tests"][1]["pins"] = "alternatives[3]"
+    bad["tests"][1]["pins"] = ["alternatives[3]"]
     bad["implementations"][0]["follows"] = "literal"
     issues = check(ctx, bad)
     assert any("names alternatives[3], which this entry does not have" in issue for issue in issues)
@@ -314,13 +314,34 @@ def test_reading_references(tmp_path):
         sc.reading_index("alternatives[01]")
 
 
-def test_adopter_requires_a_test_pinning_the_reading(tmp_path):
+def test_every_followed_reading_is_pinned(tmp_path):
+    ctx = make_repo(tmp_path)
     bad = entry()
-    bad["tests"] = [bad["tests"][1]]
-    assert any("at least one test must pin `reading`" in issue for issue in check(make_repo(tmp_path), bad))
+    bad["tests"] = [bad["tests"][0]]  # pins reading only; the implementation follows alternatives[0]
+    assert any("follows alternatives[0], which no test pins" in issue for issue in check(ctx, bad))
+    both = entry()
+    both["tests"] = [{**both["tests"][0], "pins": ["reading", "alternatives[0]"]}]
+    assert check(ctx, both) == []
     no_adopter = entry(tests=[entry()["tests"][1]])
     del no_adopter["implementations"]
-    assert check(make_repo(tmp_path), no_adopter) == []
+    assert check(ctx, no_adopter) == []
+
+
+def test_pins_shape(tmp_path):
+    ctx = make_repo(tmp_path)
+    for pins, fragment in (("reading", "non-empty list"), ([], "non-empty list"), (["reading", "reading"], "repeats a reading")):
+        bad = entry()
+        bad["tests"][0]["pins"] = pins
+        assert any(fragment in issue for issue in check(ctx, bad)), pins
+
+
+def test_module_adopter_requires_a_test_pinning_the_reading(tmp_path):
+    ctx = make_repo(tmp_path)
+    value = adopted_entry()
+    del value["implementations"]
+    value["tests"] = [value["tests"][1]]
+    write_module(ctx, "us/statutes/42/403/a/5.yaml", [sc.to_module_interpretation(value, interpretation_id=value["id"], affects=["rule_a"])])
+    assert any("adopted by a module, so at least one test must pin `reading`" in issue for issue in check(ctx, value))
 
 
 def test_external_refs_need_commits_and_not_this_repo(tmp_path):
@@ -350,8 +371,8 @@ def test_in_repo_tests_must_exist(tmp_path):
     (ctx.root / "tests" / "test_local.py").write_text("class TestX:\n    def test_y(self):\n        pass\n")
     good = entry()
     good["tests"] = [
-        {"path": "us/statutes/42/403/a/5.test.yaml", "name": "saving_clause_case", "pins": "reading"},
-        {"path": "tests/test_local.py", "name": "TestX::test_y", "pins": "alternatives[0]"},
+        {"path": "us/statutes/42/403/a/5.test.yaml", "name": "saving_clause_case", "pins": ["reading"]},
+        {"path": "tests/test_local.py", "name": "TestX::test_y", "pins": ["alternatives[0]"]},
     ]
     assert check(ctx, good) == []
     bad = copy.deepcopy(good)

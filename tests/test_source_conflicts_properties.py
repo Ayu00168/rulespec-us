@@ -143,9 +143,9 @@ def entries(draw, jurisdiction="us"):
             }
         ]
         value["tests"] = [
-            {"repo": "PolicyEngine/microcosm-dynamics", "commit": commit, "path": "tests/test_x.py", "name": "test_default", "pins": "reading"}
+            {"repo": "PolicyEngine/microcosm-dynamics", "commit": commit, "path": "tests/test_x.py", "name": "test_default", "pins": ["reading"]}
         ] + [
-            {"repo": "PolicyEngine/microcosm-dynamics", "commit": commit, "path": "tests/test_x.py", "name": f"test_alt_{i}", "pins": f"alternatives[{i}]"}
+            {"repo": "PolicyEngine/microcosm-dynamics", "commit": commit, "path": "tests/test_x.py", "name": f"test_alt_{i}", "pins": [f"alternatives[{i}]"]}
             for i in range(len(alts))
         ]
     if draw(st.booleans()):
@@ -216,7 +216,10 @@ def test_round_trip_and_drift(tmp_path, value, field):
     assume(value["texts"])
     module = "us/statutes/42/403.yaml"
     value["adopted_by"] = [{"module": module, "interpretation": value["id"]}]
-    value["tests"] = [{"path": "us/statutes/42/403.test.yaml", "name": "case", "pins": "reading"}]
+    # The module is the only adopter here; an implementation following an
+    # alternative would need its own pinning test.
+    value.pop("implementations", None)
+    value["tests"] = [{"path": "us/statutes/42/403.test.yaml", "name": "case", "pins": ["reading"]}]
     carried = sc.to_module_interpretation(value, interpretation_id=value["id"], affects=["rule_a"])
     assert sc.interpretation_core(carried) == sc.interpretation_core(value)
     path = ctx.root / module
