@@ -25,8 +25,10 @@ Three commands:
   tests/test_source_conflicts.py): the schema, the status rules, public-repo
   hygiene, and every reference into this checkout: adopting modules carry the
   entry verbatim as a `module.interpretations` entry whose `affects` names
-  real rules, in-repo tests exist, and every module interpretation whose
-  texts cite two or more provisions (provisions in tension) is registered.
+  real rules, in-repo tests exist, and every ruled, confirmed or
+  contradicted module interpretation whose texts cite two or more provisions
+  (provisions in tension) is registered; an unregistered open one is a
+  warning, listed by the workflow.
 - `verify` (network; the source-conflicts workflow): every `texts` excerpt is
   verbatim at its citation in the pinned corpus release, and every
   `pending_texts` excerpt is verbatim in its pinned snapshot, both judged by
@@ -711,12 +713,22 @@ def registered_pairs(payload: Any) -> set[tuple[str, str]]:
     return pairs
 
 
-def unregistered_tensions(root: Path, payload: Any) -> list[str]:
-    """Module interpretations whose texts cite two or more provisions but are
-    not registered. Two provisions in tension are a source disagreement."""
+def unregistered_tensions(root: Path, payload: Any) -> tuple[list[str], list[str]]:
+    """(failures, warnings) for module interpretations whose texts cite two or
+    more provisions but which no entry adopts. Two provisions in tension are a
+    source disagreement.
+
+    A ruled, confirmed or contradicted interpretation fails: it comes from a
+    human ruling or a publisher's reply, which is when its register entry is
+    written. An open one only warns: signed encoder re-encodes carry the module
+    and its manifest alone, and may emit open interpretations, so failing on
+    them would block every such re-encode until someone added an entry by hand.
+    The source-conflicts workflow lists open ones in a tracking issue.
+    """
 
     pairs = registered_pairs(payload)
-    issues: list[str] = []
+    failures: list[str] = []
+    warnings: list[str] = []
     for path in iter_module_files(root):
         found = module_interpretations(path)
         if found is None:
@@ -731,11 +743,13 @@ def unregistered_tensions(root: Path, payload: Any) -> list[str]:
             } if isinstance(texts, list) else set()
             interp = item.get("id")
             if len(citations) >= 2 and (module, interp) not in pairs:
-                issues.append(
-                    f"{module}#{interp} records provisions in tension ({', '.join(sorted(citations))}) "
-                    f"but is not in {REGISTER_FILENAME}; add an entry whose adopted_by names it."
+                message = (
+                    f"{module}#{interp} ({item.get('status')}) records provisions in tension "
+                    f"({', '.join(sorted(citations))}) but is not in {REGISTER_FILENAME}; "
+                    "add an entry whose adopted_by names it."
                 )
-    return issues
+                (warnings if item.get("status") == "open" else failures).append(message)
+    return failures, warnings
 
 
 def check_register(payload: Any, ctx: RepoContext, *, scan_modules: bool = True) -> list[str]:
@@ -761,7 +775,7 @@ def check_register(payload: Any, ctx: RepoContext, *, scan_modules: bool = True)
             seen.setdefault(entry["id"], index)
     issues.extend(hygiene_issues(payload))
     if scan_modules:
-        issues.extend(unregistered_tensions(ctx.root, payload))
+        issues.extend(unregistered_tensions(ctx.root, payload)[0])
     return issues
 
 
@@ -1088,6 +1102,7 @@ def main(argv: list[str] | None = None) -> int:
     check = sub.add_parser("check", help="offline schema and in-repo reference checks")
     check.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     check.add_argument("--repo", default=f"{ORGANISATION}/rulespec-us")
+    check.add_argument("--warnings-file", type=Path, help="also write unregistered open interpretations here, one per line")
     verify = sub.add_parser("verify", help="network checks: excerpts, snapshots, external refs")
     verify.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     verify.add_argument("--corpus-path", type=Path, help="axiom-corpus checkout holding the pinned release")
@@ -1106,10 +1121,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"source-conflicts: {exc}", file=sys.stderr)
             return 1
         issues = check_register(payload, RepoContext(root=args.root, repo=args.repo))
+        warnings = unregistered_tensions(args.root, payload)[1] if isinstance(payload, dict) else []
         for issue in issues:
             print(f"- {issue}", file=sys.stderr)
-        count = len((payload or {}).get("entries") or [])
-        print(f"{REGISTER_FILENAME}: {count} entr{'y' if count == 1 else 'ies'}, {len(issues)} issue(s).")
+        for warning in warnings:
+            print(f"warning: {warning}")
+        if args.warnings_file is not None:
+            args.warnings_file.write_text("".join(f"{warning}\n" for warning in warnings))
+        count = len((payload or {}).get("entries") or []) if isinstance(payload, dict) else 0
+        print(
+            f"{REGISTER_FILENAME}: {count} entr{'y' if count == 1 else 'ies'}, {len(issues)} issue(s), "
+            f"{len(warnings)} unregistered open interpretation(s)."
+        )
         return 1 if issues else 0
 
     if args.command == "verify":

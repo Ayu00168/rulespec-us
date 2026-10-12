@@ -132,9 +132,13 @@ of these:
 - an in-repo test that does not exist;
 - a followed reading that no test pins, or a module adopter whose `reading`
   no test pins;
-- a module interpretation whose texts cite two or more provisions but which no
-  entry adopts. Provisions in tension are a source disagreement, so they belong
-  in the register.
+- a ruled, confirmed or contradicted module interpretation whose texts cite
+  two or more provisions but which no entry adopts. Provisions in tension are
+  a source disagreement, so they belong in the register. An unregistered `open`
+  one is only a warning, because signed encoder re-encodes carry the module and
+  its manifest alone and may emit open interpretations. The `source-conflicts`
+  workflow lists those warnings in a tracking issue. Its entry is written when
+  a ruling or a publisher's reply arrives.
 
 `tools/source_conflicts.py verify` needs the network and runs in the
 `source-conflicts` workflow on pull requests touching the register, on pushes

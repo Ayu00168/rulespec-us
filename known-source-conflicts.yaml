@@ -12,8 +12,9 @@
 #
 # tools/source_conflicts.py check (in the Repository Checks pytest leg)
 # fails on a malformed entry, a broken in-repo reference, an adopting module
-# that does not carry the entry unchanged, or a module interpretation whose
-# texts cite two or more provisions without an entry here.
+# that does not carry the entry unchanged, or a ruled, confirmed or
+# contradicted module interpretation whose texts cite two or more provisions
+# without an entry here (an unregistered open one is listed as a warning).
 # tools/source_conflicts.py verify (the source-conflicts workflow) checks
 # every excerpt verbatim: texts against the pinned corpus release,
 # pending_texts against their pinned snapshots. Field reference:

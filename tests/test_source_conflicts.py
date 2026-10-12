@@ -50,7 +50,7 @@ def test_committed_register_passes_check() -> None:
 
 def test_committed_register_cli_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     assert sc.main(["check", "--root", str(REPO_ROOT)]) == 0
-    assert "0 issue(s)" in capsys.readouterr().out
+    assert "0 issue(s), 0 unregistered open interpretation(s)" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -472,10 +472,9 @@ def test_adopted_by_paths_and_pending_texts(tmp_path):
     assert any("must be a RuleSpec module path" in issue for issue in check(ctx, test_file))
 
 
-def test_unregistered_tension_is_reported(tmp_path):
-    ctx = make_repo(tmp_path)
-    tension = {
-        "id": "two-provisions",
+def tension(status="open", interpretation_id="two-provisions"):
+    value = {
+        "id": interpretation_id,
         "question": "q",
         "texts": [
             {"corpus_citation_path": "us/statute/42/403/a/5", "excerpt": "x"},
@@ -484,14 +483,41 @@ def test_unregistered_tension_is_reported(tmp_path):
         "reading": "r",
         "alternatives": [{"reading": "s"}],
         "basis": "b",
-        "status": "open",
+        "status": status,
         "affects": ["rule_a"],
     }
-    single = {**tension, "id": "one-provision", "texts": tension["texts"][:1]}
-    write_module(ctx, "us/statutes/42/403/a/5.yaml", [tension, single])
+    if status != "open":
+        value["ruling"] = {"by": "Axiom Foundation", "date": "2026-10-12", "record": "https://github.com/x/y/pull/1"}
+    return value
+
+
+def test_unregistered_open_tension_only_warns(tmp_path):
+    ctx = make_repo(tmp_path)
+    single = {**tension(), "id": "one-provision", "texts": tension()["texts"][:1]}
+    write_module(ctx, "us/statutes/42/403/a/5.yaml", [tension(), single])
+    assert check(ctx) == []
+    failures, warnings = sc.unregistered_tensions(ctx.root, {"version": 1, "entries": []})
+    assert failures == []
+    assert len(warnings) == 1 and "two-provisions (open) records provisions in tension" in warnings[0]
+
+
+@pytest.mark.parametrize("status", ["ruled", "confirmed", "contradicted"])
+def test_unregistered_decided_tension_fails(tmp_path, status):
+    ctx = make_repo(tmp_path)
+    write_module(ctx, "us/statutes/42/403/a/5.yaml", [tension(status)])
     issues = check(ctx)
-    assert len(issues) == 1 and "two-provisions records provisions in tension" in issues[0]
+    assert len(issues) == 1 and f"two-provisions ({status}) records provisions in tension" in issues[0]
     assert check(ctx, scan=False) == []
+
+
+def test_check_cli_writes_warnings(tmp_path, capsys):
+    ctx = make_repo(tmp_path)
+    write_module(ctx, "us/statutes/42/403/a/5.yaml", [tension()])
+    (ctx.root / sc.REGISTER_FILENAME).write_text("version: 1\nentries: []\n")
+    out = tmp_path / "warnings.txt"
+    assert sc.main(["check", "--root", str(ctx.root), "--warnings-file", str(out)]) == 0
+    assert out.read_text().count("\n") == 1 and "two-provisions (open)" in out.read_text()
+    assert "1 unregistered open interpretation(s)" in capsys.readouterr().out
 
 
 def test_registered_tension_is_not_reported(tmp_path):
