@@ -718,9 +718,10 @@ entries:
     pins:
     - alternatives[0]
   money_case:
-    description: November $1,500.00; December COLA raises the total to $1,537.40; in January an age-reduced
-      spouse joins and the total falls to $1,477.60. SSA's reading pays January at $1,477.60; the literal
-      reading would hold it at $1,537.40 (the reference refuses instead of computing the raise).
-    amount: '59.80'
+    description: November total $1,500.00; the PIA rises for December (a COLA), so November is the protected
+      month; in January an age-reduced spouse joins and the total falls to $1,477.60. SSA's reading pays
+      January at $1,477.60; the literal reading raises January to November's $1,500.00 (the reference
+      refuses that month instead of computing the raise).
+    amount: '22.40'
     currency: USD
     period: month
