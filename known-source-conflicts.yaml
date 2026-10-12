@@ -1,0 +1,26 @@
+# Source conflicts: places where a jurisdiction's sources disagree (statute
+# against regulation, regulation against an agency manual, one manual
+# section against another), the readings each side supports, and the
+# reading adopted.
+#
+# Each entry's interpretation core (question, texts, reading, alternatives,
+# basis, status, ruling, confirmation) has the field names and status rules
+# of a RuleSpec module.interpretations v1 entry, so it moves into a module
+# unchanged when the provision is encoded; the module then lists it here
+# under adopted_by as a (module path, interpretation id) pair. The global id
+# of an entry is "<jurisdiction>:<id>"; code outside RuleSpec cites that.
+#
+# tools/source_conflicts.py check (in the Repository Checks pytest leg)
+# fails on a malformed entry, a broken in-repo reference, an adopting module
+# that does not carry the entry unchanged, or a module interpretation whose
+# texts cite two or more provisions without an entry here.
+# tools/source_conflicts.py verify (the source-conflicts workflow) checks
+# every excerpt verbatim: texts against the pinned corpus release,
+# pending_texts against their pinned snapshots. Field reference:
+# tools/README.md, "Source-conflict register".
+#
+# The register is public: no people's names, decision-queue ids, session
+# ids, local paths or email addresses. ruling.by is an organisation and
+# ruling.record a public PR, issue or comment.
+version: 1
+entries: []
