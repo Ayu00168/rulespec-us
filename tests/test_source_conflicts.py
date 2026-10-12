@@ -678,6 +678,22 @@ def test_aggregate_rows_and_collisions():
     assert "21.00 USD/month" in markdown
 
 
+def test_citation_label():
+    assert sc.citation_label("us/statute/42/403/f/1") == "42 U.S.C. 403(f)(1)"
+    assert sc.citation_label("us/statute/26/25A") == "26 U.S.C. 25A"
+    assert sc.citation_label("us/regulation/20/404/435") == "20 CFR 404.435"
+    assert sc.citation_label("us/regulation/7/273/24/a") == "7 CFR 273.24(a)"
+    assert sc.citation_label("uk-babergh/manual/scheme/page-87") == "uk-babergh/manual/scheme/page-87"
+    assert sc.citation_label("us/statute/hts/chapter-99") == "us/statute/hts/chapter-99"
+
+
+def test_aggregate_sources_are_unique_citations():
+    value = entry()
+    value["pending_texts"].append(dict(value["pending_texts"][0]))
+    rows, _ = sc.aggregate({"TheAxiomFoundation/rulespec-us": {"entries": [value]}})
+    assert rows[0]["sources"] == ["42 U.S.C. 403(a)(5)", "POMS RS 00630.400"]
+
+
 def test_aggregate_cli_with_local_registers(tmp_path, capsys):
     path = tmp_path / "r.yaml"
     path.write_text(yaml.safe_dump({"version": 1, "entries": [entry()]}))

@@ -949,6 +949,22 @@ def repo_jurisdiction_ok(repo: str, jurisdiction: str) -> bool:
     return jurisdiction == country or jurisdiction.startswith(f"{country}-")
 
 
+def citation_label(path: Any) -> Any:
+    """A reader's citation for a US Code or CFR corpus path; others unchanged.
+
+    us/statute/42/403/f/1 -> 42 U.S.C. 403(f)(1); us/regulation/20/404/435 -> 20 CFR 404.435.
+    """
+
+    if not isinstance(path, str):
+        return path
+    parts = path.split("/")
+    if len(parts) >= 4 and parts[0] == "us" and parts[1] == "statute" and parts[2].isdigit():
+        return f"{parts[2]} U.S.C. {parts[3]}" + "".join(f"({part})" for part in parts[4:])
+    if len(parts) >= 5 and parts[0] == "us" and parts[1] == "regulation" and parts[2].isdigit():
+        return f"{parts[2]} CFR {parts[3]}.{parts[4]}" + "".join(f"({part})" for part in parts[5:])
+    return path
+
+
 def aggregate(registers: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     """One row per entry across repositories; issues for collisions."""
 
@@ -980,8 +996,12 @@ def aggregate(registers: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[
                     "outcome": entry.get("outcome"),
                     "reading": entry.get("reading"),
                     "alternatives": [alt.get("reading") for alt in entry.get("alternatives") or [] if isinstance(alt, dict)],
-                    "sources": [text.get("corpus_citation_path") for text in texts if isinstance(text, dict)]
-                    + [item.get("citation") for item in pending if isinstance(item, dict)],
+                    "sources": list(
+                        dict.fromkeys(
+                            [citation_label(text.get("corpus_citation_path")) for text in texts if isinstance(text, dict)]
+                            + [item.get("citation") for item in pending if isinstance(item, dict)]
+                        )
+                    ),
                     "ruling": entry.get("ruling"),
                     "adopted_by": entry.get("adopted_by") or [],
                     "implementations": [
