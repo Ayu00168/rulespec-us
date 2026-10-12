@@ -86,6 +86,10 @@ TEST_NAME_RE = re.compile(
     r"(?P<scope>[A-Za-z_][A-Za-z0-9_]*::)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
     r"(?P<param>\[[^\]\n]+\])?"
 )
+INLINE_TAG_RE = re.compile(
+    r"(?i)</?(?:a|abbr|b|bdi|bdo|cite|code|data|dfn|e|em|font|fr|i|kbd|mark|q|s|samp"
+    r"|small|span|strong|su|sub|sup|time|u|var|wbr)\b[^>]*>"
+)
 PERIODS = ("once", "week", "month", "year")
 STATUSES = ("open", "ruled", "confirmed", "contradicted")
 OUTCOMES = ("computed", "refused")
@@ -648,24 +652,33 @@ def _check_adopting_module(entry: Mapping[str, Any], *, module: str, interpretat
     matches = [item for item in entries if item.get("id") == interpretation]
     if not matches:
         return [f"{label}: {module} has no module.interpretations entry `{interpretation}`."]
-    issues: list[str] = []
     carried = matches[0]
-    unknown = set(carried) - MODULE_INTERPRETATION_KEYS
-    if unknown:
-        issues.append(f"{label}: {module}#{interpretation} has keys a module interpretation cannot carry: {sorted(unknown)}.")
+    issues = check_module_interpretation(carried, rule_names=rule_names, label=f"{label}: {module}#{interpretation}")
     for name in INTERPRETATION_CORE:
         if carried.get(name) != entry.get(name):
             issues.append(
                 f"{label}: {module}#{interpretation} `{name}` differs from the register entry; "
                 "the module must carry the entry unchanged."
             )
-    affects = carried.get("affects")
-    if not (isinstance(affects, list) and affects):
-        issues.append(f"{label}: {module}#{interpretation} must name the rules it affects.")
-    else:
-        for name in affects:
-            if name not in rule_names:
-                issues.append(f"{label}: {module}#{interpretation} affects `{name}`, which is not a rule in {module}.")
+    return issues
+
+
+def check_module_interpretation(item: Any, *, rule_names: set[str], label: str) -> list[str]:
+    """One module.interpretations v1 entry, by the rules axiom-encode applies
+    (tests/test_source_conflicts_properties.py checks the two agree)."""
+
+    issues: list[str] = []
+    if not _mapping(item, label=label, allowed=MODULE_INTERPRETATION_KEYS, issues=issues):
+        return issues
+    interpretation_id = item.get("id")
+    if _string(interpretation_id, label=f"{label}.id", issues=issues) and KEBAB_RE.fullmatch(interpretation_id) is None:
+        issues.append(f"{label}.id must match [a-z0-9]+(-[a-z0-9]+)*.")
+    issues.extend(check_interpretation_core(item, label=label, require_texts=True))
+    affects = item.get("affects")
+    if _nonempty_list(affects, label=f"{label}.affects", issues=issues):
+        for index, name in enumerate(affects):
+            if _string(name, label=f"{label}.affects[{index}]", issues=issues) and name not in rule_names:
+                issues.append(f"{label} affects `{name}`, which is not a rule in this module.")
     return issues
 
 
@@ -769,6 +782,10 @@ def snapshot_text(data: bytes, path: str) -> str:
     text = data.decode("utf-8")
     if path.endswith((".html", ".htm", ".xml")):
         text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", text)
+        # Inline markup sits inside words and sentences ("exception<b>'s</b>",
+        # eCFR's <E T="03">), so it goes without a trace; any other tag ends a
+        # block and becomes a space.
+        text = INLINE_TAG_RE.sub("", text)
         text = re.sub(r"<[^>]+>", " ", text)
         text = html.unescape(text)
     elif not path.endswith((".txt", ".md")):
