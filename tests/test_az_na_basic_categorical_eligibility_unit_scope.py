@@ -24,9 +24,15 @@ checks every budgetary unit of one to three participants against the FAA5
 text with tuples in declared order. Each unit id also carries decoy
 participant facts that flip each of the three aggregate judgments (and BCE
 whenever it should hold), so an encoding that read the unit's own facts
-instead of its members' fails too. Both contracts are expected failures until
-the signed repair tracked in rulespec-us#1440 lands; strict mode makes that
-repair fail CI until it removes the markers.
+instead of its members' fails too.
+
+Until the signed repair tracked in rulespec-us#1440 lands, both contracts are
+strict expected failures that cover only ``KnownUnitScopeBug``, which is
+raised only while the module still declares a unit judgment on ``Person``.
+Everything else fails normally: a missing or renamed rule or input, an engine
+that cannot be found in CI, a compile or run error, and any mismatch once the
+declarations are repaired. Strict mode makes the repair fail CI until it
+removes the markers.
 """
 
 from __future__ import annotations
@@ -34,6 +40,8 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -51,7 +59,12 @@ LEGAL_ID = (
     "basic-categorical-eligibility"
 )
 
+class KnownUnitScopeBug(Exception):
+    """The documented rulespec-us#1440 failure: unit judgments on Person."""
+
+
 KNOWN_UNIT_SCOPE_BUG = pytest.mark.xfail(
+    raises=KnownUnitScopeBug,
     strict=True,
     reason=(
         "rulespec-us#1440: the unit judgments are declared on Person; "
@@ -77,8 +90,8 @@ DRUG_ALCOHOL_SUSPENDED = (
 )
 # Each listed benefit or status, one input per FAA5 bullet or sub-bullet. The
 # first three make up "TANF CA Benefits". A repair that renames or merges any
-# of these inputs, or renames a rule above, fails loudly (KeyError or an
-# engine error) rather than passing; update these tables with it.
+# of these inputs, or renames a rule above, fails the interface check as an
+# ordinary failure, never an expected one; update these tables with it.
 TANF_CASH_ASSISTANCE = (
     "participant_receives_tanf_cash_assistance_benefit",
     "participant_is_cash_assistance_eligible_but_no_cash_assistance_benefit_is_paid",
@@ -110,17 +123,45 @@ def _rules() -> dict[str, dict]:
     return {rule["name"]: rule for rule in payload.get("rules") or []}
 
 
-@KNOWN_UNIT_SCOPE_BUG
-def test_budgetary_unit_judgments_are_declared_on_the_unit() -> None:
-    rules = _rules()
-    relation = rules["member_of_budgetary_unit"]
+def _formula_identifiers(rules: dict[str, dict]) -> set[str]:
+    names: set[str] = set()
+    for rule in rules.values():
+        for version in rule.get("versions") or []:
+            names.update(re.findall(r"[a-z_][a-z0-9_]*", str(version.get("formula"))))
+    return names
+
+
+def _check_interface(rules: dict[str, dict]) -> None:
+    """Fail normally (never as the expected failure) on interface drift."""
+    relation = rules.get("member_of_budgetary_unit")
+    assert relation is not None, "member_of_budgetary_unit relation is missing"
     assert relation["kind"] == "data_relation"
     assert relation["data_relation"]["arity"] == 2
     assert list(relation["data_relation"]["arguments"]) == ["Person", "Household"]
-    for name in UNIT_RULES:
-        assert rules[name].get("entity") == "Household", name
+    missing_rules = [
+        name for name in (*UNIT_RULES, *PARTICIPANT_RULES) if name not in rules
+    ]
+    assert not missing_rules, f"renamed or removed rules: {missing_rules}"
     for name in PARTICIPANT_RULES:
         assert rules[name].get("entity") == "Person", name
+    identifiers = _formula_identifiers(rules)
+    missing_inputs = [name for name in PARTICIPANT_INPUTS if name not in identifiers]
+    assert not missing_inputs, f"renamed or merged inputs: {missing_inputs}"
+
+
+def _raise_if_known_scope_bug(rules: dict[str, dict], detail: str) -> None:
+    on_person = [name for name in UNIT_RULES if rules[name].get("entity") == "Person"]
+    if on_person:
+        raise KnownUnitScopeBug(f"declared on Person: {on_person}; {detail}")
+
+
+@KNOWN_UNIT_SCOPE_BUG
+def test_budgetary_unit_judgments_are_declared_on_the_unit() -> None:
+    rules = _rules()
+    _check_interface(rules)
+    _raise_if_known_scope_bug(rules, "static declaration check")
+    for name in UNIT_RULES:
+        assert rules[name].get("entity") == "Household", name
 
 
 def _engine_binary() -> Path | None:
@@ -130,11 +171,26 @@ def _engine_binary() -> Path | None:
         if not path.is_file():
             pytest.fail(f"AXIOM_RULES_ENGINE_BIN is not a file: {configured}")
         return path
-    engine_root = ROOT / "_axiom" / "axiom-rules-engine" / "target"
-    for profile in ("release", "debug"):
-        candidate = engine_root / profile / "axiom-rules-engine"
-        if candidate.is_file():
-            return candidate
+    on_path = shutil.which("axiom-rules-engine")
+    if on_path:
+        return Path(on_path)
+    # The validate workflow builds the pinned engine under
+    # AXIOM_DEPENDENCY_ROOT and links it beside the checkout; older layouts
+    # used _axiom/ inside the checkout.
+    engine_roots = [
+        ROOT / "_axiom" / "axiom-rules-engine",
+        ROOT.parent / "axiom-rules-engine",
+    ]
+    dependency_root = os.environ.get("AXIOM_DEPENDENCY_ROOT")
+    if dependency_root:
+        engine_roots.insert(0, Path(dependency_root) / "axiom-rules-engine")
+    for engine_root in engine_roots:
+        for profile in ("release", "debug"):
+            candidate = engine_root / "target" / profile / "axiom-rules-engine"
+            if candidate.is_file():
+                return candidate
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        pytest.fail("no axiom-rules-engine binary found in CI; the contract must run")
     return None
 
 
@@ -266,6 +322,8 @@ def _outcome(outputs: dict, name: str) -> str:
 def test_budgetary_unit_judgments_match_faa5_for_every_small_unit(
     tmp_path: Path,
 ) -> None:
+    rules = _rules()
+    _check_interface(rules)
     binary = _engine_binary()
     if binary is None:
         pytest.skip("no axiom-rules-engine binary (set AXIOM_RULES_ENGINE_BIN)")
@@ -319,7 +377,10 @@ def test_budgetary_unit_judgments_match_faa5_for_every_small_unit(
                     mismatches[name] = mismatches.get(name, 0) + 1
                     if len(examples) < 5:
                         examples.append((entity_id, name, unit, outcome))
-    assert not warnings and not mismatches, (
+    detail = (
         f"orientation warnings: {warnings}; mismatches by rule: {mismatches}; "
         f"examples: {examples}"
     )
+    if warnings or mismatches:
+        _raise_if_known_scope_bug(rules, detail)
+    assert not warnings and not mismatches, detail
