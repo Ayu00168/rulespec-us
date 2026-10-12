@@ -28,11 +28,12 @@ instead of its members' fails too.
 
 Until the signed repair tracked in rulespec-us#1440 lands, both contracts are
 strict expected failures that cover only ``KnownUnitScopeBug``, which is
-raised only while the module still declares a unit judgment on ``Person``.
-Everything else fails normally: a missing or renamed rule or input, an engine
-that cannot be found in CI, a compile or run error, and any mismatch once the
-declarations are repaired. Strict mode makes the repair fail CI until it
-removes the markers.
+raised only while the module still declares a unit judgment on ``Person``
+(and, in the executable contract, only while every per-participant judgment is
+right). Everything else fails normally: a missing or renamed rule or input, an
+engine that cannot be found in CI, a compile or run error, a wrong
+per-participant judgment, and any mismatch once the declarations are
+repaired. Strict mode makes the repair fail CI until it removes the markers.
 """
 
 from __future__ import annotations
@@ -171,20 +172,29 @@ def _engine_binary() -> Path | None:
         if not path.is_file():
             pytest.fail(f"AXIOM_RULES_ENGINE_BIN is not a file: {configured}")
         return path
+    # The validate workflow builds the pinned engine under
+    # AXIOM_DEPENDENCY_ROOT, puts it on PATH and links it beside the
+    # checkout; older layouts used _axiom/ inside the checkout. The pinned
+    # build is preferred over whatever else is on PATH.
+    dependency_root = os.environ.get("AXIOM_DEPENDENCY_ROOT")
+    if dependency_root:
+        for profile in ("release", "debug"):
+            candidate = (
+                Path(dependency_root)
+                / "axiom-rules-engine"
+                / "target"
+                / profile
+                / "axiom-rules-engine"
+            )
+            if candidate.is_file():
+                return candidate
     on_path = shutil.which("axiom-rules-engine")
     if on_path:
         return Path(on_path)
-    # The validate workflow builds the pinned engine under
-    # AXIOM_DEPENDENCY_ROOT and links it beside the checkout; older layouts
-    # used _axiom/ inside the checkout.
-    engine_roots = [
-        ROOT / "_axiom" / "axiom-rules-engine",
+    for engine_root in (
         ROOT.parent / "axiom-rules-engine",
-    ]
-    dependency_root = os.environ.get("AXIOM_DEPENDENCY_ROOT")
-    if dependency_root:
-        engine_roots.insert(0, Path(dependency_root) / "axiom-rules-engine")
-    for engine_root in engine_roots:
+        ROOT / "_axiom" / "axiom-rules-engine",
+    ):
         for profile in ("release", "debug"):
             candidate = engine_root / "target" / profile / "axiom-rules-engine"
             if candidate.is_file():
@@ -343,7 +353,9 @@ def test_budgetary_unit_judgments_match_faa5_for_every_small_unit(
         text=True,
         timeout=120,
     )
-    assert compiled.returncode == 0, compiled.stderr or compiled.stdout
+    assert compiled.returncode == 0, (
+        f"{binary}: {compiled.stderr or compiled.stdout}"
+    )
     compile_log = compiled.stdout + compiled.stderr
     warnings = [code for code in ORIENTATION_WARNINGS if code in compile_log]
 
@@ -356,7 +368,7 @@ def test_budgetary_unit_judgments_match_faa5_for_every_small_unit(
         text=True,
         timeout=600,
     )
-    assert ran.returncode == 0, ran.stderr or ran.stdout
+    assert ran.returncode == 0, f"{binary}: {ran.stderr or ran.stdout}"
     results = {
         result["entity_id"]: result["outputs"]
         for result in json.loads(ran.stdout)["results"]
@@ -378,9 +390,14 @@ def test_budgetary_unit_judgments_match_faa5_for_every_small_unit(
                     if len(examples) < 5:
                         examples.append((entity_id, name, unit, outcome))
     detail = (
-        f"orientation warnings: {warnings}; mismatches by rule: {mismatches}; "
-        f"examples: {examples}"
+        f"engine {binary}; orientation warnings: {warnings}; "
+        f"mismatches by rule: {mismatches}; examples: {examples}"
     )
-    if warnings or mismatches:
+    # Per-participant judgments do not depend on the unit declaration, so a
+    # mismatch there is never the documented scope bug.
+    participant_mismatches = {
+        name: count for name, count in mismatches.items() if name in PARTICIPANT_RULES
+    }
+    if (warnings or mismatches) and not participant_mismatches:
         _raise_if_known_scope_bug(rules, detail)
     assert not warnings and not mismatches, detail
