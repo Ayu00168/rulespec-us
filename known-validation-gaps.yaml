@@ -2701,6 +2701,11 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:5b8e0003d0a6063b9b7c800fae244bb95daeddfcd1ed48a288c1d667b59b4a9d"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
   "us-ny/statutes/NYC/11-1706.yaml":
     active:
       fingerprint: "sha256:194b38dbe26ffe48a8b30ab2c630effd4199c03cd44f09eaf801c8f40b3e4fde"
@@ -3379,6 +3384,11 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:9fed3ffe759bab5d31f4fafc1f36ebbf87add896aa362b17bf8e6365f90f3085"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
   "us-tn/regulations/1240-01/14/09/block-1.yaml":
     active:
       fingerprint: "sha256:c1dbccc62213d4a54a2b4721aa7358c38f19f9de7c5ddbab6ec06caa0f2cd219"
@@ -4033,9 +4043,19 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:aef37b20677d59b800f61c0797b2485c36f654adfbddd1059c9bc76c2f0727f4"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
   "us-ca/policies/cdss/calworks/monthly-aid-payment.yaml":
     active:
       fingerprint: "sha256:b664307194e918f742cd969c0b1f4d3eb09239a26e754abdb204e6a5caf1211b"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:6433ecf90f72a21829c619818d96766a003a7442adb4f1a48d6bbb018040b6d3"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -5059,6 +5079,11 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:3cf71b1613acb77d57001ca410250582ec64ad1b1180cbce49906b1b4bff621f"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
   "us-ks/policies/cms/kansas-chip-eligibility.yaml":
     active:
       fingerprint: "sha256:e2f6a6925c1d4439954aaf49a3321d2a00488c8d12ea68dd9e46822689e23464"
@@ -5215,6 +5240,11 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:a962fe058b7f622c30e975a5a79d2ee5ca6b2883fb1533a0d24d7fd2b43a0ffc"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
   "us-md/policies/dhs/fia/snap/fy-2026-benefit-calculation.yaml":
     active:
       fingerprint: "sha256:d304b5c5000f6feb5ff882ec8e043442e856e4d0d6c28be32a51693567ff1952"
@@ -5257,6 +5287,11 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:421dcad2e0b8b3af2f81002da0c2a5fb8093f95f09dcf66f6f1dd81c966abb3f"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
   "us-me/regulations/dhhs/ofi/chapter-331/tanf-rule-125a/maximum-benefit-and-standard-of-need.yaml":
     active:
       fingerprint: "sha256:c1df05aa7db661db299212a243d6a7d689d23139d2e1b8b56b7832f6edddf5e3"
@@ -5266,6 +5301,11 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
   "us-me/statutes/36/5111.yaml":
     active:
       fingerprint: "sha256:7311339cc52590ed4b412cc131c7189722009e9fb06434c0fb0de46e26e89ad2"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:b8f07e6522c3a0512b634831da0c76206ef7ffc1f7673b800a4dfecad8bd89ec"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -9571,6 +9611,11 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:b91aabd77b34eb07d26ff59fb2808f06f6eaf15caa3295eb05302d7db3667ec6"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
   "us-ks/policies/income_tax/pilot_liability_pipeline.yaml":
     active:
       fingerprint: "sha256:eaa003d7fd0f460537864150cc21b24216af3e3356111460202f7082d648fb87"
@@ -9715,6 +9760,11 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:874a554ba502371bc6199f24eeaac78cee9fcbe030ef03dc9930c1c784078f48"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
   "us-or/policies/income_tax/resident_core_liability_pipeline.yaml":
     active:
       fingerprint: "sha256:63a781addf33e5675044871da2094ac7387d02b6b71c86d417e1bc2280b9aa96"
@@ -9787,9 +9837,19 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:4c5c172e043ca2a4a95e95cbe0346202396e0f336d49e4685b4fbdeed1780c94"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
   "us-wv/policies/income_tax/resident_core_liability_pipeline.yaml":
     active:
       fingerprint: "sha256:1926007a1e4fcf0415fd4758d3c228ffa4ac6070d2738fd57ec9afc65bc2abef"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:e0e36133f814062e247f93a0e4efc09d177704999a4157f5fa61d50d818cb81d"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
