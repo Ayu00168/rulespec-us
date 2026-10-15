@@ -756,3 +756,18 @@ def test_local_runner_toolchain_status_handles_missing_checkouts(
 
     assert not ok
     assert any("unavailable" in check for check in checks)
+
+
+def test_doctor_reports_retired_signing_before_any_probe(monkeypatch, capsys) -> None:
+    def broken_probe(*_args, **_kwargs):
+        raise FileNotFoundError("encoder cannot launch")
+
+    monkeypatch.setattr(_local_drain, "run", broken_probe)
+    monkeypatch.setattr(_local_drain, "pinned_toolchain", broken_probe)
+
+    with pytest.raises(FileNotFoundError):
+        _local_drain.cmd_doctor(None)
+
+    out = capsys.readouterr().out
+    assert "local apply signing" in out
+    assert "targeted-signed-reencode" in out

@@ -943,6 +943,14 @@ def require_coverage_ref() -> str:
 
 
 def cmd_doctor(_args) -> int:
+    # Report signing retirement first, so a broken encoder or toolchain probe
+    # below can never hide where signed re-encoding now runs.
+    try:
+        signing_key()
+        signing_ok = True
+    except SystemExit as e:
+        print(f"local apply signing : {e}")
+        signing_ok = False
     tc = pinned_toolchain()
     print(f"DRAIN_BASE           : {DRAIN_BASE}")
     command_ok = True
@@ -988,12 +996,6 @@ def cmd_doctor(_args) -> int:
     corpus_ok = CORPUS.exists() and toolchain_ok
     print(f"engine bin           : {'OK' if engine_ok else 'MISSING'} {ENGINE_BIN}")
     print(f"corpus               : {'OK' if corpus_ok else 'MISSING'} {CORPUS}")
-    try:
-        signing_key()
-        signing_ok = True
-    except SystemExit as e:
-        print(f"local apply signing : {e}")
-        signing_ok = False
     rc, out = run(["codex", "--version"])
     print(f"codex CLI            : {'OK ' + out.strip() if rc == 0 else 'MISSING'}")
     return 0 if all(
