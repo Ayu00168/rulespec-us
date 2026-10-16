@@ -1,10 +1,10 @@
 # Immutable checkout identities used by validation and generation workflows.
 # Signed corpus release and waiver evidence remain in toolchain.toml.
 [workflow_toolchain]
-axiom_encode_version = "0.2.2160"
+axiom_encode_version = "0.2.2215"
 axiom_compose_ref = "fabe0b3b3fd6e90d3e8f075516f9b668f524f711"
-axiom_encode_ref = "5ddb5ea4a3d98d386330ca4a076ecb1beb54e16a"
-axiom_rules_engine_ref = "89571cc2a938707fd60a5489b951135345697296"
+axiom_encode_ref = "e9217390e8e15910d0cfe64047dfce45a5a10673"
+axiom_rules_engine_ref = "50215d97ce9b59467d4738b2e872d5253b6e2847"
 axiom_artifact_rules_engine_ref = "98af0dcec5a09e1dca12d1458e08ccb02516c1ef"
 source_staleness_axiom_encode_ref = "b041b6b5a0e39f2c05c93669f354f8a54e9a84c3"
 axiom_corpus_ref = "460549782aeaaeb1fffcaa9089a2f37ee3032ee5"
