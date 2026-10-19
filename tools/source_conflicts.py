@@ -393,38 +393,159 @@ def yaml_test_case_names(text: str) -> set[str]:
     return {case["name"] for case in cases if isinstance(case, dict) and isinstance(case.get("name"), str)}
 
 
+# pytest's default discovery: files test_*.py or *_test.py, functions test*,
+# classes Test* (without __init__). A test reference must name something pytest
+# would collect, so production code can never pin a reading.
+PYTHON_TEST_FILE_RE = re.compile(r"(?:test_[^/]*|[^/]*_test)\.py")
+_NO_ID = object()
+
+
+def python_test_file(path: str) -> bool:
+    return PYTHON_TEST_FILE_RE.fullmatch(PurePosixPath(path).name) is not None
+
+
+def _literal_value(node: ast.expr) -> Any:
+    """A literal the decorator spells out, or _NO_ID."""
+
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return _NO_ID
+
+
+def _value_id(value: Any, argname: str, index: int) -> str:
+    """pytest's automatic id for one parameter value (its _idval rules)."""
+
+    if isinstance(value, str):
+        return value.encode("unicode_escape").decode("ascii")
+    if value is None or isinstance(value, (bool, int, float, complex)):
+        return str(value)
+    return f"{argname}{index}"
+
+
+def _is_parametrize(node: ast.expr) -> bool:
+    func = node.func if isinstance(node, ast.Call) else None
+    if isinstance(func, ast.Attribute):
+        return func.attr == "parametrize"
+    return isinstance(func, ast.Name) and func.id == "parametrize"
+
+
+def _is_pytest_param(node: ast.expr) -> bool:
+    func = node.func if isinstance(node, ast.Call) else None
+    return (isinstance(func, ast.Attribute) and func.attr == "param") or (isinstance(func, ast.Name) and func.id == "param")
+
+
+def parametrize_ids(decorator: ast.Call) -> list[str] | None:
+    """The case ids one @pytest.mark.parametrize produces, or None when they
+    cannot be read statically (pytest would decide them at run time)."""
+
+    args = list(decorator.args)
+    keywords = {keyword.arg: keyword.value for keyword in decorator.keywords if keyword.arg}
+    names_node = args[0] if args else keywords.get("argnames")
+    values_node = args[1] if len(args) > 1 else keywords.get("argvalues")
+    if names_node is None or values_node is None:
+        return None
+    names = _literal_value(names_node)
+    if isinstance(names, str):
+        names = [part.strip() for part in names.split(",") if part.strip()]
+    if not (isinstance(names, (list, tuple)) and names and all(isinstance(n, str) for n in names)):
+        return None
+    if not isinstance(values_node, (ast.List, ast.Tuple)):
+        return None
+    explicit = None
+    if "ids" in keywords:
+        explicit = _literal_value(keywords["ids"])
+        if not (isinstance(explicit, (list, tuple)) and len(explicit) == len(values_node.elts)):
+            return None
+    ids: list[str] = []
+    for index, element in enumerate(values_node.elts):
+        if explicit is not None and isinstance(explicit[index], str):
+            ids.append(explicit[index])
+            continue
+        if explicit is not None and explicit[index] is not None:
+            return None
+        values: list[ast.expr]
+        if _is_pytest_param(element):
+            given = {keyword.arg: keyword.value for keyword in element.keywords if keyword.arg}
+            if "id" in given:
+                case_id = _literal_value(given["id"])
+                if not isinstance(case_id, str):
+                    return None
+                ids.append(case_id)
+                continue
+            values = list(element.args)
+        elif len(names) == 1:
+            values = [element]
+        elif isinstance(element, (ast.List, ast.Tuple)) and len(element.elts) == len(names):
+            values = list(element.elts)
+        else:
+            return None
+        parts = []
+        for argname, value_node in zip(names, values):
+            value = _literal_value(value_node)
+            parts.append(f"{argname}{index}" if value is _NO_ID else _value_id(value, argname, index))
+        ids.append("-".join(parts))
+    if len(set(ids)) != len(ids):
+        return None  # pytest would rename duplicates; refuse rather than guess
+    return ids
+
+
 def python_test_exists(source: str, name: str) -> bool:
-    """Does `name` (func, Class::func, optionally [param]) exist in the source?"""
+    """Does `name` (test function, TestClass::test_method, optionally [id])
+    name a test pytest would collect from this source? A [id] must be one of
+    the ids its @pytest.mark.parametrize decorators produce."""
 
     match = TEST_NAME_RE.fullmatch(name)
     if match is None:
         return False
     try:
         tree = ast.parse(source)
-    except SyntaxError:
+    except (SyntaxError, ValueError):
         return False
     scope = match.group("scope")
     function = match.group("name")
+    if not function.startswith("test"):
+        return False
     body: list[ast.stmt] = tree.body
+    class_decorators: list[ast.expr] = []
     if scope:
         class_name = scope[:-2]
         classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
-        if not classes:
+        if not classes or not class_name.startswith("Test"):
             return False
-        body = classes[0].body
-    found = any(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function for node in body
-    )
+        cls = classes[-1]
+        if any(isinstance(node, ast.FunctionDef) and node.name == "__init__" for node in cls.body):
+            return False  # pytest does not collect classes with __init__
+        body = cls.body
+        class_decorators = list(cls.decorator_list)
+    functions = [
+        node for node in body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function
+    ]
+    if not functions:
+        return False
     param = match.group("param")
-    if found and param:
-        # A parametrized case: its id must appear literally in the file.
-        found = param[1:-1] in source
-    return found
+    if not param:
+        return True
+    target = functions[-1]  # a later definition replaces an earlier one
+    if any(_is_parametrize(node) for node in class_decorators):
+        return False  # class-level parametrization: ids not resolved here
+    # pytest applies the decorator nearest the function first; its ids lead.
+    combined = [""]
+    for decorator in reversed(target.decorator_list):
+        if not _is_parametrize(decorator):
+            continue
+        ids = parametrize_ids(decorator)
+        if ids is None:
+            return False
+        combined = [f"{left}-{right}" if left else right for left in combined for right in ids]
+    if combined == [""]:
+        return False  # not parametrized, so no [id] exists
+    return param[1:-1] in combined
 
 
 def test_exists(path: str, name: str, text: str) -> bool:
     if path.endswith(".py"):
-        return python_test_exists(text, name)
+        return python_test_file(path) and python_test_exists(text, name)
     if path.endswith(".test.yaml"):
         return name in yaml_test_case_names(text)
     return False
@@ -517,7 +638,7 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
     elif "id" in entry and not isinstance(entry_id, str):
         issues.append(f"{label}.id must be a string.")
     jurisdiction = entry.get("jurisdiction")
-    if "jurisdiction" in entry and jurisdiction not in jurisdictions:
+    if "jurisdiction" in entry and not (isinstance(jurisdiction, str) and jurisdiction in jurisdictions):
         issues.append(f"{label}.jurisdiction must be a jurisdiction directory of this repository ({', '.join(sorted(jurisdictions))}).")
     program = entry.get("program")
     if "program" in entry and not (isinstance(program, str) and KEBAB_RE.fullmatch(program)):
@@ -609,6 +730,12 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
             if not _relative_path(path) or not str(path).endswith((".py", ".test.yaml")):
                 issues.append(f"{t_label}.path must be a relative .py or .test.yaml path.")
                 path = None
+            elif str(path).endswith(".py") and not python_test_file(path):
+                issues.append(
+                    f"{t_label}.path {path} is not a test file pytest collects (test_*.py or *_test.py); "
+                    "only a test can pin a reading."
+                )
+                path = None
             if not (isinstance(name, str) and TEST_NAME_RE.fullmatch(name)):
                 issues.append(f"{t_label}.name must be a test function (optionally Class::function and [param]).")
                 name = None
@@ -620,7 +747,8 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
                     _check_reading_ref(ref, label=f"{t_label}.pins[{p_index}]", alternatives=alternatives, issues=issues)
                 if len(set(map(str, pins))) != len(pins):
                     issues.append(f"{t_label}.pins repeats a reading.")
-            key = (item.get("repo"), path, name)
+            repo_key = item.get("repo") if isinstance(item.get("repo"), str) else repr(item.get("repo"))
+            key = (repo_key, path, name)
             if key in seen_tests and None not in key[1:]:
                 issues.append(f"{t_label} repeats {path}::{name}.")
             seen_tests.add(key)
@@ -629,7 +757,10 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
                 if not local.is_file():
                     issues.append(f"{t_label}.path {path} does not exist in this repository.")
                 elif not test_exists(path, name, local.read_text(encoding="utf-8")):
-                    issues.append(f"{t_label}.name {name} is not defined in {path}.")
+                    issues.append(
+                        f"{t_label}.name {name} is not a test pytest collects from {path} (a test* function or a "
+                        "Test* class method; a [case] must be one of its parametrize ids)."
+                    )
 
     pinned = {
         ref
@@ -766,13 +897,16 @@ def check_register(payload: Any, ctx: RepoContext, *, scan_modules: bool = True)
         issues.append(f"{REGISTER_FILENAME} entries must be a list.")
         entries = []
     jurisdictions = ctx.jurisdictions()
+    # An entry's identity is its global id, <jurisdiction>:<id>, so two
+    # jurisdictions may each have an entry with the same local id.
     seen: dict[str, int] = {}
     for index, entry in enumerate(entries):
         issues.extend(check_entry(entry, index=index, ctx=ctx, jurisdictions=jurisdictions))
-        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
-            if entry["id"] in seen:
-                issues.append(f"entries[{index}].id `{entry['id']}` duplicates entries[{seen[entry['id']]}].")
-            seen.setdefault(entry["id"], index)
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str) and isinstance(entry.get("jurisdiction"), str):
+            gid = global_id(entry)
+            if gid in seen:
+                issues.append(f"entries[{index}] `{gid}` duplicates entries[{seen[gid]}].")
+            seen.setdefault(gid, index)
     issues.extend(hygiene_issues(payload))
     if scan_modules:
         issues.extend(unregistered_tensions(ctx.root, payload)[0])

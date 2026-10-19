@@ -9,12 +9,14 @@ Invariants, for every input:
    confirmed or contradicted one, is always reported; so is a confirmation on
    an open or ruled entry or missing from a confirmed or contradicted one.
 3. Totality: `check` returns a list of strings for any YAML-shaped input and
-   never raises.
+   never raises, including a well-formed entry with any one known field (at
+   any depth) replaced by an arbitrary YAML value.
 4. Round trip: a register entry turned into a module interpretation and
    written into a module passes the adopting-module check, and its
    interpretation core equals the entry's.
 5. Drift: changing any one core field in the module's copy is reported, and
-   the report names that field.
+   the report names that field; for a confirmed entry that includes any one
+   field of its confirmation record.
 6. Hygiene: a decision-queue id, session id, local path or email address in
    any free-text field is reported; hex digests in commit and sha256 fields
    never are.
@@ -206,6 +208,48 @@ def test_check_is_total(tmp_path, payload):
     assert isinstance(issues, list) and all(isinstance(issue, str) for issue in issues)
 
 
+# Totality where it matters most: a well-formed entry with one known field,
+# at any depth, replaced by an arbitrary YAML value. Random keys rarely hit
+# the schema's own (often long) field names, so target them directly.
+FIELD_PATHS = [
+    (key,) for key in sorted(sc.ENTRY_KEYS)
+] + [
+    ("texts", 0, "corpus_citation_path"), ("texts", 0, "excerpt"),
+    ("pending_texts", 0, "citation"), ("pending_texts", 0, "url"), ("pending_texts", 0, "snapshot"),
+    ("pending_texts", 0, "snapshot", "repo"), ("pending_texts", 0, "snapshot", "commit"),
+    ("pending_texts", 0, "snapshot", "sha256"), ("alternatives", 0, "reading"), ("alternatives", 0, "effect"),
+    ("ruling", "by"), ("ruling", "date"), ("ruling", "record"),
+    ("implementations", 0, "repo"), ("implementations", 0, "commit"), ("implementations", 0, "path"),
+    ("implementations", 0, "follows"), ("implementations", 0, "cites_entry"),
+    ("tests", 0, "repo"), ("tests", 0, "commit"), ("tests", 0, "path"), ("tests", 0, "name"), ("tests", 0, "pins"),
+    ("money_case", "amount"), ("money_case", "currency"), ("money_case", "period"), ("money_case", "description"),
+]
+
+
+def _set_path(value, path, new):
+    target = value
+    for key in path[:-1]:
+        if isinstance(target, dict) and key in target:
+            target = target[key]
+        elif isinstance(target, list) and isinstance(key, int) and key < len(target):
+            target = target[key]
+        else:
+            return False
+    if isinstance(target, dict) or (isinstance(target, list) and isinstance(path[-1], int) and path[-1] < len(target)):
+        target[path[-1]] = new
+        return True
+    return False
+
+
+@SETTINGS
+@given(value=entries(), path=st.sampled_from(FIELD_PATHS), new=yaml_values)
+def test_check_is_total_on_malformed_known_fields(tmp_path, value, path, new):
+    value = copy.deepcopy(value)
+    assume(_set_path(value, path, new))
+    issues = sc.check_register({"version": 1, "entries": [value, copy.deepcopy(value)]}, repo(tmp_path), scan_modules=False)
+    assert isinstance(issues, list) and all(isinstance(issue, str) for issue in issues)
+
+
 # 4 and 5. Round trip and drift
 @SETTINGS
 @given(value=entries(), field=st.sampled_from([f for f in sc.INTERPRETATION_CORE if f != "confirmation"]))
@@ -241,6 +285,35 @@ def test_round_trip_and_drift(tmp_path, value, field):
     write(drifted)
     issues = sc.check_register({"version": 1, "entries": [value]}, ctx)
     assert any(f"`{field}` differs" in issue for issue in issues)
+
+
+# 5b. Drift of a confirmation record: a confirmed entry whose module copy
+# carries a different confirmation is reported, naming the field.
+@SETTINGS
+@given(value=entries(), confirmation=confirmations, field=st.sampled_from(["by", "date", "excerpt", "record"]), other=prose)
+def test_confirmation_drift(tmp_path, value, confirmation, field, other):
+    ctx = repo(tmp_path)
+    value = copy.deepcopy(value)
+    value.pop("pending_texts", None)
+    assume(value["texts"])
+    value["status"] = "confirmed"
+    value.setdefault("ruling", {"by": "Org", "date": "2026-10-12", "record": "https://example.org/r"})
+    value["confirmation"] = dict(confirmation)
+    module = "us/statutes/42/403.yaml"
+    value["adopted_by"] = [{"module": module, "interpretation": value["id"]}]
+    value.pop("implementations", None)
+    value["tests"] = [{"path": "us/statutes/42/403.test.yaml", "name": "case", "pins": ["reading"]}]
+    carried = sc.to_module_interpretation(value, interpretation_id=value["id"], affects=["rule_a"])
+    drifted = copy.deepcopy(carried)
+    replacement = {"date": "2031-01-02", "record": "https://example.org/other"}.get(field, other)
+    assume(drifted["confirmation"].get(field) != replacement)
+    drifted["confirmation"][field] = replacement
+    path = ctx.root / module
+    path.parent.mkdir(parents=True, exist_ok=True)
+    (ctx.root / "us/statutes/42/403.test.yaml").write_text(yaml.safe_dump([{"name": "case"}]))
+    path.write_text(yaml.safe_dump({"format": "rulespec/v1", "module": {"interpretations": [drifted]}, "rules": [{"name": "rule_a"}]}))
+    issues = sc.check_register({"version": 1, "entries": [value]}, ctx)
+    assert any("`confirmation` differs" in issue for issue in issues), issues
 
 
 # 6. Hygiene

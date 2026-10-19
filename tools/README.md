@@ -112,7 +112,7 @@ Register-only fields:
 | `outcome` | `computed` or `refused`: whether the adopted reading computes the contested cases or refuses them. For a refusal, `reading` says what is refused and the substantive readings go in `alternatives`. |
 | `adopted_by` | RuleSpec modules in this repository that carry the entry, as `module` (path) and `interpretation` (id) pairs. |
 | `implementations` | Code outside RuleSpec that adopts a reading: `repo`, `commit`, `path`, `follows` (`reading` or `alternatives[N]`, meaning what the code does today) and `cites_entry`, which says whether the file contains the global id. |
-| `tests` | Tests that pin readings: `path`, `name` (a function, `Class::function` or `[param]`, or a companion-test case name) and `pins`, a list of `reading` or `alternatives[N]`. Add `repo` and `commit` for a test in another repository. |
+| `tests` | Tests that pin readings: `path`, `name` (a function, `Class::function` or `[param]`, or a companion-test case name) and `pins`, a list of `reading` or `alternatives[N]`. Add `repo` and `commit` for a test in another repository. A Python test must be something pytest collects: a `test_*.py` or `*_test.py` file, a module-level `test*` function or a method of a `Test*` class without `__init__`, and a `[param]` must be one of the ids its `@pytest.mark.parametrize` decorators produce, read from the decorators themselves (ids pytest would decide at run time are refused). |
 | `money_case` | An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency` and `period` (once, week, month or year). |
 
 The register is public. It carries no people's names, decision-queue ids,
@@ -129,7 +129,7 @@ of these:
 - a hygiene hit;
 - an adopting module that is missing, or that does not carry the entry's
   interpretation core unchanged, or whose `affects` name no rule in the module;
-- an in-repo test that does not exist;
+- an in-repo test that does not exist, or names something pytest would not collect (production code cannot pin a reading);
 - a followed reading that no test pins, or a module adopter whose `reading`
   no test pins;
 - a ruled, confirmed or contradicted module interpretation whose texts cite
