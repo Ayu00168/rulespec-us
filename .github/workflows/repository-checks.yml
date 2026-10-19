@@ -57,7 +57,7 @@ jobs:
 
   validate:
     needs: workflow-toolchain
-    uses: TheAxiomFoundation/.github/.github/workflows/validate-rulespec.yml@92ccb0f2266bf06aba6111d2bfd0e5f03af55fc3
+    uses: TheAxiomFoundation/.github/.github/workflows/validate-rulespec.yml@30e942938e675ae2b4a23b6154652592dcdc8065
     secrets: inherit
     with:
       axiom-encode-ref: ${{ needs.workflow-toolchain.outputs.axiom_encode_ref }}
@@ -65,8 +65,9 @@ jobs:
       axiom-rules-engine-ref: ${{ needs.workflow-toolchain.outputs.axiom_rules_engine_ref }}
       axiom-corpus-ref: ${{ needs.workflow-toolchain.outputs.axiom_corpus_ref }}
       rulespec-us-ref: ${{ needs.workflow-toolchain.outputs.rulespec_us_ref }}
-      corpus-release-registry-url: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
-      corpus-release-registry-anon-key: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+      # The pinned signed release is mirrored to the public object store. The
+      # registry endpoint returns HTTP 500 for its 30 MB release object; the
+      # reusable validator authenticates the same pinned object after fetch.
       validate-roots: auto
       validation-workers: 4
       guard-programs-root: false
