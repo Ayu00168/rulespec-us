@@ -993,13 +993,16 @@ def check_register(payload: Any, ctx: RepoContext, *, scan_modules: bool = True)
         issues.append(f"{REGISTER_FILENAME} entries must be a list.")
         entries = []
     jurisdictions = ctx.jurisdictions()
+    # An entry's identity is its global id, <jurisdiction>:<id>, so two
+    # jurisdictions may each have, say, a claim-of-right-deduction-floor.
     seen: dict[str, int] = {}
     for index, entry in enumerate(entries):
         issues.extend(check_entry(entry, index=index, ctx=ctx, jurisdictions=jurisdictions))
         if isinstance(entry, dict) and isinstance(entry.get("id"), str):
-            if entry["id"] in seen:
-                issues.append(f"entries[{index}].id `{entry['id']}` duplicates entries[{seen[entry['id']]}].")
-            seen.setdefault(entry["id"], index)
+            gid = global_id(entry)
+            if gid in seen:
+                issues.append(f"entries[{index}] `{gid}` duplicates entries[{seen[gid]}].")
+            seen.setdefault(gid, index)
     issues.extend(hygiene_issues(payload))
     if scan_modules:
         issues.extend(unregistered_tensions(ctx.root, payload)[0])

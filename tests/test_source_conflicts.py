@@ -162,7 +162,12 @@ def test_top_level_shape(tmp_path):
 
 def test_duplicate_ids(tmp_path):
     issues = check(make_repo(tmp_path), entry(), entry())
-    assert any("duplicates entries[0]" in issue for issue in issues)
+    assert any("`us:family-maximum-saving-clause` duplicates entries[0]" in issue for issue in issues)
+
+
+def test_the_same_id_in_two_jurisdictions_is_two_entries(tmp_path):
+    # Global ids (<jurisdiction>:<id>) are the identity; aggregate checks them across repositories.
+    assert check(make_repo(tmp_path), entry(), entry(jurisdiction="us-co")) == []
 
 
 @pytest.mark.parametrize("bad", ["Has-Caps", "trailing-", "two--dashes", "under_score", ""])
