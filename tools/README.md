@@ -125,7 +125,7 @@ Register-only fields:
 | `adopted_by` | RuleSpec modules in this repository that carry the entry, as `module` (path) and `interpretation` (id) pairs. |
 | `implementations` | Code outside RuleSpec that takes a reading: `repo`, `commit`, `path`, `follows` (what the code does today) and `cites_entry`, which says whether the file contains the global id. A consumer may adopt a reading other than the entry's: `adopts` (default `reading`) names the reading it intends, `basis` says why, and an optional `ruling` (`by`, `date`, public `record`) is the consumer's own ruling. PolicyEngine-US follows the statute where the entry adopts an agency's practice. An implementation lags when `follows` differs from `adopts`. |
 | `proposed` | Changes not yet merged that would implement a reading: `repo`, `pr` (the pull request URL), `path` and `follows`. Verify lists them but never counts them as implementations; move one to `implementations` once it merges, pinned to the commit on the default branch. |
-| `tests` | Tests that pin readings: `path`, `name` and `pins`, a list of reading references. Here, `name` is a function (or `Class::function`, optionally with `[param]`) in a `.py` file, or a case name in a companion `.test.yaml`. A test in another repository adds `repo` and `commit`. It may also be a YAML test file (`.yaml`) whose `name` is the case's name, on one line, such as a PolicyEngine-US policy test. Verify checks that the case still exists at that commit. |
+| `tests` | Tests that pin readings: `path`, `name` and `pins`, a list of reading references. Here, `name` is a function (or `Class::function`, optionally with `[param]`) in a `.py` file, or a case name in a companion `.test.yaml`. A test in another repository adds `repo` and `commit`. It may also be a YAML test file (`.yaml`) whose `name` is the case's name, on one line, such as a PolicyEngine-US policy test. Verify checks that the case still exists at that commit. A Python test must be something pytest collects: a `test_*.py` or `*_test.py` file, a module-level `test*` function or a method of a `Test*` class without `__init__`; a `[param]` must be one of the ids its `@pytest.mark.parametrize` decorators produce, read from the decorators themselves (ids pytest would decide at run time are refused). Another repository's YAML test file must sit under a `tests` directory. |
 | `money_case` | An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency` and `period` (once, week, month or year). |
 
 Source kinds are `statute`, `regulation`, `rulemaking`, `form`,
@@ -168,7 +168,7 @@ of these:
 - a hygiene hit;
 - an adopting module that is missing, or that does not carry the entry's
   interpretation core unchanged, or whose `affects` name no rule in the module;
-- an in-repo test that does not exist;
+- an in-repo test that does not exist, or names something pytest would not collect (production code cannot pin a reading);
 - a followed reading that no test pins, or a module adopter whose `reading`
   no test pins;
 - a ruled, confirmed or contradicted module interpretation whose texts cite

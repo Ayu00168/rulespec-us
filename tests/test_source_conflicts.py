@@ -170,6 +170,21 @@ def test_the_same_id_in_two_jurisdictions_is_two_entries(tmp_path):
     assert check(make_repo(tmp_path), entry(), entry(jurisdiction="us-co")) == []
 
 
+@pytest.mark.parametrize("jurisdiction", [[], {}, ["us"], 7, None])
+def test_malformed_jurisdiction_is_an_issue_not_an_exception(tmp_path, jurisdiction):
+    issues = check(make_repo(tmp_path), entry(jurisdiction=jurisdiction))
+    assert any(".jurisdiction must be a jurisdiction directory" in issue for issue in issues)
+
+
+@pytest.mark.parametrize("repo", [[], {"a": 1}, ["PolicyEngine/x"]])
+def test_malformed_test_repo_is_an_issue_not_an_exception(tmp_path, repo):
+    bad = entry()
+    bad["tests"][0]["repo"] = repo
+    bad["tests"].append(dict(bad["tests"][0]))
+    issues = check(make_repo(tmp_path), bad)
+    assert any("repo must be owner/name" in issue for issue in issues)
+
+
 @pytest.mark.parametrize("bad", ["Has-Caps", "trailing-", "two--dashes", "under_score", ""])
 def test_id_pattern(tmp_path, bad):
     issues = check(make_repo(tmp_path), entry(id=bad))
@@ -444,11 +459,94 @@ def test_in_repo_tests_must_exist(tmp_path):
     bad["tests"][0]["name"] = "missing_case"
     bad["tests"][1]["path"] = "tests/test_absent.py"
     issues = check(ctx, bad)
-    assert any("missing_case is not defined" in issue for issue in issues)
+    assert any("missing_case is not a test pytest collects" in issue for issue in issues)
     assert any("tests/test_absent.py does not exist" in issue for issue in issues)
     local_commit = copy.deepcopy(good)
     local_commit["tests"][0]["commit"] = COMMIT
     assert any("commit is only for a file in another repository" in issue for issue in check(ctx, local_commit))
+
+
+def test_production_code_cannot_pin_a_reading(tmp_path):
+    # Review of #1710: a production function named as a test satisfied the gate.
+    ctx = make_repo(tmp_path)
+    (ctx.root / "tools").mkdir()
+    (ctx.root / "tools" / "source_conflicts.py").write_text("def global_id(entry):\n    return entry\n")
+    value = entry()
+    del value["implementations"]
+    value["tests"] = [{"path": "tools/source_conflicts.py", "name": "global_id", "pins": ["reading"]}]
+    issues = check(ctx, value)
+    assert any("is not a test file pytest collects" in issue for issue in issues), issues
+    # A helper inside a test file is not a test either.
+    (ctx.root / "tests" / "test_helpers.py").write_text("def global_id(entry):\n    return entry\n")
+    value["tests"] = [{"path": "tests/test_helpers.py", "name": "global_id", "pins": ["reading"]}]
+    assert any("global_id is not a test pytest collects" in issue for issue in check(ctx, value))
+
+
+def test_a_parameter_id_must_come_from_parametrize(tmp_path):
+    # Review of #1710: an id that appeared only in a comment satisfied the gate.
+    ctx = make_repo(tmp_path)
+    (ctx.root / "tests" / "test_params.py").write_text(
+        "import pytest\n"
+        "# ids: invented-case\n"
+        "@pytest.mark.parametrize('case', ['real-case'])\n"
+        "def test_case(case):\n    pass\n"
+        "def test_plain():\n    pass  # [also-invented]\n"
+    )
+    value = entry()
+    del value["implementations"]
+    for name, ok in (
+        ("test_case[real-case]", True),
+        ("test_case", True),
+        ("test_case[invented-case]", False),
+        ("test_plain[also-invented]", False),
+    ):
+        value["tests"] = [{"path": "tests/test_params.py", "name": name, "pins": ["reading"]}]
+        assert (check(ctx, value) == []) == ok, name
+
+
+@pytest.mark.parametrize(
+    ("source", "name", "expected"),
+    [
+        ("def test_a():\n    pass\n", "test_a", True),
+        ("def helper():\n    pass\n", "helper", False),
+        ("class TestC:\n    def test_d(self):\n        pass\n", "TestC::test_d", True),
+        ("class Helper:\n    def test_d(self):\n        pass\n", "Helper::test_d", False),
+        ("class TestC:\n    def __init__(self):\n        pass\n    def test_d(self):\n        pass\n", "TestC::test_d", False),
+        ("import pytest\n@pytest.mark.parametrize('x', [1, -2, 2.5, True, None, 'a b'])\ndef test_x(x):\n    pass\n", "test_x[-2]", True),
+        ("import pytest\n@pytest.mark.parametrize('x', [1, -2, 2.5, True, None, 'a b'])\ndef test_x(x):\n    pass\n", "test_x[2.5]", True),
+        ("import pytest\n@pytest.mark.parametrize('x', [1, -2, 2.5, True, None, 'a b'])\ndef test_x(x):\n    pass\n", "test_x[None]", True),
+        ("import pytest\n@pytest.mark.parametrize('x', [1, -2, 2.5, True, None, 'a b'])\ndef test_x(x):\n    pass\n", "test_x[a b]", True),
+        ("import pytest\n@pytest.mark.parametrize('x,y', [(1, 'p'), (2, 'q')])\ndef test_xy(x, y):\n    pass\n", "test_xy[2-q]", True),
+        ("import pytest\n@pytest.mark.parametrize(('x', 'y'), [[1, {}]])\ndef test_xy(x, y):\n    pass\n", "test_xy[1-y0]", True),
+        ("import pytest\n@pytest.mark.parametrize('x', [1, 2], ids=['one', 'two'])\ndef test_x(x):\n    pass\n", "test_x[two]", True),
+        ("import pytest\n@pytest.mark.parametrize('x', [1, 2], ids=['one', 'two'])\ndef test_x(x):\n    pass\n", "test_x[1]", False),
+        ("import pytest\n@pytest.mark.parametrize('x', [pytest.param(1, id='solo'), pytest.param(2)])\ndef test_x(x):\n    pass\n", "test_x[solo]", True),
+        ("import pytest\n@pytest.mark.parametrize('x', [pytest.param(1, id='solo'), pytest.param(2)])\ndef test_x(x):\n    pass\n", "test_x[2]", True),
+        # Stacked: the decorator nearest the function leads the id.
+        ("import pytest\n@pytest.mark.parametrize('x', [0, 1])\n@pytest.mark.parametrize('y', [2, 3])\ndef test_xy(x, y):\n    pass\n", "test_xy[2-0]", True),
+        ("import pytest\n@pytest.mark.parametrize('x', [0, 1])\n@pytest.mark.parametrize('y', [2, 3])\ndef test_xy(x, y):\n    pass\n", "test_xy[0-2]", False),
+        # Ids pytest decides at run time, or would rename, are refused.
+        ("import pytest\nCASES = [1, 2]\n@pytest.mark.parametrize('x', CASES)\ndef test_x(x):\n    pass\n", "test_x[1]", False),
+        ("import pytest\n@pytest.mark.parametrize('x', [1, 2], ids=str)\ndef test_x(x):\n    pass\n", "test_x[1]", False),
+        ("import pytest\n@pytest.mark.parametrize('x', [1, 1])\ndef test_x(x):\n    pass\n", "test_x[1]", False),
+        ("import pytest\n@pytest.mark.parametrize('x', [1])\nclass TestK:\n    def test_x(self, x):\n        pass\n", "TestK::test_x[1]", False),
+    ],
+)
+def test_python_test_resolution(source, name, expected):
+    assert sc.python_test_exists(source, name) == expected
+
+
+def test_python_test_file_conventions():
+    for path, ok in (
+        ("tests/test_a.py", True),
+        ("tests/sub/a_test.py", True),
+        ("test_a.py", True),
+        ("tools/source_conflicts.py", False),
+        ("tests/helpers.py", False),
+        ("tests/conftest.py", False),
+    ):
+        assert sc.python_test_file(path) == ok, path
+        assert sc.test_exists(path, "test_a", "def test_a():\n    pass\n") == ok, path
 
 
 def test_test_path_and_name_shapes(tmp_path):
@@ -480,6 +578,9 @@ def test_external_yaml_test_cases(tmp_path):
         bad = copy.deepcopy(value)
         bad["tests"][1]["name"] = name
         assert any("must be a YAML test case's name, on one line" in issue for issue in check(ctx, bad)), name
+    outside = copy.deepcopy(value)
+    outside["tests"][1]["path"] = "policyengine_us/variables/claim_of_right.yaml"
+    assert any("is not under a tests directory" in issue for issue in check(ctx, outside))
     assert sc.test_exists("cases.yaml", "Hawaii case", "- name: Hawaii case\n  input: {}\n")
     assert not sc.test_exists("cases.yaml", "Other case", "- name: Hawaii case\n")
 
@@ -807,6 +908,7 @@ def test_python_test_exists():
     assert sc.python_test_exists(source, "test_b")
     assert sc.python_test_exists(source, "TestC::test_d")
     assert sc.python_test_exists(source, "test_e[one]")
+    assert sc.python_test_exists(source, "test_e")
     assert not sc.python_test_exists(source, "test_d")  # method, not module level
     assert not sc.python_test_exists(source, "TestC::test_a")
     assert not sc.python_test_exists(source, "test_e[two]")
@@ -864,8 +966,11 @@ def verified_inputs():
         ("PolicyEngine/microcosm-dynamics", COMMIT, "tests/data/poms_rs_00630_400.html"): snapshot,
         ("PolicyEngine/microcosm-dynamics", COMMIT, "src/gross_benefits.py"): b"def g():\n    pass\n",
         ("PolicyEngine/microcosm-dynamics", COMMIT, "tests/test_g.py"): (
+            b"import pytest\n"
             b"def test__given_operational__then_pays():\n    pass\n"
-            b"class TestLiteral:\n    def test_refuses(self):\n        pass\n# ids: child-ages-out\n"
+            b"class TestLiteral:\n"
+            b"    @pytest.mark.parametrize('case', ['child-ages-out'])\n"
+            b"    def test_refuses(self, case):\n        pass\n"
         ),
     }
     corpus = {"us/statute/42/403/a/5": "... the benefit for any such subsequent month shall be ..."}
