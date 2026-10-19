@@ -1211,3 +1211,65 @@ entries:
     amount: '2320.00'
     currency: USD
     period: year
+- id: poverty-credit-earned-income-losses
+  jurisdiction: us-md
+  program: income-tax
+  question: Does Maryland's state poverty level credit (5% of earned income) take earned income as IRC 32(c)(2)
+    defines it, net of a self-employment or farm loss, or as Form 502 Worksheet 18B line 2 computes it, leaving
+    the loss out?
+  texts:
+  - corpus_citation_path: us/statute/26/32/c/2
+    excerpt: (ii) the amount of the taxpayer’s net earnings from self-employment for the taxable year (within the
+      meaning of section 1402(a)), but such net earnings shall be determined with regard to the deduction allowed
+      to the taxpayer by section 164(f).
+  pending_texts:
+  - citation: 2025 Maryland resident tax booklet, State Poverty Level Credit Worksheet (18B), line 2, p. 23
+    kind: worksheet
+    url: https://www.marylandcomptroller.gov/content/dam/mdcomp/tax/instructions/2025/resident-booklet.pdf#page=23
+    snapshot:
+      repo: PolicyEngine/policyengine-us
+      commit: ee2e0b910fb622212e05436ffbe692e9e7616824
+      path: policyengine_us/tests/code_health/source_conflicts/sources/us-md/resident-booklet-2025-p23.txt
+      sha256: ff06a1a0c4043fc7a7d44fe9b93b76410ff60cb14f9595e99bb490a25b958a21
+    excerpt: Enter the total of your salary, wages, tips and other employee compensation and net profit from self-employment
+      here, and on Line 1b of Form 502, if Line 1b is currently blank. (Do not include a farm or business loss.)
+  reading: Use IRC 32(c)(2) earned income, which nets a self-employment or farm loss against wages and is figured
+    after the section 164(f) deduction; the credit is floored at zero.
+  alternatives:
+  - id: worksheet-18b-line-2
+    reading: Add wages and self-employment profit, leaving out any farm or business loss, as Worksheet 18B line
+      2 instructs.
+    effect: A filer whose loss offsets wages gets a credit on the wages alone.
+  basis: Tax-General 10-709 sets the credit at 5% of earned income "as defined under § 32(c)(2) of the Internal
+    Revenue Code", and 10-107 reads federal terms with their federal interpretations; no Maryland regulation adopts
+    the worksheet's exclusion.
+  status: open
+  outcome: computed
+  years:
+    from: 2025
+    type: tax
+  implementations:
+  - repo: PolicyEngine/policyengine-us
+    commit: ee2e0b910fb622212e05436ffbe692e9e7616824
+    path: policyengine_us/variables/gov/states/md/tax/income/credits/poverty_line/md_poverty_line_credit_potential.py
+    follows: reading
+    adopts: reading
+    basis: PolicyEngine-US follows the statute when it conflicts with forms or worksheets.
+    ruling:
+      by: PolicyEngine
+      date: '2026-10-19'
+      record: https://github.com/PolicyEngine/policyengine-us/pull/10287
+    cites_entry: true
+  tests:
+  - repo: PolicyEngine/policyengine-us
+    commit: ee2e0b910fb622212e05436ffbe692e9e7616824
+    path: policyengine_us/tests/policy/baseline/gov/states/md/tax/income/credits/poverty_line/md_poverty_line_credit_earned_income.yaml
+    name: A farm loss is netted against wages like other self-employment (2024)
+    pins:
+    - reading
+  money_case:
+    description: 'A 2024 single filer with $5,000 of wages, a $10,000 farm loss and $20,000 of interest: the statute
+      reading gives no poverty level credit; Worksheet 18B line 2 counts the $5,000 of wages alone, for a $250 credit.'
+    amount: '250.00'
+    currency: USD
+    period: year
