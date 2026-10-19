@@ -470,6 +470,20 @@ def test_a_parameter_id_must_come_from_parametrize(tmp_path):
         ("import pytest\n@pytest.mark.parametrize('x', [1, 2], ids=str)\ndef test_x(x):\n    pass\n", "test_x[1]", False),
         ("import pytest\n@pytest.mark.parametrize('x', [1, 1])\ndef test_x(x):\n    pass\n", "test_x[1]", False),
         ("import pytest\n@pytest.mark.parametrize('x', [1])\nclass TestK:\n    def test_x(self, x):\n        pass\n", "TestK::test_x[1]", False),
+        # Checked against pytest 9.1.1 --collect-only: bytes and str escaping.
+        ("import pytest\n@pytest.mark.parametrize('x', [b'ab', 'a\\nb', 'é'])\ndef test_x(x):\n    pass\n", "test_x[ab]", True),
+        ("import pytest\n@pytest.mark.parametrize('x', [b'ab', 'a\\nb', 'é'])\ndef test_x(x):\n    pass\n", "test_x[a\\nb]", True),
+        ("import pytest\n@pytest.mark.parametrize('x', [b'ab', 'a\\nb', 'é'])\ndef test_x(x):\n    pass\n", "test_x[\\xe9]", True),
+        ("import pytest\n@pytest.mark.parametrize('x', [b'ab'])\ndef test_x(x):\n    pass\n", "test_x[x0]", False),
+        # A name or call: pytest's id depends on the runtime value (Color.RED, helper, int), so refuse.
+        ("import pytest\nimport enum\nclass Color(enum.Enum):\n    RED = 1\n@pytest.mark.parametrize('x', [Color.RED])\ndef test_x(x):\n    pass\n", "test_x[x0]", False),
+        ("import pytest\nimport enum\nclass Color(enum.Enum):\n    RED = 1\n@pytest.mark.parametrize('x', [Color.RED])\ndef test_x(x):\n    pass\n", "test_x[Color.RED]", False),
+        ("import pytest\n@pytest.mark.parametrize('x', [int])\ndef test_x(x):\n    pass\n", "test_x[int]", False),
+        # One name in a tuple, or with a trailing comma, unpacks each value.
+        ("import pytest\n@pytest.mark.parametrize(('x',), [(5,), (6,)])\ndef test_x(x):\n    pass\n", "test_x[5]", True),
+        ("import pytest\n@pytest.mark.parametrize('x,', [(5,), (6,)])\ndef test_x(x):\n    pass\n", "test_x[6]", True),
+        ("import pytest\n@pytest.mark.parametrize('x', [(5,), (6,)])\ndef test_x(x):\n    pass\n", "test_x[x1]", True),
+        ("import pytest\n@pytest.mark.parametrize('x', [])\ndef test_x(x):\n    pass\n", "test_x[NOTSET]", False),
     ],
 )
 def test_python_test_resolution(source, name, expected):

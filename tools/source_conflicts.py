@@ -413,11 +413,20 @@ def _literal_value(node: ast.expr) -> Any:
         return _NO_ID
 
 
-def _value_id(value: Any, argname: str, index: int) -> str:
-    """pytest's automatic id for one parameter value (its _idval rules)."""
+# pytest's escaping of str and bytes ids (_pytest.compat.ascii_escaped).
+_NON_PRINTABLE = {i: f"\\x{i:02x}" for i in range(128) if i not in range(32, 127)}
+_NON_PRINTABLE.update({ord("\t"): "\\t", ord("\r"): "\\r", ord("\n"): "\\n"})
 
+
+def _value_id(value: Any, argname: str, index: int) -> str:
+    """pytest's automatic id for one literal parameter value (_idval_from_value):
+    str and bytes escaped to ASCII, numbers, bools and None by str(), and any
+    other literal (a tuple, list, dict or set) by argname and position."""
+
+    if isinstance(value, bytes):
+        return value.decode("ascii", "backslashreplace").translate(_NON_PRINTABLE)
     if isinstance(value, str):
-        return value.encode("unicode_escape").decode("ascii")
+        return value.encode("unicode_escape").decode("ascii").translate(_NON_PRINTABLE)
     if value is None or isinstance(value, (bool, int, float, complex)):
         return str(value)
     return f"{argname}{index}"
@@ -446,11 +455,16 @@ def parametrize_ids(decorator: ast.Call) -> list[str] | None:
     if names_node is None or values_node is None:
         return None
     names = _literal_value(names_node)
+    # As pytest parses argnames: one name in a string, without a trailing
+    # comma, takes each value whole; otherwise each value is unpacked.
+    force_tuple = False
     if isinstance(names, str):
+        trailing_comma = names.rstrip().endswith(",")
         names = [part.strip() for part in names.split(",") if part.strip()]
+        force_tuple = len(names) == 1 and not trailing_comma
     if not (isinstance(names, (list, tuple)) and names and all(isinstance(n, str) for n in names)):
         return None
-    if not isinstance(values_node, (ast.List, ast.Tuple)):
+    if not isinstance(values_node, (ast.List, ast.Tuple)) or not values_node.elts:
         return None
     explicit = None
     if "ids" in keywords:
@@ -474,16 +488,23 @@ def parametrize_ids(decorator: ast.Call) -> list[str] | None:
                 ids.append(case_id)
                 continue
             values = list(element.args)
-        elif len(names) == 1:
+        elif force_tuple:
             values = [element]
         elif isinstance(element, (ast.List, ast.Tuple)) and len(element.elts) == len(names):
             values = list(element.elts)
         else:
             return None
+        if len(values) != len(names):
+            return None
         parts = []
         for argname, value_node in zip(names, values):
             value = _literal_value(value_node)
-            parts.append(f"{argname}{index}" if value is _NO_ID else _value_id(value, argname, index))
+            if value is _NO_ID:
+                # A name, attribute or call: pytest's id depends on the runtime
+                # value (an enum's str, a class's or function's __name__, a
+                # regex's pattern), which the source alone cannot tell.
+                return None
+            parts.append(_value_id(value, argname, index))
         ids.append("-".join(parts))
     if len(set(ids)) != len(ids):
         return None  # pytest would rename duplicates; refuse rather than guess

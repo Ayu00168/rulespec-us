@@ -31,6 +31,9 @@ Invariants, for every input:
 10. Matcher consistency (when axiom-encode is importable): every run of whole
     words taken from a snapshot's text matches it under axiom-encode's
     proof-atom matcher.
+11. Differential: for generated @pytest.mark.parametrize decorators, the
+    test-reference resolver's case ids equal the ids pytest itself collects,
+    wherever the resolver answers; it refuses (fails closed) otherwise.
 
 Hypothesis is not installed in the shared validate workflow's pytest leg, so
 these skip there; the source-conflicts workflow installs it and runs them.
@@ -415,3 +418,80 @@ def test_word_runs_match_under_encoder_matcher(words, data):
     start = data.draw(st.integers(0, len(tokens) - 1))
     end = data.draw(st.integers(start + 1, len(tokens)))
     assert matches(text, " ".join(tokens[start:end]))
+
+
+# 11. Differential: the test-reference resolver against pytest's own collection.
+# Generated @pytest.mark.parametrize decorators (one or two stacked, names as a
+# string or a tuple, literal values of every kind pytest names) are written to
+# a file and collected by pytest in-process. Wherever the resolver answers, its
+# ids must equal pytest's exactly; where it cannot tell, it refuses.
+id_literals = st.one_of(
+    st.integers(-5, 5),
+    st.floats(allow_nan=False, allow_infinity=False, width=32),
+    st.booleans(),
+    st.none(),
+    st.text(alphabet=string.ascii_letters + " .-_\n\té", min_size=1, max_size=4),
+    st.binary(min_size=1, max_size=3),
+    st.tuples(st.integers(0, 3)),
+)
+
+
+@st.composite
+def parametrize_decorators(draw, argname):
+    values = draw(st.lists(id_literals, min_size=1, max_size=4))
+    explicit = draw(st.booleans())
+    ids = ""
+    if explicit:
+        labels = draw(st.lists(st.one_of(st.none(), st.from_regex(r"[a-z]{1,5}", fullmatch=True)), min_size=len(values), max_size=len(values)))
+        ids = f", ids={labels!r}"
+    shape = draw(st.sampled_from(["name", "tuple", "trailing-comma"]))
+    if shape == "tuple":
+        return f"@pytest.mark.parametrize(({argname!r},), {[ (v,) for v in values ]!r}{ids})"
+    if shape == "trailing-comma":
+        return f"@pytest.mark.parametrize({argname + ','!r}, {[ (v,) for v in values ]!r}{ids})"
+    return f"@pytest.mark.parametrize({argname!r}, {values!r}{ids})"
+
+
+_COUNTER = __import__("itertools").count()
+
+
+def _pytest_ids(path: Path) -> list[str]:
+    collected: list[str] = []
+
+    class Collector:
+        def pytest_collection_modifyitems(self, items):
+            collected.extend(item.name for item in items)
+
+    # importlib mode, and a fresh file name per example, keep the nested
+    # collections from reusing one another's modules.
+    pytest.main(
+        ["--collect-only", "-q", "-p", "no:cacheprovider", "-W", "ignore", "--import-mode=importlib", "--rootdir", str(path.parent), str(path)],
+        plugins=[Collector()],
+    )
+    return [name.split("[", 1)[1][:-1] for name in collected if "[" in name]
+
+
+@settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(first=parametrize_decorators("a"), second=st.one_of(st.none(), parametrize_decorators("b")))
+def test_resolver_agrees_with_pytest_collection(tmp_path_factory, first, second, capsys):
+    decorators = [first] + ([second] if second else [])
+    params = ", ".join(["a"] + (["b"] if second else []))
+    source = "import pytest\n" + "\n".join(decorators) + f"\ndef test_case({params}):\n    pass\n"
+    path = tmp_path_factory.mktemp("collect") / f"test_generated_{next(_COUNTER)}.py"
+    path.write_text(source)
+    theirs = _pytest_ids(path)
+    capsys.readouterr()
+    tree = __import__("ast").parse(source)
+    function = tree.body[-1]
+    combined = [""]
+    for decorator in reversed(function.decorator_list):
+        ids = sc.parametrize_ids(decorator)
+        if ids is None:
+            combined = None
+            break
+        combined = [f"{left}-{right}" if left else right for left in combined for right in ids]
+    if combined is not None:
+        assert sorted(combined) == sorted(theirs), (source, combined, theirs)
+        for case_id in combined:
+            if "]" not in case_id and "\n" not in case_id and case_id:
+                assert sc.python_test_exists(source, f"test_case[{case_id}]")
