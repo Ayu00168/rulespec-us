@@ -29,6 +29,18 @@ Invariants, for every input:
 10. Matcher consistency (when axiom-encode is importable): every run of whole
     words taken from a snapshot's text matches it under axiom-encode's
     proof-atom matcher.
+11. References by id: a `follows`, `adopts` or `pins` value that is neither
+    `reading` nor an alternative id of the entry is always reported, and
+    reordering an entry's alternatives never changes whether it passes or
+    which reading any reference names.
+12. Conflict state: `resolution` present without `conflict: resolved`, or
+    `conflict: resolved` without a `resolution` or `years.to`, is always
+    reported.
+13. Kinds: a `text_kinds` override is accepted exactly when its kind is one
+    its path's document class allows; a document class without a
+    DOCUMENT_CLASS_KINDS row is always reported.
+14. Lag: verify reports an implementation as lagging exactly when what it
+    follows differs from what it adopts (`reading` when it names none).
 
 Hypothesis is not installed in the shared validate workflow's pytest leg, so
 these skip there; the source-conflicts workflow installs it and runs them.
@@ -69,7 +81,7 @@ dates = st.dates(min_value=__import__("datetime").date(1990, 1, 1), max_value=__
 corpus_paths = st.builds(
     lambda j, c, segs: "/".join([j, c, *segs]),
     st.sampled_from(["us", "us-co", "uk-babergh"]),
-    st.sampled_from(["statute", "regulation", "guidance", "manual"]),
+    st.sampled_from(["statute", "regulation", "guidance", "manual", "form", "policy"]),
     st.lists(st.from_regex(r"[a-z0-9][a-z0-9.-]{0,5}", fullmatch=True), min_size=1, max_size=4),
 )
 urls = st.builds(lambda host, path: f"https://{host}.org/{path}", st.from_regex(r"[a-z]{3,8}", fullmatch=True), kebab)
@@ -78,6 +90,7 @@ pending = st.lists(
     st.fixed_dictionaries(
         {
             "citation": prose,
+            "kind": st.sampled_from(sc.SOURCE_KINDS),
             "url": urls,
             "snapshot": st.fixed_dictionaries(
                 {
@@ -92,13 +105,27 @@ pending = st.lists(
     ),
     max_size=3,
 )
-alternatives = st.lists(
-    st.one_of(
-        st.fixed_dictionaries({"reading": prose}),
-        st.fixed_dictionaries({"reading": prose, "effect": prose}),
-    ),
+alternative_ids = kebab.filter(lambda s: s != sc.ADOPTED_READING)
+
+
+@st.composite
+def alternatives(draw):
+    ids = draw(st.lists(alternative_ids, min_size=1, max_size=3, unique=True))
+    return [
+        {"id": alternative_id, "reading": draw(prose), **({"effect": draw(prose)} if draw(st.booleans()) else {})}
+        for alternative_id in ids
+    ]
+
+
+years_values = st.one_of(
+    st.builds(lambda start, span, kind: {"from": start, "to": start + span, "type": kind},
+              st.integers(1990, 2030), st.integers(0, 10), st.sampled_from([t for t in sc.YEAR_TYPES if t != "program"])),
+    st.builds(lambda start, note: {"from": start, "type": "program", "note": note}, st.integers(1990, 2030), prose),
+)
+unpublished = st.lists(
+    st.fixed_dictionaries({"kind": st.sampled_from(sc.SOURCE_KINDS), "description": prose, "date": dates.map(str)}),
     min_size=1,
-    max_size=3,
+    max_size=2,
 )
 records = st.fixed_dictionaries({"by": prose, "date": st.one_of(dates, dates.map(str)), "record": urls})
 confirmations = st.fixed_dictionaries(
@@ -112,7 +139,8 @@ def entries(draw, jurisdiction="us"):
     body_texts = draw(texts)
     body_pending = draw(pending)
     assume(body_texts or body_pending)
-    alts = draw(alternatives)
+    alts = draw(alternatives())
+    ids = [alt["id"] for alt in alts]
     value = {
         "id": draw(kebab),
         "jurisdiction": jurisdiction,
@@ -127,6 +155,21 @@ def entries(draw, jurisdiction="us"):
     }
     if body_pending:
         value["pending_texts"] = body_pending
+    if draw(st.booleans()):
+        value["years"] = draw(years_values)
+    if draw(st.booleans()) and "to" in value.get("years", {}):
+        value["conflict"] = "resolved"
+        value["resolution"] = {"by": draw(st.sampled_from(sc.RESOLVERS)), "effective": str(draw(dates)), "record": draw(urls)}
+    if draw(st.booleans()):
+        value["unpublished_sources"] = draw(unpublished)
+    overridable = [
+        text["corpus_citation_path"]
+        for text in body_texts
+        if len(sc.DOCUMENT_CLASS_KINDS[sc.document_class(text["corpus_citation_path"])]) > 1
+    ]
+    if overridable and draw(st.booleans()):
+        path = draw(st.sampled_from(overridable))
+        value["text_kinds"] = {path: draw(st.sampled_from(sc.DOCUMENT_CLASS_KINDS[sc.document_class(path)]))}
     if status != "open":
         value["ruling"] = draw(records)
     if status == "confirmed":
@@ -138,15 +181,20 @@ def entries(draw, jurisdiction="us"):
                 "repo": "PolicyEngine/microcosm-dynamics",
                 "commit": commit,
                 "path": "src/x.py",
-                "follows": draw(st.sampled_from(["reading", *[f"alternatives[{i}]" for i in range(len(alts))]])),
+                "follows": draw(st.sampled_from(["reading", *ids])),
                 "cites_entry": draw(st.booleans()),
             }
         ]
+        if draw(st.booleans()):
+            value["implementations"][0]["adopts"] = draw(st.sampled_from(["reading", *ids]))
+            value["implementations"][0]["basis"] = draw(prose)
+            if draw(st.booleans()):
+                value["implementations"][0]["ruling"] = draw(records)
         value["tests"] = [
             {"repo": "PolicyEngine/microcosm-dynamics", "commit": commit, "path": "tests/test_x.py", "name": "test_default", "pins": ["reading"]}
         ] + [
-            {"repo": "PolicyEngine/microcosm-dynamics", "commit": commit, "path": "tests/test_x.py", "name": f"test_alt_{i}", "pins": [f"alternatives[{i}]"]}
-            for i in range(len(alts))
+            {"repo": "PolicyEngine/microcosm-dynamics", "commit": commit, "path": "tests/test_x.py", "name": f"test_alt_{i}", "pins": [alternative_id]}
+            for i, alternative_id in enumerate(ids)
         ]
     if draw(st.booleans()):
         value["money_case"] = {
@@ -232,7 +280,7 @@ def test_round_trip_and_drift(tmp_path, value, field):
     write(carried)
     assert sc.check_register({"version": 1, "entries": [value]}, ctx) == []
     drifted = copy.deepcopy(carried)
-    drifted[field] = {"texts": [], "alternatives": [{"reading": "different"}]}.get(field, "different")
+    drifted[field] = {"texts": [], "alternatives": [{"id": "different", "reading": "different"}]}.get(field, "different")
     if field == "status":
         drifted["status"] = "open" if value["status"] != "open" else "ruled"
     if field == "ruling":
@@ -296,6 +344,21 @@ def _encoder_validator():
     validator = getattr(proof_validator, "_validate_module_interpretations", None)
     if validator is None:
         pytest.skip("this axiom-encode predates module.interpretations")
+    probe = {
+        "id": "probe",
+        "question": "q",
+        "texts": [{"corpus_citation_path": "us/statute/1/1", "excerpt": "x"}],
+        "reading": "r",
+        "alternatives": [{"id": "other", "reading": "a"}],
+        "basis": "b",
+        "status": "open",
+        "affects": ["rule_a"],
+    }
+    if validator({"module": {"interpretations": [probe]}, "rules": [{"name": "rule_a"}]}, source_texts=None):
+        pytest.skip(
+            "this axiom-encode does not accept alternatives[].id yet; the required id lands in "
+            "TheAxiomFoundation/axiom-encode#1835 and TheAxiomFoundation/axiom-rules-engine#247"
+        )
     return validator
 
 
@@ -314,6 +377,9 @@ MUTATIONS = [
     lambda item: item.__setitem__("ruling", {"by": "Org", "date": "2026-02-30", "record": "https://x.org/1"}),
     lambda item: item.__setitem__("ruling", {"by": "Org", "date": "2026-02-03", "record": "http://x.org/1"}),
     lambda item: item.__setitem__("confirmation", {"by": "Org", "date": "2026-02-03"}),
+    lambda item: item["alternatives"][0].pop("id"),
+    lambda item: item["alternatives"][0].__setitem__("id", "Not_Kebab"),
+    lambda item: item["alternatives"].append(dict(item["alternatives"][0])),
 ]
 
 
@@ -342,3 +408,110 @@ def test_word_runs_match_under_encoder_matcher(words, data):
     start = data.draw(st.integers(0, len(tokens) - 1))
     end = data.draw(st.integers(start + 1, len(tokens)))
     assert matches(text, " ".join(tokens[start:end]))
+
+
+# 11. References by id
+@SETTINGS
+@given(value=entries(), ref=st.text(max_size=20), field=st.sampled_from(["follows", "adopts", "pins"]))
+def test_unknown_reading_references_fail(tmp_path, value, ref, field):
+    value = copy.deepcopy(value)
+    assume(ref != sc.ADOPTED_READING and ref not in sc.alternative_ids(value["alternatives"]))
+    commit = "c" * 40
+    implementation = {"repo": "PolicyEngine/policyengine-us", "commit": commit, "path": "x.py", "follows": "reading", "cites_entry": False}
+    value["implementations"] = [implementation]
+    value["tests"] = [{"repo": "PolicyEngine/policyengine-us", "commit": commit, "path": "t.py", "name": "test_x", "pins": ["reading"]}]
+    if field == "pins":
+        value["tests"][0]["pins"] = ["reading", ref]
+    else:
+        implementation[field] = ref
+        implementation["basis"] = "why"
+    issues = sc.check_register({"version": 1, "entries": [value]}, repo(tmp_path), scan_modules=False)
+    assert any("which is neither `reading` nor the id" in issue or "must be `reading` or the id" in issue for issue in issues)
+
+
+def _resolved_reading(entry, ref):
+    if ref == sc.ADOPTED_READING:
+        return entry["reading"]
+    return next(alt["reading"] for alt in entry["alternatives"] if alt["id"] == ref)
+
+
+@SETTINGS
+@given(value=entries(), data=st.data())
+def test_reordering_alternatives_keeps_validity_and_picks(tmp_path, value, data):
+    shuffled = copy.deepcopy(value)
+    shuffled["alternatives"] = data.draw(st.permutations(value["alternatives"]))
+    ctx = repo(tmp_path)
+    check = lambda e: sc.check_register({"version": 1, "entries": [e]}, ctx, scan_modules=False)  # noqa: E731
+    assert check(shuffled) == check(value) == []
+    for before, after in zip(value.get("implementations", []), shuffled.get("implementations", [])):
+        for key in ("follows", "adopts"):
+            if key in before:
+                assert _resolved_reading(value, before[key]) == _resolved_reading(shuffled, after[key])
+
+
+# 12. Conflict state
+@SETTINGS
+@given(value=entries(), conflict=st.sampled_from([None, "live", "resolved"]), with_resolution=st.booleans(), with_to=st.booleans())
+def test_conflict_state_rules(tmp_path, value, conflict, with_resolution, with_to):
+    value = copy.deepcopy(value)
+    for key in ("conflict", "resolution"):
+        value.pop(key, None)
+    value["years"] = {"from": 2020, "type": "tax", **({"to": 2023} if with_to else {})}
+    if conflict is not None:
+        value["conflict"] = conflict
+    if with_resolution:
+        value["resolution"] = {"by": "agency", "effective": "2024-01-01", "record": "https://example.org/r"}
+    issues = sc.check_register({"version": 1, "entries": [value]}, repo(tmp_path), scan_modules=False)
+    resolved = conflict == "resolved"
+    expected_wrong = (resolved and not with_resolution) or (not resolved and with_resolution) or (resolved and not with_to)
+    assert bool(issues) == expected_wrong, issues
+    if not resolved and with_resolution:
+        assert any("resolution must be absent while conflict is `live`" in issue for issue in issues)
+
+
+# 13. Kinds
+@SETTINGS
+@given(value=entries(), document_class=st.sampled_from(sorted(sc.DOCUMENT_CLASS_KINDS)), kind=st.sampled_from(sc.SOURCE_KINDS))
+def test_text_kind_overrides_match_the_document_class(tmp_path, value, document_class, kind):
+    value = copy.deepcopy(value)
+    path = f"us/{document_class}/a/1"
+    value["texts"] = [{"corpus_citation_path": path, "excerpt": "words"}]
+    value["text_kinds"] = {path: kind}
+    issues = sc.check_register({"version": 1, "entries": [value]}, repo(tmp_path), scan_modules=False)
+    allowed = kind in sc.DOCUMENT_CLASS_KINDS[document_class]
+    assert (not any("text_kinds" in issue for issue in issues)) == allowed
+    assert sc.text_kind(value, path) == kind
+
+
+@SETTINGS
+@given(value=entries(), document_class=st.from_regex(r"[a-z][a-z-]{1,12}", fullmatch=True))
+def test_unknown_document_classes_fail_closed(tmp_path, value, document_class):
+    assume(document_class not in sc.DOCUMENT_CLASS_KINDS)
+    value = copy.deepcopy(value)
+    value.pop("text_kinds", None)
+    value["texts"] = [{"corpus_citation_path": f"us/{document_class}/a/1", "excerpt": "words"}]
+    issues = sc.check_register({"version": 1, "entries": [value]}, repo(tmp_path), scan_modules=False)
+    assert any("has no DOCUMENT_CLASS_KINDS row" in issue for issue in issues)
+    assert sc.text_kind(value, f"us/{document_class}/a/1") is None
+
+
+# 14. Lag
+@SETTINGS
+@given(value=entries(), data=st.data())
+def test_verify_lag_iff_follows_differs_from_adopts(value, data):
+    value = copy.deepcopy(value)
+    value["texts"] = []
+    value.pop("pending_texts", None)
+    refs = ["reading", *sc.alternative_ids(value["alternatives"])]
+    follows = data.draw(st.sampled_from(refs))
+    adopts = data.draw(st.one_of(st.none(), st.sampled_from(refs)))
+    implementation = {"repo": "PolicyEngine/policyengine-us", "commit": "c" * 40, "path": "x.py", "follows": follows, "cites_entry": False}
+    if adopts is not None:
+        implementation["adopts"] = adopts
+    value["implementations"] = [implementation]
+    value["tests"] = []
+    _, report = sc.verify_register(
+        {"version": 1, "entries": [value]}, fetch=lambda repo, commit, path: b"", matches=lambda a, b: True, resolve=None
+    )
+    lagging = any(line.startswith("lags:") for line in report)
+    assert lagging == (follows != (adopts or "reading"))

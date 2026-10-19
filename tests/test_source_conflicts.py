@@ -79,6 +79,7 @@ def entry(**overrides):
         "pending_texts": [
             {
                 "citation": "POMS RS 00630.400",
+                "kind": "manual",
                 "url": "https://secure.ssa.gov/poms.nsf/lnx/0300630400",
                 "snapshot": {
                     "repo": "PolicyEngine/microcosm-dynamics",
@@ -90,7 +91,7 @@ def entry(**overrides):
             }
         ],
         "reading": "Protect only when a PIA increase itself lowers the family total.",
-        "alternatives": [{"reading": "Protect every later month.", "effect": "More months refused."}],
+        "alternatives": [{"id": "every-later-month", "reading": "Protect every later month.", "effect": "More months refused."}],
         "basis": "SSA's operational chart.",
         "status": "ruled",
         "ruling": {"by": "Axiom Foundation", "date": "2026-10-12", "record": "https://github.com/x/y/pull/1"},
@@ -100,7 +101,7 @@ def entry(**overrides):
                 "repo": "PolicyEngine/microcosm-dynamics",
                 "commit": COMMIT,
                 "path": "src/gross_benefits.py",
-                "follows": "alternatives[0]",
+                "follows": "every-later-month",
                 "cites_entry": False,
             }
         ],
@@ -117,7 +118,7 @@ def entry(**overrides):
                 "commit": COMMIT,
                 "path": "tests/test_g.py",
                 "name": "TestLiteral::test_refuses[child-ages-out]",
-                "pins": ["alternatives[0]"],
+                "pins": ["every-later-month"],
             },
         ],
         "money_case": {"description": "A survivor family after a child ages out.", "amount": "21.00", "currency": "USD", "period": "month"},
@@ -303,24 +304,83 @@ def test_outcome_enum(tmp_path):
 def test_reading_references(tmp_path):
     ctx = make_repo(tmp_path)
     bad = entry()
-    bad["tests"][1]["pins"] = ["alternatives[3]"]
+    bad["tests"][1]["pins"] = ["no-such-alternative"]
     bad["implementations"][0]["follows"] = "literal"
     issues = check(ctx, bad)
-    assert any("names alternatives[3], which this entry does not have" in issue for issue in issues)
-    assert any("follows must be `reading` or `alternatives[N]`" in issue for issue in issues)
-    assert sc.reading_index("reading") is None
-    assert sc.reading_index("alternatives[12]") == 12
-    with pytest.raises(ValueError):
-        sc.reading_index("alternatives[01]")
+    assert any("pins[0] names `no-such-alternative`, which is neither `reading` nor the id" in issue for issue in issues)
+    assert any("follows names `literal`, which is neither" in issue for issue in issues)
+    blank = entry()
+    blank["implementations"][0]["follows"] = ""
+    assert any("follows must be `reading` or the id of one of this entry's alternatives" in issue for issue in check(ctx, blank))
+
+
+@pytest.mark.parametrize("ref", ["alternatives[0]", "alternatives[1]", "0"])
+def test_positional_references_are_rejected(tmp_path, ref):
+    # References name alternatives by id: a position would silently move to
+    # another alternative when one is inserted or reordered.
+    bad = entry()
+    bad["implementations"][0]["follows"] = ref
+    bad["tests"][1]["pins"] = [ref]
+    issues = check(make_repo(tmp_path), bad)
+    assert any(f"follows names `{ref}`" in issue for issue in issues)
+    assert any(f"pins[0] names `{ref}`" in issue for issue in issues)
+
+
+def test_reordering_alternatives_keeps_every_reference(tmp_path):
+    ctx = make_repo(tmp_path)
+    value = entry()
+    value["alternatives"].insert(0, {"id": "inserted-first", "reading": "Another reading."})
+    assert check(ctx, value) == []
+    value["alternatives"].reverse()
+    assert check(ctx, value) == []
+    assert value["implementations"][0]["follows"] == "every-later-month"
+
+
+@pytest.mark.parametrize(
+    ("alternatives", "fragment"),
+    [
+        ([{"reading": "No id."}], "alternatives[0].id is required"),
+        ([{"id": "Not_Kebab", "reading": "x"}], "alternatives[0].id must match"),
+        ([{"id": "reading", "reading": "x"}], "must not be `reading`"),
+        ([{"id": "same", "reading": "x"}, {"id": "same", "reading": "y"}], "alternatives[1].id `same` repeats"),
+        ([{"id": 3, "reading": "x"}], "alternatives[0].id must match"),
+    ],
+)
+def test_alternative_ids(tmp_path, alternatives, fragment):
+    bad = entry(alternatives=alternatives, implementations=[], tests=[])
+    del bad["implementations"], bad["tests"]
+    assert any(fragment in issue for issue in check(make_repo(tmp_path), bad)), fragment
+
+
+def test_consumer_adopts_its_own_reading(tmp_path):
+    ctx = make_repo(tmp_path)
+    value = entry()
+    implementation = value["implementations"][0]
+    implementation["adopts"] = "every-later-month"
+    implementation["basis"] = "This consumer follows the statute when it conflicts with an agency manual."
+    implementation["ruling"] = {"by": "PolicyEngine", "date": "2026-10-19", "record": "https://github.com/x/y/pull/2"}
+    assert check(ctx, value) == []
+    unknown = copy.deepcopy(value)
+    unknown["implementations"][0]["adopts"] = "statute"
+    assert any("adopts names `statute`, which is neither" in issue for issue in check(ctx, unknown))
+    no_basis = copy.deepcopy(value)
+    del no_basis["implementations"][0]["basis"]
+    assert any("basis is required with adopts or ruling" in issue for issue in check(ctx, no_basis))
+    bad_ruling = copy.deepcopy(value)
+    bad_ruling["implementations"][0]["ruling"]["record"] = "http://example.com"
+    assert any("implementations[0].ruling.record must be an https URL" in issue for issue in check(ctx, bad_ruling))
+    blank_basis = copy.deepcopy(value)
+    blank_basis["implementations"][0]["basis"] = " "
+    assert any("implementations[0].basis must be a non-blank string" in issue for issue in check(ctx, blank_basis))
 
 
 def test_every_followed_reading_is_pinned(tmp_path):
     ctx = make_repo(tmp_path)
     bad = entry()
-    bad["tests"] = [bad["tests"][0]]  # pins reading only; the implementation follows alternatives[0]
-    assert any("follows alternatives[0], which no test pins" in issue for issue in check(ctx, bad))
+    bad["tests"] = [bad["tests"][0]]  # pins reading only; the implementation follows every-later-month
+    assert any("follows every-later-month, which no test pins" in issue for issue in check(ctx, bad))
     both = entry()
-    both["tests"] = [{**both["tests"][0], "pins": ["reading", "alternatives[0]"]}]
+    both["tests"] = [{**both["tests"][0], "pins": ["reading", "every-later-month"]}]
     assert check(ctx, both) == []
     no_adopter = entry(tests=[entry()["tests"][1]])
     del no_adopter["implementations"]
@@ -372,7 +432,7 @@ def test_in_repo_tests_must_exist(tmp_path):
     good = entry()
     good["tests"] = [
         {"path": "us/statutes/42/403/a/5.test.yaml", "name": "saving_clause_case", "pins": ["reading"]},
-        {"path": "tests/test_local.py", "name": "TestX::test_y", "pins": ["alternatives[0]"]},
+        {"path": "tests/test_local.py", "name": "TestX::test_y", "pins": ["every-later-month"]},
     ]
     assert check(ctx, good) == []
     bad = copy.deepcopy(good)
@@ -391,8 +451,32 @@ def test_test_path_and_name_shapes(tmp_path):
     bad["tests"][0]["path"] = "tests/test_g.js"
     bad["tests"][1]["name"] = "not a name"
     issues = check(make_repo(tmp_path), bad)
-    assert any("relative .py or .test.yaml path" in issue for issue in issues)
+    assert any("relative .py or .yaml path" in issue for issue in issues)
     assert any("must be a test function" in issue for issue in issues)
+    local = entry()
+    local["tests"] = [{"path": "tests/cases.yaml", "name": "a case", "pins": ["reading"]}]
+    assert any("relative .py or .test.yaml path" in issue for issue in check(make_repo(tmp_path), local))
+
+
+def test_external_yaml_test_cases(tmp_path):
+    # Another repository's YAML policy tests (PolicyEngine-US) are pinned by
+    # repo, commit, path and case name; the case name is free text.
+    ctx = make_repo(tmp_path)
+    value = entry()
+    value["tests"][1] = {
+        "repo": "PolicyEngine/policyengine-us",
+        "commit": COMMIT,
+        "path": "policyengine_us/tests/policy/baseline/gov/states/hi/tax/income/claim_of_right.yaml",
+        "name": "Hawaii, repayment over $3,000, statute reading",
+        "pins": ["every-later-month"],
+    }
+    assert check(ctx, value) == []
+    for name in ("", " padded", "two\nlines", 7):
+        bad = copy.deepcopy(value)
+        bad["tests"][1]["name"] = name
+        assert any("must be a YAML test case's name, on one line" in issue for issue in check(ctx, bad)), name
+    assert sc.test_exists("cases.yaml", "Hawaii case", "- name: Hawaii case\n  input: {}\n")
+    assert not sc.test_exists("cases.yaml", "Other case", "- name: Hawaii case\n")
 
 
 def test_repeated_test_reference(tmp_path):
@@ -415,6 +499,153 @@ def test_money_case(tmp_path, field, value, fragment):
     bad = entry()
     bad["money_case"][field] = value
     assert any(fragment in issue for issue in check(make_repo(tmp_path), bad))
+
+
+# ---------------------------------------------------------------------------
+# Source kinds, years, conflict state, unpublished sources
+
+# Every document class the corpus used when this was written (second segment
+# of data/corpus/provisions/<jurisdiction>/<class>/ in axiom-corpus). A class
+# missing from DOCUMENT_CLASS_KINDS fails closed, so a new one must get a row.
+CORPUS_DOCUMENT_CLASSES = ("statute", "regulation", "rulemaking", "form", "guidance", "manual", "policy", "district-plan")
+
+
+def test_every_corpus_document_class_has_a_kind_row():
+    assert set(CORPUS_DOCUMENT_CLASSES) <= set(sc.DOCUMENT_CLASS_KINDS)
+    for document_class, kinds in sc.DOCUMENT_CLASS_KINDS.items():
+        assert kinds, document_class
+        assert set(kinds) <= set(sc.SOURCE_KINDS), document_class
+
+
+def test_text_kind_is_derived_from_the_document_class(tmp_path):
+    value = entry()
+    assert sc.text_kind(value, "us/statute/42/403/a/5") == "statute"
+    assert sc.text_kind(value, "us-hi/form/n-11/2024/instructions") == "form"
+    assert sc.text_kind(value, "us/unknown-class/x") is None
+    value["text_kinds"] = {"us/statute/42/403/a/5": "statute"}
+    assert sc.text_kind(value, "us/statute/42/403/a/5") == "statute"
+
+
+def test_unknown_document_class_fails_closed(tmp_path):
+    bad = entry(texts=[{"corpus_citation_path": "us/opinion/2026/1", "excerpt": "x"}])
+    assert any("document class `opinion` has no DOCUMENT_CLASS_KINDS row" in issue for issue in check(make_repo(tmp_path), bad))
+
+
+def test_text_kinds_override(tmp_path):
+    ctx = make_repo(tmp_path)
+    form_text = {"corpus_citation_path": "us-co/form/dr-0347/2025/line-1", "excerpt": "a qualifying child"}
+    good = entry(texts=[entry()["texts"][0], form_text], text_kinds={"us-co/form/dr-0347/2025/line-1": "instructions"})
+    assert check(ctx, good) == []
+    assert sc.text_kind(good, "us-co/form/dr-0347/2025/line-1") == "instructions"
+    for overrides, fragment in (
+        ({"us/statute/42/403/a/5": "instructions"}, "a `statute` path can only be statute"),
+        ({"us-co/form/dr-0347/2025/line-1": "speech"}, "must be one of statute"),
+        ({"us/statute/42/403/a/6": "statute"}, "not one of this entry's texts"),
+        ({}, "non-empty mapping"),
+        ("instructions", "non-empty mapping"),
+    ):
+        bad = copy.deepcopy(good)
+        bad["text_kinds"] = overrides
+        assert any(fragment in issue for issue in check(ctx, bad)), overrides
+
+
+@pytest.mark.parametrize("kind", [None, "", "Manual", "speech"])
+def test_pending_text_kind_is_a_closed_enum(tmp_path, kind):
+    bad = entry()
+    if kind is None:
+        del bad["pending_texts"][0]["kind"]
+    else:
+        bad["pending_texts"][0]["kind"] = kind
+    assert any("pending_texts[0].kind must be one of" in issue for issue in check(make_repo(tmp_path), bad))
+
+
+@pytest.mark.parametrize(
+    ("years", "fragment"),
+    [
+        ({"from": 2022, "to": 2025, "type": "tax"}, None),
+        ({"from": 2024, "type": "tax"}, None),
+        ({"from": 2026, "to": 2026, "type": "federal-fiscal"}, None),
+        ({"from": 2025, "type": "program", "note": "LIHEAP program year, October to September"}, None),
+        ({"from": 2025, "type": "program"}, "note is required when type is `program`"),
+        ({"from": 2025, "to": 2022, "type": "tax"}, "is before"),
+        ({"from": "2022", "type": "tax"}, "from must be a whole year"),
+        ({"from": True, "type": "tax"}, "from must be a whole year"),
+        ({"from": 1800, "type": "tax"}, "from must be a whole year"),
+        ({"from": 2022, "to": None, "type": "tax"}, "to must be a whole year"),
+        ({"to": 2022, "type": "tax"}, "from must be a whole year"),
+        ({"from": 2022, "type": "school"}, "type must be one of"),
+        ({"from": 2022}, "type must be one of"),
+        ({"from": 2022, "type": "tax", "until": 2023}, "unknown key `until`"),
+        ({"from": 2022, "type": "tax", "note": " "}, "note must be a non-blank string"),
+        ("2022-2025", "years must be a mapping"),
+    ],
+)
+def test_years(tmp_path, years, fragment):
+    issues = check(make_repo(tmp_path), entry(years=years))
+    if fragment is None:
+        assert issues == []
+    else:
+        assert any(fragment in issue for issue in issues), issues
+
+
+RESOLUTION = {"by": "legislation", "effective": "2026-01-01", "record": "https://github.com/x/y/issues/3"}
+
+
+def test_conflict_and_resolution_go_together(tmp_path):
+    ctx = make_repo(tmp_path)
+    resolved = entry(conflict="resolved", resolution=dict(RESOLUTION), years={"from": 2022, "to": 2025, "type": "tax"})
+    assert check(ctx, resolved) == []
+    assert check(ctx, entry(conflict="live")) == []
+    cases = (
+        (entry(conflict="resolved", years={"from": 2022, "to": 2025, "type": "tax"}), "resolution is required when conflict is `resolved`"),
+        (entry(resolution=dict(RESOLUTION)), "resolution must be absent while conflict is `live`"),
+        (entry(conflict="live", resolution=dict(RESOLUTION)), "resolution must be absent while conflict is `live`"),
+        (entry(conflict="resolved", resolution=dict(RESOLUTION), years={"from": 2022, "type": "tax"}), "years.to is required"),
+        (entry(conflict="resolved", resolution=dict(RESOLUTION)), "years.to is required"),
+        (entry(conflict="closed"), "conflict must be live or resolved"),
+    )
+    for value, fragment in cases:
+        assert any(fragment in issue for issue in check(ctx, value)), fragment
+    for field, value, fragment in (
+        ("by", "court", "by must be legislation or agency"),
+        ("effective", "2026-02-30", "effective must be a real"),
+        ("record", "http://example.com", "record must be an https URL"),
+    ):
+        bad = copy.deepcopy(resolved)
+        bad["resolution"][field] = value
+        assert any(fragment in issue for issue in check(ctx, bad)), field
+
+
+UNPUBLISHED = {"kind": "agency-practice", "description": "MN DHS correspondence on approved guardian fees", "date": "2026-10-19"}
+
+
+@pytest.mark.parametrize(
+    ("change", "fragment"),
+    [
+        ({}, None),
+        ({"description": 'The department "approves one hundred dollars a month" in practice'}, "quotes more than 4 words"),
+        ({"description": "The department \u201capproves one hundred dollars a month\u201d"}, "quotes more than 4 words"),
+        ({"description": 'The department "approves $100" in practice'}, None),
+        ({"description": "Reply from someone@example.gov"}, "contains `@`"),
+        ({"kind": "phone"}, "kind must be one of"),
+        ({"date": "October 19"}, "date must be a real"),
+        ({"description": " "}, "description must be a non-blank string"),
+        ({"excerpt": "verbatim words"}, "unknown key `excerpt`"),
+    ],
+)
+def test_unpublished_sources(tmp_path, change, fragment):
+    issues = check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, **change}]))
+    if fragment is None:
+        assert issues == []
+    else:
+        assert any(fragment in issue for issue in issues), issues
+
+
+def test_unpublished_sources_shape(tmp_path):
+    ctx = make_repo(tmp_path)
+    assert any("unpublished_sources must be a non-empty list" in issue for issue in check(ctx, entry(unpublished_sources=[])))
+    missing = {key: value for key, value in UNPUBLISHED.items() if key != "date"}
+    assert any("unpublished_sources[0].date is required" in issue for issue in check(ctx, entry(unpublished_sources=[missing])))
 
 
 # ---------------------------------------------------------------------------
@@ -642,7 +873,28 @@ def test_verify_passes_and_reports_lag_and_uncited():
     assert issues == []
     assert report[0] == "verified: 1 texts, 1 pending texts, 1 implementations, 2 tests"
     assert any(line.startswith("uncited:") for line in report)
-    assert any(line.startswith("lags:") for line in report)
+    assert "lags: us:family-maximum-saving-clause (entries[0]).implementations[0] follows every-later-month, not the reading it adopts (reading)" in report
+
+
+def test_verify_lag_is_measured_against_what_the_consumer_adopts():
+    payload, net, corpus = verified_inputs()
+    implementation = payload["entries"][0]["implementations"][0]
+    implementation["adopts"] = "every-later-month"
+    implementation["basis"] = "Follows the statute."
+    issues, report = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get)
+    assert issues == []
+    assert not any(line.startswith("lags:") for line in report)
+    implementation["follows"] = "reading"
+    _, report = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get)
+    assert any("follows reading, not the reading it adopts (every-later-month)" in line for line in report)
+
+
+def test_verify_lists_unpublished_sources_as_unverifiable():
+    payload, net, corpus = verified_inputs()
+    payload["entries"][0]["unpublished_sources"] = [dict(UNPUBLISHED)]
+    issues, report = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get)
+    assert issues == []
+    assert any(line.startswith("unverifiable:") and "MN DHS correspondence" in line for line in report)
 
 
 def test_verify_findings():
@@ -702,6 +954,22 @@ def test_aggregate_rows_and_collisions():
     markdown = sc.render_markdown(rows)
     assert markdown.startswith("# Source conflicts across Axiom registers")
     assert "21.00 USD/month" in markdown
+
+
+def test_aggregate_carries_years_kinds_conflict_and_adopts():
+    value = entry(years={"from": 2022, "to": 2025, "type": "tax"}, unpublished_sources=[dict(UNPUBLISHED)])
+    value["implementations"][0]["adopts"] = "every-later-month"
+    rows, issues = sc.aggregate({"TheAxiomFoundation/rulespec-us": {"version": 1, "entries": [value]}})
+    assert issues == []
+    row = rows[0]
+    assert row["years"] == {"from": 2022, "to": 2025, "type": "tax"}
+    assert row["conflict"] == "live"
+    assert row["source_kinds"] == ["agency-practice", "manual", "statute"]
+    assert row["alternatives"] == [{"id": "every-later-month", "reading": "Protect every later month."}]
+    assert row["implementations"][0]["adopts"] == "every-later-month"
+    markdown = sc.render_markdown(rows)
+    assert "2022\u20132025 (tax)" in markdown
+    assert "agency-practice, manual, statute" in markdown
 
 
 def test_citation_label():

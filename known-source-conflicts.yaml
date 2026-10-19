@@ -20,9 +20,19 @@
 # pending_texts against their pinned snapshots. Field reference:
 # tools/README.md, "Source-conflict register".
 #
+# Every alternative has an id. follows, adopts and pins name `reading` or an
+# alternative id, never a position. Code outside RuleSpec (implementations) may
+# adopt a reading other than the entry's own, with a basis and optionally its
+# own ruling; it lags only when what it follows differs from what it adopts.
+# Each source has a kind: corpus texts take it from their document class (with
+# text_kinds to narrow it), pending_texts and unpublished_sources state it.
+# years bounds the disagreement; conflict: resolved (with a resolution) marks
+# one a legislature or agency has closed.
+#
 # The register is public: no people's names, decision-queue ids, session
 # ids, local paths or email addresses. ruling.by is an organisation and
-# ruling.record a public PR, issue or comment.
+# ruling.record a public PR, issue or comment. An unpublished source
+# (correspondence) is described, never quoted or named.
 version: 1
 entries:
 - id: oasdi-ret-negative-nese-proration
@@ -33,6 +43,7 @@ entries:
   texts: []
   pending_texts:
   - citation: POMS RS 02501.080B.2.c
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0302501080
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -42,6 +53,7 @@ entries:
     excerpt: prorate the net earnings (or loss) equally over all months the beneficiary was engaged in
       self-employment
   - citation: POMS RS 02501.080B.2.c (note)
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0302501080
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -52,7 +64,8 @@ entries:
       multiplying by the months before the beneficiary attains FRA.
   reading: Floor the monthly NESE share to whole dollars, losses included (the literal "round down").
   alternatives:
-  - reading: 'Drop the cents: truncate a negative monthly share toward zero.'
+  - id: drop-the-cents
+    reading: 'Drop the cents: truncate a negative monthly share toward zero.'
     effect: In the invented case the drop-the-cents reading withholds $1 more for the year.
   basis: The note's last instruction is "round down", which for a negative amount is the mathematical
     floor; the two readings agree on every published positive example.
@@ -75,14 +88,14 @@ entries:
     name: test_negative_nese_floor_and_drop_cents_readings_are_explicit
     pins:
     - reading
-    - alternatives[0]
+    - drop-the-cents
   - repo: PolicyEngine/microcosm-dynamics
     commit: f43eee7afc46c643729dec8d6d4227cb5c77a678
     path: tests/test_track_b_ret_ledger.py
     name: test_negative_nese_reading_changes_final_deduction_by_one_dollar
     pins:
     - reading
-    - alternatives[0]
+    - drop-the-cents
   money_case:
     description: 'June FRA year, annual NESE loss of $13 over twelve months and pre-FRA wages $13 above
       the higher exempt amount, $600 January rate: the January check is $599 under floor and $598 under
@@ -98,6 +111,7 @@ entries:
   texts: []
   pending_texts:
   - citation: 20 CFR 404.435(b)(3)
+    kind: regulation
     url: https://www.ecfr.gov/api/versioner/v1/full/2026-10-07/title-20.xml?part=404&subpart=E
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -108,6 +122,7 @@ entries:
       entitled to disability benefits under section 223 of the Social Security Act or as a disabled widow,
       widower, or child under section 202.
   - citation: POMS RS 02501.030B.4
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0302501030
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -117,6 +132,7 @@ entries:
     excerpt: If the beneficiary becomes simultaneously entitled to RIB and DIB benefits, the earnings
       test (ET) applies to any month they elect to receive RIB.
   - citation: POMS RS 02501.030B.4
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0302501030
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -127,7 +143,8 @@ entries:
   reading: No non-service months while the beneficiary is entitled to disability benefits, even in months
     RIB is elected (20 CFR 404.435(b)(3)).
   alternatives:
-  - reading: Count non-service months for any month RIB is elected during simultaneous entitlement (POMS
+  - id: poms-election-month
+    reading: Count non-service months for any month RIB is elected during simultaneous entitlement (POMS
       RS 02501.030B.4).
     effect: In the invented case all $4,200 of June-December benefits is paid instead of withheld.
   basis: The regulation's exclusion is categorical; the POMS exception is operational guidance the regulation
@@ -151,21 +168,21 @@ entries:
     name: test_simultaneous_dib_rib_source_readings_change_4200_dollars
     pins:
     - reading
-    - alternatives[0]
+    - poms-election-month
   - repo: PolicyEngine/microcosm-dynamics
     commit: f43eee7afc46c643729dec8d6d4227cb5c77a678
     path: tests/test_track_b_ret_ledger_readings.py
     name: test_property_explicit_poms_election_protects_only_eligible_rib_months
     pins:
     - reading
-    - alternatives[0]
+    - poms-election-month
   - repo: PolicyEngine/microcosm-dynamics
     commit: f43eee7afc46c643729dec8d6d4227cb5c77a678
     path: tests/test_track_b_ret_grace.py
     name: test_simultaneous_disability_cfr_default_and_poms_alternative_are_explicit
     pins:
     - reading
-    - alternatives[0]
+    - poms-election-month
   money_case:
     description: '2026: $45,000 January wages, then entitlement to RIB and DIB in June with RIB elected
       at $600 a month and no work June-December: $4,200 withheld under the CFR reading, $4,200 paid under
@@ -189,6 +206,7 @@ entries:
       individual became so entitled prior to attaining age 60
   pending_texts:
   - citation: 20 CFR 404.435(a)(5)
+    kind: regulation
     url: https://www.ecfr.gov/api/versioner/v1/full/2026-10-07/title-20.xml?part=404&subpart=E
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -197,6 +215,7 @@ entries:
       sha256: fa67514821b77e8a88cdeacacb420341e6481d0cfa0c662233b5359f0d67f39b
     excerpt: Are age 18 or over and entitled to a child's insurance benefit based on disability
   - citation: 20 CFR 404.435(a)(6)
+    kind: regulation
     url: https://www.ecfr.gov/api/versioner/v1/full/2026-10-07/title-20.xml?part=404&subpart=E
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -207,7 +226,8 @@ entries:
   reading: Exempt automatically only the CFR's disability-based categories; the Act's age clauses apply
     only when the caller explicitly asserts the entitlement, age facts and any 402(s) condition.
   alternatives:
-  - reading: Apply the Act's 203(f)(1)(C)-(D) age clauses automatically, subject to section 202(s).
+  - id: act-age-clauses
+    reading: Apply the Act's 203(f)(1)(C)-(D) age clauses automatically, subject to section 202(s).
     effect: In the invented case the child or widow keeps $600 more for the year.
   basis: The Act's age clauses are subject to 202(s), which is not captured or adjudicated here, so the
     CFR's narrower disability categories are the automatic default and the broader reading needs an explicit
@@ -231,13 +251,13 @@ entries:
     name: test_optional_act_age_exemptions_are_an_explicit_600_dollar_reading
     pins:
     - reading
-    - alternatives[0]
+    - act-age-clauses
   - repo: PolicyEngine/microcosm-dynamics
     commit: f43eee7afc46c643729dec8d6d4227cb5c77a678
     path: tests/test_track_b_ret_ledger_readings.py
     name: test_property_other_statutory_own_exemptions_protect_only_that_workers_excess
     pins:
-    - alternatives[0]
+    - act-age-clauses
   money_case:
     description: 'An ordinary $200-a-month child or widow with earnings $1,200 above the lower exempt
       amount: $600 withheld by default, nothing withheld under the Act''s age clauses.'
@@ -256,6 +276,7 @@ entries:
     excerpt: is married to an individual entitled to old-age insurance benefits under section 402(a)
   pending_texts:
   - citation: 20 CFR 404.420
+    kind: regulation
     url: https://www.ecfr.gov/api/versioner/v1/full/2026-10-07/title-20.xml?part=404&subpart=E
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -264,6 +285,7 @@ entries:
       sha256: fa67514821b77e8a88cdeacacb420341e6481d0cfa0c662233b5359f0d67f39b
     excerpt: a person who is married to an old-age insurance beneficiary
   - citation: POMS RS 02501.140
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0302501140
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -275,11 +297,13 @@ entries:
   reading: Refuse deemed entitlement outside the married basis of Act 203(b)(1) and 20 CFR 404.420, and
     refuse an ordinary (non-disabled) deemed adult child; the refusals are counted.
   alternatives:
-  - reading: 'POMS RS 02501.140: deem an unmarried spouse or child receiving benefits on another record
+  - id: poms-unmarried-deemed
+    reading: 'POMS RS 02501.140: deem an unmarried spouse or child receiving benefits on another record
       entitled.'
     effect: The number holder's excess would also be charged against that recipient's benefit ($200 in
       the invented case).
-  - reading: 'Act 203(b)(1): deem a married ordinary adult child entitled, not only a disabled one.'
+  - id: act-married-ordinary-child
+    reading: 'Act 203(b)(1): deem a married ordinary adult child entitled, not only a disabled one.'
     effect: The same $200 would be charged in the married ordinary-child version of the case.
   basis: The Act and the CFR both require marriage to the number holder; POMS's wording is broader, and
     the CFR's child basis is disability. No amount is computed for a case only the broader wording would
@@ -324,6 +348,7 @@ entries:
   texts: []
   pending_texts:
   - citation: POMS RS 00615.003
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0300615003
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -332,6 +357,7 @@ entries:
       sha256: 935b391658a9f94117fde850fa4eb88293eb9ac5f19e05a5b9f946c4e15e6c2d
     excerpt: People Born from 1/2/1911 Through 1/1/40
   - citation: 20 CFR 404.409(b)
+    kind: regulation
     url: https://www.ecfr.gov/api/versioner/v1/full/2026-10-07/title-20.xml?part=404&section=404.409
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -340,6 +366,7 @@ entries:
       sha256: f5545ff658026f9926715cbc75d032ab1d502833d828c552e303bef494e9dce9
     excerpt: Before 1/2/1912 62 years.
   - citation: 20 CFR 404.409(b)
+    kind: regulation
     url: https://www.ecfr.gov/api/versioner/v1/full/2026-10-07/title-20.xml?part=404&section=404.409
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -350,9 +377,11 @@ entries:
   reading: Refuse widow(er) claims for births from 1911-01-02 to 1912-01-01, including the full-retirement-age
     helper; the refusals are counted.
   alternatives:
-  - reading: 'POMS RS 00615.003: full retirement age 65 for this cohort.'
+  - id: poms-fra-65
+    reading: 'POMS RS 00615.003: full retirement age 65 for this cohort.'
     effect: $829 a month in the invented case.
-  - reading: '20 CFR 404.409(b): full retirement age 62 for this cohort.'
+  - id: cfr-fra-62
+    reading: '20 CFR 404.409(b): full retirement age 62 for this cohort.'
     effect: $1,000 a month (no reduction) in the invented case.
   basis: The POMS table and the regulation's table disagree for one birth year; neither is silently admitted.
   status: ruled
@@ -374,7 +403,7 @@ entries:
     name: test_historic_survivor_fra_conflict_is_refused
     pins:
     - reading
-    - alternatives[0]
+    - poms-fra-65
   money_case:
     description: 'A widow born January 2, 1911 claiming in January 1973 on a $1,000 PIA: $829 under FRA
       65, $1,000 under FRA 62.'
@@ -392,6 +421,7 @@ entries:
       (5)(D)
   pending_texts:
   - citation: 20 CFR 404.412(a)(4)
+    kind: regulation
     url: https://www.ecfr.gov/api/versioner/v1/full/2026-10-07/title-20.xml?part=404&section=404.412
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -401,6 +431,7 @@ entries:
     excerpt: any month in which she or he had in her or his care a child of the deceased insured individual
       and for which the child was entitled to child's benefits;
   - citation: POMS RS 00615.482
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0300615482
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -411,9 +442,11 @@ entries:
   reading: Credit only certified months in which the benefit was raised to the mother's or father's rate;
     refuse a history with child-in-care months that were not, and count the refusal.
   alternatives:
-  - reading: '20 CFR 404.412(a)(4): credit every month with an entitled child in care.'
+  - id: cfr-every-month-in-care
+    reading: '20 CFR 404.412(a)(4): credit every month with an entitled child in care.'
     effect: $898.20 a month in the invented case.
-  - reading: 'POMS RS 00615.482 and Act 202(q)(7)(D): credit only months raised to the mother''s or father''s
+  - id: poms-raised-months-only
+    reading: 'POMS RS 00615.482 and Act 202(q)(7)(D): credit only months raised to the mother''s or father''s
       rate.'
     effect: $877.80 a month in the invented case.
   basis: The Act ties the credit to months whose reduction was determined under 202(q)(5)(D), as POMS
@@ -437,8 +470,8 @@ entries:
     name: test_widow_nonbinding_child_care_readings_are_explicit
     pins:
     - reading
-    - alternatives[0]
-    - alternatives[1]
+    - cfr-every-month-in-care
+    - poms-raised-months-only
   money_case:
     description: 'Widow at 64, FRA 67, $1,000 PIA, six child-in-care months never raised to the mother''s
       rate: $898.20 crediting them, $877.80 not.'
@@ -453,6 +486,7 @@ entries:
   texts: []
   pending_texts:
   - citation: POMS RS 00615.201A.1
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0300615201
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -462,6 +496,7 @@ entries:
     excerpt: After 12/72 a spouse reentitled prior to FRA as a spouse on the same earnings is reduced
       the same number of months as the earlier entitlement. An ARF at FRA will remove all months of nonentitlement.
   - citation: POMS RS 00615.491A
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0300615491
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -473,9 +508,11 @@ entries:
       is reentitled.
   reading: Refuse a reduced spouse reentitled before FRA (named refusal), and count the refusal.
   alternatives:
-  - reading: 'POMS RS 00615.201A.1: keep the original reduction months until an adjustment at FRA.'
+  - id: poms-keep-original-months
+    reading: 'POMS RS 00615.201A.1: keep the original reduction months until an adjustment at FRA.'
     effect: $422.50 a month in the invented case.
-  - reading: 'POMS RS 00615.491A: remove the terminated months at reentitlement.'
+  - id: poms-remove-terminated-months
+    reading: 'POMS RS 00615.491A: remove the terminated months at reentitlement.'
     effect: $425.20 a month in the invented case.
   basis: Two POMS sections give different timings for the same credit; neither is silently admitted.
   status: ruled
@@ -497,8 +534,8 @@ entries:
     name: test_spouse_reentitlement_counterfactual_readings_keep_named_refusal
     pins:
     - reading
-    - alternatives[0]
-    - alternatives[1]
+    - poms-keep-original-months
+    - poms-remove-terminated-months
   money_case:
     description: 'Spouse born January 2, 1960, first reduced in January 2022, terminated in February and
       reentitled in March, $650 unreduced: 60 reduction months give $422.50, 59 give $425.20.'
@@ -514,6 +551,7 @@ entries:
   texts: []
   pending_texts:
   - citation: POMS GN 02603.045A
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0202603045
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -523,6 +561,7 @@ entries:
     excerpt: The benefit payable to the dually entitled person is the amount before any applicable reduction
       for age
   - citation: POMS GN 02603.050A.2
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0202603050
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -531,6 +570,7 @@ entries:
       sha256: 4b151ca0a071fb5cb42393b541d1e0bb0459e5734923988e132efa43f6c322d0
     excerpt: If dual entitlement reduces a beneficiary's rate to $0.00 (technically entitled)
   - citation: POMS GN 02603.050C
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0202603050
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -541,11 +581,14 @@ entries:
   reading: Refuse the family (parisi_redistribution_ambiguous) and count it; zero reached before age reduction
     is computed.
   alternatives:
-  - reading: 'GN 02603.050A.2: disregard the zeroed spouse.'
+  - id: disregard-zeroed-spouse
+    reading: 'GN 02603.050A.2: disregard the zeroed spouse.'
     effect: Children $125 each; record total $750.
-  - reading: 'GN 02603.050C: keep the spouse''s $20.90 age-reduction term.'
+  - id: keep-age-reduction-term
+    reading: 'GN 02603.050C: keep the spouse''s $20.90 age-reduction term.'
     effect: Children $114.50 each; record total $729.
-  - reading: 'GN 02603.045A alone: count the before-age amount less the own benefit ($19.30).'
+  - id: before-age-less-own-benefit
+    reading: 'GN 02603.045A alone: count the before-age amount less the own benefit ($19.30).'
     effect: Children $115.30 each; record total $730.60.
   basis: The sections give three different counted amounts; the layer refuses rather than select the highest
     payment.
@@ -568,9 +611,9 @@ entries:
     name: test_method_b_zero_only_after_age_is_refused_and_kept_in_denominator
     pins:
     - reading
-    - alternatives[0]
-    - alternatives[1]
-    - alternatives[2]
+    - disregard-zeroed-spouse
+    - keep-age-reduction-term
+    - before-age-less-own-benefit
   money_case:
     description: 'Method-B spouse, PIA $500, maximum $750, own RIB $64, 36 reduction months, two children:
       record totals $750, $729 or $730.60 depending on the reading.'
@@ -586,6 +629,7 @@ entries:
   texts: []
   pending_texts:
   - citation: POMS RS 00209.001
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0300209001
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -595,6 +639,7 @@ entries:
     excerpt: not be entitled to retirement insurance benefit (RIB) equal to or exceeding the amount of
       the parent's original benefit (One parent = 82 1/2%; Two parents = 75%);
   - citation: POMS RS 00209.015
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0300209015
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -603,6 +648,7 @@ entries:
       sha256: f2892dcc142f79e773d701b5c10b0583cf05990cbd391e12a0e57c1c06855c07
     excerpt: One parent entitled
   - citation: POMS RS 00209.015
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0300209015
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -613,10 +659,12 @@ entries:
   reading: Refuse the family (parent_benefit) when the own benefit falls in that interval and both parents
     are potential entitlements; count the refusal.
   alternatives:
-  - reading: 'Count two parents first: the first parent''s own benefit exceeds the two-parent rate, so
+  - id: two-parents-first
+    reading: 'Count two parents first: the first parent''s own benefit exceeds the two-parent rate, so
       only the other is entitled, at the one-parent rate.'
     effect: The other parent is paid $825 in the invented case.
-  - reading: 'Test eligibility at the one-parent rate first: both count, and the other is paid at the
+  - id: one-parent-rate-first
+    reading: 'Test eligibility at the one-parent rate first: both count, and the other is paid at the
       two-parent rate.'
     effect: The other parent is paid $750 in the invented case.
   basis: The entitlement test depends on the parent count and the count depends on entitlement; the sources
@@ -656,6 +704,7 @@ entries:
     excerpt: for any such subsequent month
   pending_texts:
   - citation: POMS RS 00630.400
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0300630400
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -664,6 +713,7 @@ entries:
       sha256: e6242ec12c64aafba782e5c37a8cfea09f65820ef05b30b8a3bf2a50ecc03d61
     excerpt: Total family payment is less after the PIA increase than it was before
   - citation: POMS RS 00630.400
+    kind: manual
     url: https://secure.ssa.gov/poms.nsf/lnx/0300630400
     snapshot:
       repo: PolicyEngine/microcosm-dynamics
@@ -675,7 +725,8 @@ entries:
     total, with two or more entitled, a binding maximum and an age-reduced beneficiary; the literal reading
     stays available behind a switch.'
   alternatives:
-  - reading: 'The Act''s literal "any such subsequent month": once a total is protected, any later month
+  - id: literal-any-subsequent-month
+    reading: 'The Act''s literal "any such subsequent month": once a total is protected, any later month
       whose total falls below it is raised (the reference refuses those months and every later governed
       month).'
     effect: After a child ages out, every later month on the record is refused instead of computed.
@@ -691,7 +742,7 @@ entries:
   - repo: PolicyEngine/microcosm-dynamics
     commit: 383a59df5dc72a04a8af4dc74b115e9f8eae721d
     path: src/populace_dynamics/track_b/gross_benefits.py
-    follows: alternatives[0]
+    follows: literal-any-subsequent-month
     cites_entry: false
   tests:
   - repo: PolicyEngine/microcosm-dynamics
@@ -699,25 +750,25 @@ entries:
     path: tests/test_track_b_gross_benefits.py
     name: test_savings_clause_protects_every_later_month_not_just_the_next
     pins:
-    - alternatives[0]
+    - literal-any-subsequent-month
   - repo: PolicyEngine/microcosm-dynamics
     commit: 383a59df5dc72a04a8af4dc74b115e9f8eae721d
     path: tests/test_track_b_gross_benefits.py
     name: test_known_over_refusal_a_beneficiary_leaves_in_a_cola_month
     pins:
-    - alternatives[0]
+    - literal-any-subsequent-month
   - repo: PolicyEngine/microcosm-dynamics
     commit: 383a59df5dc72a04a8af4dc74b115e9f8eae721d
     path: tests/test_track_b_gross_benefits_properties.py
     name: test_savings_clause_guard_along_month_paths
     pins:
-    - alternatives[0]
+    - literal-any-subsequent-month
   - repo: PolicyEngine/microcosm-dynamics
     commit: 383a59df5dc72a04a8af4dc74b115e9f8eae721d
     path: tests/test_track_b_gross_benefits_properties.py
     name: test_a_reduced_joiner_after_a_cola_is_refused_iff_the_total_falls
     pins:
-    - alternatives[0]
+    - literal-any-subsequent-month
   money_case:
     description: November total $1,500.00; the PIA rises for December (a COLA), so November is the protected
       month; in January an age-reduced spouse joins and the total falls to $1,477.60. SSA's reading pays
