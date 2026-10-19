@@ -1090,3 +1090,124 @@ entries:
     amount: '50.00'
     currency: USD
     period: month
+- id: ctc-qualifying-child-of-a-claimable-filer
+  jurisdiction: us-il
+  program: income-tax
+  question: For 2024 and 2025, may a filer who can be claimed as a dependent take Illinois's child tax credit for
+    their own qualifying child? The statute uses the IRC section 152 qualifying child; the Schedule IL-E/EITC instructions
+    require a child that is the filer's dependent.
+  texts:
+  - corpus_citation_path: us-il/statute/35/5/244-current/block-1
+    excerpt: (d) As used in this Section, "qualifying child" has the meaning given to that term in Section 152 of
+      the Internal Revenue Code.
+  pending_texts:
+  - citation: 2025 Schedule IL-E/EITC instructions, p. 1
+    kind: instructions
+    url: https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/incometax/documents/currentyear/individual/il-1040-schedule-il-e-eic-instr.pdf#page=1
+    snapshot:
+      repo: PolicyEngine/policyengine-us
+      commit: 9817ed26eaef51accdec60f7dc2a5d2394212d33
+      path: policyengine_us/tests/code_health/source_conflicts/sources/us-il/schedule-il-e-eitc-instructions-2025-p1.txt
+      sha256: f6f4b740e48b899ac1ce4c4f9bf05424e85852796d55c80115b0f43ce17cb013
+    excerpt: If you qualified for the Illinois EITC and have at least one child that is your dependent and under
+      the age of 12 years old as of the last day of 2025, you qualify for the Illinois Child Tax Credit.
+  reading: Use the section 152 qualifying child, so a filer who can be claimed as a dependent keeps the credit for
+    their own qualifying child.
+  alternatives:
+  - id: instructions-dependent-child
+    reading: Require a child that is the filer's dependent, so a filer who can be claimed as a dependent, who can
+      have no dependents of their own (IRC 152(b)(1)), gets no credit.
+    effect: The claimable filer's credit falls to $0.
+  basis: Section 244(d) adopts the section 152 qualifying child, not the dependent; the instructions' dependency
+    condition has no statutory source.
+  status: open
+  outcome: computed
+  years:
+    from: 2024
+    to: 2025
+    type: tax
+  implementations:
+  - repo: PolicyEngine/policyengine-us
+    commit: aecdf86a30a8ab24017a267f34af63e9f13d50c5
+    path: policyengine_us/variables/gov/states/il/tax/income/credits/il_ctc.py
+    follows: reading
+    adopts: reading
+    basis: PolicyEngine-US follows the statute when it conflicts with forms or instructions.
+    ruling:
+      by: PolicyEngine
+      date: '2026-10-19'
+      record: https://github.com/PolicyEngine/policyengine-us/pull/10287
+    cites_entry: false
+  tests:
+  - repo: PolicyEngine/policyengine-us
+    commit: aecdf86a30a8ab24017a267f34af63e9f13d50c5
+    path: policyengine_us/tests/policy/baseline/gov/states/il/tax/income/credits/il_ctc.yaml
+    name: 2025 single filer who can be claimed as a dependent, Illinois child tax credit kept for the filer's own
+      qualifying child
+    pins:
+    - reading
+  money_case:
+    description: A 2025 single filer aged 20 who can be claimed as a dependent, with $1,000 of wages and a child aged
+      5, gets an Illinois child tax credit of $27.20 (40% of the $68 Illinois EITC) under the statute reading and $0
+      under the instructions.
+    amount: '27.20'
+    currency: USD
+    period: year
+- id: dependent-exemption-of-a-claimed-filer
+  jurisdiction: us-ks
+  program: income-tax
+  question: From 2024, does a filer who is claimed on another return keep Kansas's dependent exemption for a dependent
+    they are entitled to deduct federally (as when the claimant files only for a refund), or must they enter zero
+    dependents as the K-40 instructions say?
+  texts:
+  - corpus_citation_path: us-ks/statute/79-32-121b
+    excerpt: a personal exemption of $2,320 for each dependent for which such taxpayer is entitled to a deduction
+      for the taxable year for federal income tax purposes.
+  pending_texts:
+  - citation: 2024 Form K-40 instructions, p. 6
+    kind: instructions
+    url: https://www.ksrevenue.gov/pdf/ip24.pdf#page=6
+    snapshot:
+      repo: PolicyEngine/policyengine-us
+      commit: 9817ed26eaef51accdec60f7dc2a5d2394212d33
+      path: policyengine_us/tests/code_health/source_conflicts/sources/us-ks/k40-instructions-2024-p6.txt
+      sha256: 5bf78ab6f94c77df9cef5ee342d23ef17686d604ad225b30855ce8f54ab73b92
+    excerpt: If you are claimed as a dependent by another taxpayer, enter “0” in the number of dependents box.
+  reading: Allow the exemption for each dependent the filer is entitled to deduct federally, which includes a filer
+    whose claimant files only to claim a refund.
+  alternatives:
+  - id: instructions-enter-zero
+    reading: A filer claimed on another return enters zero dependents.
+    effect: The dependent exemption ($2,320 each) is lost.
+  basis: Section 79-32,121b(a)(3) turns on federal entitlement to the dependency deduction, not on whether someone
+    else claimed the filer.
+  status: open
+  outcome: computed
+  years:
+    from: 2024
+    type: tax
+  implementations:
+  - repo: PolicyEngine/policyengine-us
+    commit: e0eaf477c973b6133f5b878de0228bf385991b83
+    path: policyengine_us/variables/gov/states/ks/tax/income/exemptions/ks_exemptions.py
+    follows: reading
+    adopts: reading
+    basis: PolicyEngine-US follows the statute when it conflicts with forms or instructions.
+    ruling:
+      by: PolicyEngine
+      date: '2026-10-19'
+      record: https://github.com/PolicyEngine/policyengine-us/pull/10287
+    cites_entry: false
+  tests:
+  - repo: PolicyEngine/policyengine-us
+    commit: e0eaf477c973b6133f5b878de0228bf385991b83
+    path: policyengine_us/tests/policy/baseline/gov/states/ks/tax/income/exemptions/ks_exemptions.yaml
+    name: 2024 actually claimed single filer whose claimant meets the filing exception keeps the dependent exemption
+    pins:
+    - reading
+  money_case:
+    description: A 2024 single filer, actually claimed by someone who files only for a refund, with one eligible
+      child, has exemptions of $11,480 under the statute reading and $9,160 under the instructions.
+    amount: '2320.00'
+    currency: USD
+    period: year
