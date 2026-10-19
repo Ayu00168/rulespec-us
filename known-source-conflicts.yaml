@@ -840,31 +840,6 @@ entries:
     from: 2022
     to: 2025
     type: tax
-  implementations:
-  - repo: PolicyEngine/policyengine-us
-    commit: b565542902dfb0f0003ec001ff639be8f4bc1aa4
-    path: policyengine_us/variables/gov/states/hi/tax/income/claim_of_right/hi_claim_of_right_deduction.py
-    follows: reading
-    adopts: reading
-    basis: PolicyEngine-US follows the statute when it conflicts with forms or instructions.
-    ruling:
-      by: PolicyEngine
-      date: '2026-10-19'
-      record: https://github.com/PolicyEngine/policyengine-us/pull/10287
-    cites_entry: false
-  tests:
-  - repo: PolicyEngine/policyengine-us
-    commit: b565542902dfb0f0003ec001ff639be8f4bc1aa4
-    path: policyengine_us/tests/policy/baseline/gov/states/hi/tax/income/claim_of_right/hi_claim_of_right_credit_applies.yaml
-    name: Case 2, the Hawaii deduction method deducts the whole repayment outside the 2% floor.
-    pins:
-    - reading
-  - repo: PolicyEngine/policyengine-us
-    commit: b565542902dfb0f0003ec001ff639be8f4bc1aa4
-    path: policyengine_us/tests/policy/baseline/gov/states/hi/tax/income/claim_of_right/hi_claim_of_right_deduction.yaml
-    name: Case 3, a repayment of $3,000 is a miscellaneous deduction above 2% of Hawaii AGI.
-    pins:
-    - reading
   money_case:
     description: 'A 2025 single filer with $50,000 of wages (Hawaii AGI $50,000) repays $10,000 and takes the deduction
       method: the statute reading deducts $10,000, the N-11 lists $9,000. This is the difference in deduction, not
@@ -872,6 +847,11 @@ entries:
     amount: '1000.00'
     currency: USD
     period: year
+  proposed:
+  - repo: PolicyEngine/policyengine-us
+    pr: https://github.com/PolicyEngine/policyengine-us/pull/10200
+    path: policyengine_us/variables/gov/states/hi/tax/income/claim_of_right/hi_claim_of_right_deduction.py
+    follows: reading
 - id: claim-of-right-federal-claim-condition
   jurisdiction: us-oh
   program: income-tax
@@ -928,26 +908,6 @@ entries:
     from: 2021
     to: 2025
     type: tax
-  implementations:
-  - repo: PolicyEngine/policyengine-us
-    commit: 0f4d73237d0753cd80d772b2cb581ac44368feed
-    path: policyengine_us/variables/gov/states/oh/tax/income/deductions/claim_of_right/oh_claim_of_right_deduction.py
-    follows: it1040-federal-claim
-    adopts: reading
-    basis: PolicyEngine-US follows the statute when it conflicts with forms or instructions; the pull request still
-      applies the instructions' condition and is to change.
-    ruling:
-      by: PolicyEngine
-      date: '2026-10-19'
-      record: https://github.com/PolicyEngine/policyengine-us/pull/10287
-    cites_entry: false
-  tests:
-  - repo: PolicyEngine/policyengine-us
-    commit: 0f4d73237d0753cd80d772b2cb581ac44368feed
-    path: policyengine_us/tests/policy/baseline/gov/states/oh/tax/income/deductions/oh_claim_of_right_deduction.yaml
-    name: Case 4, the deduction method with the federal standard deduction deducts nothing.
-    pins:
-    - it1040-federal-claim
   money_case:
     description: 'A 2025 single filer repays $10,000 of wages taxed in an earlier year, takes the federal standard
       deduction, and the section 1341 methods tie: the statute reading deducts $10,000 from Ohio AGI, the instructions
@@ -955,6 +915,11 @@ entries:
     amount: '10000.00'
     currency: USD
     period: year
+  proposed:
+  - repo: PolicyEngine/policyengine-us
+    pr: https://github.com/PolicyEngine/policyengine-us/pull/10195
+    path: policyengine_us/variables/gov/states/oh/tax/income/deductions/claim_of_right/oh_claim_of_right_deduction.py
+    follows: it1040-federal-claim
 - id: claim-of-right-deduction-floor
   jurisdiction: us-ar
   program: income-tax
@@ -1015,31 +980,17 @@ entries:
   years:
     from: 2013
     type: tax
-  implementations:
-  - repo: PolicyEngine/policyengine-us
-    commit: 446e0e1aef78045f3e4ce2f875605ea5e2434db0
-    path: policyengine_us/parameters/gov/states/ar/tax/income/deductions/itemized/misc/sources.yaml
-    follows: reading
-    adopts: reading
-    basis: PolicyEngine-US follows the statute when it conflicts with agency practice.
-    ruling:
-      by: PolicyEngine
-      date: '2026-10-19'
-      record: https://github.com/PolicyEngine/policyengine-us/pull/10287
-    cites_entry: false
-  tests:
-  - repo: PolicyEngine/policyengine-us
-    commit: 446e0e1aef78045f3e4ce2f875605ea5e2434db0
-    path: policyengine_us/tests/policy/baseline/gov/states/ar/tax/income/deductions/itemized/claim_of_right/ar_claim_of_right_deduction.yaml
-    name: Case 9, the deduction counts toward the 2% floor and makes the return itemize.
-    pins:
-    - reading
   money_case:
     description: 'A filer with $60,000 of wages repays $10,000: the statute reading deducts $8,800 (above 2% of
       AGI), the firefighter analogy $10,000, about $47 of Arkansas tax at 3.9%.'
     amount: '47.00'
     currency: USD
     period: year
+  proposed:
+  - repo: PolicyEngine/policyengine-us
+    pr: https://github.com/PolicyEngine/policyengine-us/pull/10203
+    path: policyengine_us/parameters/gov/states/ar/tax/income/deductions/itemized/misc/sources.yaml
+    follows: reading
 - id: oap-interest-and-dividends
   jurisdiction: us-co
   program: old-age-pension
@@ -1068,21 +1019,6 @@ entries:
   years:
     from: 2026
     type: calendar
-  implementations:
-  - repo: PolicyEngine/policyengine-us
-    commit: 9697377898aa6324967ddbdc4691c88ca34137de
-    path: policyengine_us/parameters/gov/states/co/ssa/oap/income/sources/unearned.yaml
-    follows: reading
-    adopts: reading
-    basis: Follows 3.520.781(C), under which the 3.520.786 exemptions decide what is countable.
-    cites_entry: false
-  tests:
-  - repo: PolicyEngine/policyengine-us
-    commit: 9697377898aa6324967ddbdc4691c88ca34137de
-    path: policyengine_us/tests/policy/baseline/gov/states/co/ssa/oap/co_oap_own_countable_income.yaml
-    name: Case 12, interest and dividends on countable resources are exempt.
-    pins:
-    - reading
   money_case:
     description: A 2026 client with $360 of interest and $240 of dividends a year ($50 a month) has no countable
       income from them under the exempt reading; under 3.520.785(B)(10) the $50 a month is countable unearned income
@@ -1090,127 +1026,11 @@ entries:
     amount: '50.00'
     currency: USD
     period: month
-- id: ctc-qualifying-child-of-a-claimable-filer
-  jurisdiction: us-il
-  program: income-tax
-  question: For 2024 and 2025, may a filer who can be claimed as a dependent take Illinois's child tax credit for
-    their own qualifying child? The statute uses the IRC section 152 qualifying child; the Schedule IL-E/EITC instructions
-    require a child that is the filer's dependent.
-  texts:
-  - corpus_citation_path: us-il/statute/35/5/244-current/block-1
-    excerpt: (d) As used in this Section, "qualifying child" has the meaning given to that term in Section 152 of
-      the Internal Revenue Code.
-  pending_texts:
-  - citation: 2025 Schedule IL-E/EITC instructions, p. 1
-    kind: instructions
-    url: https://tax.illinois.gov/content/dam/soi/en/web/tax/forms/incometax/documents/currentyear/individual/il-1040-schedule-il-e-eic-instr.pdf#page=1
-    snapshot:
-      repo: PolicyEngine/policyengine-us
-      commit: 9817ed26eaef51accdec60f7dc2a5d2394212d33
-      path: policyengine_us/tests/code_health/source_conflicts/sources/us-il/schedule-il-e-eitc-instructions-2025-p1.txt
-      sha256: f6f4b740e48b899ac1ce4c4f9bf05424e85852796d55c80115b0f43ce17cb013
-    excerpt: If you qualified for the Illinois EITC and have at least one child that is your dependent and under
-      the age of 12 years old as of the last day of 2025, you qualify for the Illinois Child Tax Credit.
-  reading: Use the section 152 qualifying child, so a filer who can be claimed as a dependent keeps the credit for
-    their own qualifying child.
-  alternatives:
-  - id: instructions-dependent-child
-    reading: Require a child that is the filer's dependent, so a filer who can be claimed as a dependent, who can
-      have no dependents of their own (IRC 152(b)(1)), gets no credit.
-    effect: The claimable filer's credit falls to $0.
-  basis: Section 244(d) adopts the section 152 qualifying child, not the dependent; the instructions' dependency
-    condition has no statutory source.
-  status: open
-  outcome: computed
-  years:
-    from: 2024
-    to: 2025
-    type: tax
-  implementations:
+  proposed:
   - repo: PolicyEngine/policyengine-us
-    commit: aecdf86a30a8ab24017a267f34af63e9f13d50c5
-    path: policyengine_us/variables/gov/states/il/tax/income/credits/il_ctc.py
+    pr: https://github.com/PolicyEngine/policyengine-us/pull/10176
+    path: policyengine_us/parameters/gov/states/co/ssa/oap/income/sources/unearned.yaml
     follows: reading
-    adopts: reading
-    basis: PolicyEngine-US follows the statute when it conflicts with forms or instructions.
-    ruling:
-      by: PolicyEngine
-      date: '2026-10-19'
-      record: https://github.com/PolicyEngine/policyengine-us/pull/10287
-    cites_entry: false
-  tests:
-  - repo: PolicyEngine/policyengine-us
-    commit: aecdf86a30a8ab24017a267f34af63e9f13d50c5
-    path: policyengine_us/tests/policy/baseline/gov/states/il/tax/income/credits/il_ctc.yaml
-    name: 2025 single filer who can be claimed as a dependent, Illinois child tax credit kept for the filer's own
-      qualifying child
-    pins:
-    - reading
-  money_case:
-    description: A 2025 single filer aged 20 who can be claimed as a dependent, with $1,000 of wages and a child aged
-      5, gets an Illinois child tax credit of $27.20 (40% of the $68 Illinois EITC) under the statute reading and $0
-      under the instructions.
-    amount: '27.20'
-    currency: USD
-    period: year
-- id: dependent-exemption-of-a-claimed-filer
-  jurisdiction: us-ks
-  program: income-tax
-  question: From 2024, does a filer who is claimed on another return keep Kansas's dependent exemption for a dependent
-    they are entitled to deduct federally (as when the claimant files only for a refund), or must they enter zero
-    dependents as the K-40 instructions say?
-  texts:
-  - corpus_citation_path: us-ks/statute/79-32-121b
-    excerpt: a personal exemption of $2,320 for each dependent for which such taxpayer is entitled to a deduction
-      for the taxable year for federal income tax purposes.
-  pending_texts:
-  - citation: 2024 Form K-40 instructions, p. 6
-    kind: instructions
-    url: https://www.ksrevenue.gov/pdf/ip24.pdf#page=6
-    snapshot:
-      repo: PolicyEngine/policyengine-us
-      commit: 9817ed26eaef51accdec60f7dc2a5d2394212d33
-      path: policyengine_us/tests/code_health/source_conflicts/sources/us-ks/k40-instructions-2024-p6.txt
-      sha256: 5bf78ab6f94c77df9cef5ee342d23ef17686d604ad225b30855ce8f54ab73b92
-    excerpt: If you are claimed as a dependent by another taxpayer, enter “0” in the number of dependents box.
-  reading: Allow the exemption for each dependent the filer is entitled to deduct federally, which includes a filer
-    whose claimant files only to claim a refund.
-  alternatives:
-  - id: instructions-enter-zero
-    reading: A filer claimed on another return enters zero dependents.
-    effect: The dependent exemption ($2,320 each) is lost.
-  basis: Section 79-32,121b(a)(3) turns on federal entitlement to the dependency deduction, not on whether someone
-    else claimed the filer.
-  status: open
-  outcome: computed
-  years:
-    from: 2024
-    type: tax
-  implementations:
-  - repo: PolicyEngine/policyengine-us
-    commit: e0eaf477c973b6133f5b878de0228bf385991b83
-    path: policyengine_us/variables/gov/states/ks/tax/income/exemptions/ks_exemptions.py
-    follows: reading
-    adopts: reading
-    basis: PolicyEngine-US follows the statute when it conflicts with forms or instructions.
-    ruling:
-      by: PolicyEngine
-      date: '2026-10-19'
-      record: https://github.com/PolicyEngine/policyengine-us/pull/10287
-    cites_entry: false
-  tests:
-  - repo: PolicyEngine/policyengine-us
-    commit: e0eaf477c973b6133f5b878de0228bf385991b83
-    path: policyengine_us/tests/policy/baseline/gov/states/ks/tax/income/exemptions/ks_exemptions.yaml
-    name: 2024 actually claimed single filer whose claimant meets the filing exception keeps the dependent exemption
-    pins:
-    - reading
-  money_case:
-    description: A 2024 single filer, actually claimed by someone who files only for a refund, with one eligible
-      child, has exemptions of $11,480 under the statute reading and $9,160 under the instructions.
-    amount: '2320.00'
-    currency: USD
-    period: year
 - id: poverty-credit-earned-income-losses
   jurisdiction: us-md
   program: income-tax
@@ -1250,7 +1070,7 @@ entries:
     type: tax
   implementations:
   - repo: PolicyEngine/policyengine-us
-    commit: ee2e0b910fb622212e05436ffbe692e9e7616824
+    commit: 79249f0feacd2600f88d566cfdf46f1155a0b9fc
     path: policyengine_us/variables/gov/states/md/tax/income/credits/poverty_line/md_poverty_line_credit_potential.py
     follows: reading
     adopts: reading
@@ -1259,10 +1079,10 @@ entries:
       by: PolicyEngine
       date: '2026-10-19'
       record: https://github.com/PolicyEngine/policyengine-us/pull/10287
-    cites_entry: true
+    cites_entry: false
   tests:
   - repo: PolicyEngine/policyengine-us
-    commit: ee2e0b910fb622212e05436ffbe692e9e7616824
+    commit: 79249f0feacd2600f88d566cfdf46f1155a0b9fc
     path: policyengine_us/tests/policy/baseline/gov/states/md/tax/income/credits/poverty_line/md_poverty_line_credit_earned_income.yaml
     name: A farm loss is netted against wages like other self-employment (2024)
     pins:

@@ -41,6 +41,9 @@ Invariants, for every input:
     DOCUMENT_CLASS_KINDS row is always reported.
 14. Lag: verify reports an implementation as lagging exactly when what it
     follows differs from what it adopts (`reading` when it names none).
+15. Shipped commits: verify reports an external commit (snapshot,
+    implementation or test) exactly when it is not reachable from its
+    repository's default branch.
 
 Hypothesis is not installed in the shared validate workflow's pytest leg, so
 these skip there; the source-conflicts workflow installs it and runs them.
@@ -515,3 +518,28 @@ def test_verify_lag_iff_follows_differs_from_adopts(value, data):
     )
     lagging = any(line.startswith("lags:") for line in report)
     assert lagging == (follows != (adopts or "reading"))
+
+
+# 15. Shipped commits
+@SETTINGS
+@given(value=entries(), data=st.data())
+def test_verify_flags_exactly_the_unshipped_commits(value, data):
+    value = copy.deepcopy(value)
+    value["texts"] = []
+    external = []
+    for item in value.get("pending_texts", []):
+        external.append((item["snapshot"]["repo"], item["snapshot"]["commit"]))
+    for key in ("implementations", "tests"):
+        for item in value.get(key, []):
+            if "repo" in item:
+                external.append((item["repo"], item["commit"]))
+    shipped = {pair: data.draw(st.booleans()) for pair in set(external)}
+    issues, _ = sc.verify_register(
+        {"version": 1, "entries": [value]},
+        fetch=lambda repo, commit, path: b"",
+        matches=lambda a, b: True,
+        resolve=None,
+        on_default_branch=lambda repo, commit: shipped[(repo, commit)],
+    )
+    flagged = [issue for issue in issues if "default branch; pin a commit" in issue]
+    assert len(flagged) == sum(1 for pair in external if not shipped[pair])

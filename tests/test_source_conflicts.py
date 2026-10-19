@@ -999,3 +999,79 @@ def test_aggregate_cli_with_local_registers(tmp_path, capsys):
     out = tmp_path / "rows.json"
     assert sc.main(["aggregate", "--register", f"TheAxiomFoundation/rulespec-us={path}", "--json", str(out)]) == 0
     assert '"global_id": "us:family-maximum-saving-clause"' in out.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Proposed implementations and shipped commits
+
+PROPOSED = {
+    "repo": "PolicyEngine/policyengine-us",
+    "pr": "https://github.com/PolicyEngine/policyengine-us/pull/10200",
+    "path": "policyengine_us/variables/gov/states/hi/tax/income/claim_of_right/hi_claim_of_right_deduction.py",
+    "follows": "reading",
+}
+
+
+@pytest.mark.parametrize(
+    ("change", "fragment"),
+    [
+        ({}, None),
+        ({"follows": "every-later-month"}, None),
+        ({"pr": "https://github.com/PolicyEngine/policyengine-us/issues/10200"}, "pr must be a github.com pull request URL"),
+        ({"pr": "http://github.com/PolicyEngine/policyengine-us/pull/1"}, "pr must be a github.com pull request URL"),
+        ({"pr": "https://github.com/PolicyEngine/other/pull/1"}, "is a pull request in PolicyEngine/other"),
+        ({"follows": "statute"}, "follows names `statute`"),
+        ({"path": "/abs/x.py"}, "path must be a relative path"),
+        ({"repo": "nope"}, "repo must be owner/name"),
+        ({"commit": COMMIT}, "unknown key `commit`"),
+    ],
+)
+def test_proposed_implementations(tmp_path, change, fragment):
+    issues = check(make_repo(tmp_path), entry(proposed=[{**PROPOSED, **change}]))
+    if fragment is None:
+        assert issues == []
+    else:
+        assert any(fragment in issue for issue in issues), issues
+
+
+def test_proposed_must_be_a_non_empty_list(tmp_path):
+    assert any("proposed must be a non-empty list" in issue for issue in check(make_repo(tmp_path), entry(proposed=[])))
+
+
+def test_verify_requires_shipped_commits():
+    payload, net, corpus = verified_inputs()
+    seen = []
+
+    def on_default_branch(repo, commit):
+        seen.append((repo, commit))
+        return False
+
+    issues, _ = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get, on_default_branch=on_default_branch)
+    labels = [issue.split(":")[1] for issue in issues if "is not on" in issue]
+    # The snapshot, the implementation and both tests are external commits.
+    assert len([issue for issue in issues if "is not on PolicyEngine/microcosm-dynamics's default branch" in issue]) == 4, issues
+    assert {repo for repo, _ in seen} == {"PolicyEngine/microcosm-dynamics"}
+    assert labels
+    shipped, _ = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get, on_default_branch=lambda repo, commit: True)
+    assert shipped == []
+
+
+def test_verify_reports_when_reachability_is_unchecked_or_unknown():
+    payload, net, corpus = verified_inputs()
+    issues, report = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get)
+    assert issues == []
+    assert any(line.startswith("unchecked: default-branch reachability") for line in report)
+
+    def broken(repo, commit):
+        raise OSError("network down")
+
+    issues, _ = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get, on_default_branch=broken)
+    assert any("cannot tell whether" in issue for issue in issues)
+
+
+def test_verify_lists_proposed_implementations():
+    payload, net, corpus = verified_inputs()
+    payload["entries"][0]["proposed"] = [dict(PROPOSED)]
+    issues, report = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get)
+    assert issues == []
+    assert any(line.startswith("proposed:") and "pull/10200" in line for line in report)

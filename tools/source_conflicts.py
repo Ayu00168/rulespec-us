@@ -179,8 +179,12 @@ ENTRY_KEYS = frozenset(
         "resolution",
         "text_kinds",
         "unpublished_sources",
+        "proposed",
     }
 )
+# A pull request URL on github.com: proposed implementations name the PR that
+# would add the reading, before it merges.
+PR_URL_RE = re.compile(r"https://github\.com/(?P<repo>[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+)/pull/[1-9][0-9]*")
 REQUIRED_ENTRY_KEYS = (
     "id",
     "jurisdiction",
@@ -743,6 +747,26 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
             for u_index, item in enumerate(unpublished):
                 _check_unpublished_source(item, label=f"{label}.unpublished_sources[{u_index}]", issues=issues)
 
+    if "proposed" in entry:
+        proposed = entry["proposed"]
+        if _nonempty_list(proposed, label=f"{label}.proposed", issues=issues):
+            for p_index, item in enumerate(proposed):
+                p_label = f"{label}.proposed[{p_index}]"
+                if not _mapping(item, label=p_label, allowed={"repo", "pr", "path", "follows"}, issues=issues):
+                    continue
+                repo = item.get("repo")
+                if not (isinstance(repo, str) and REPO_RE.fullmatch(repo)):
+                    issues.append(f"{p_label}.repo must be owner/name.")
+                pr = item.get("pr")
+                match = PR_URL_RE.fullmatch(pr) if isinstance(pr, str) else None
+                if match is None:
+                    issues.append(f"{p_label}.pr must be a github.com pull request URL.")
+                elif isinstance(repo, str) and match.group("repo") != repo:
+                    issues.append(f"{p_label}.pr is a pull request in {match.group('repo')}, not {repo}.")
+                if not _relative_path(item.get("path")):
+                    issues.append(f"{p_label}.path must be a relative path inside the repository.")
+                _check_reading_ref(item.get("follows"), label=f"{p_label}.follows", alternatives=entry.get("alternatives"), issues=issues)
+
     outcome = entry.get("outcome")
     if "outcome" in entry and outcome not in OUTCOMES:
         issues.append(f"{label}.outcome must be computed or refused.")
@@ -1087,17 +1111,67 @@ def pinned_corpus_resolver(corpus_path: Path, release: str, content_sha256: str,
     return resolve
 
 
+def github_on_default_branch(token: str | None = None) -> Callable[[str, str], bool]:
+    """Is a commit reachable from the repository's default branch? (GitHub compare:
+    default...commit is `identical` or `behind` exactly when it is.)"""
+
+    cache: dict[tuple[str, str], bool] = {}
+    defaults: dict[str, str] = {}
+
+    def get(url: str) -> Any:
+        request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+        if token:
+            request.add_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.load(response)
+
+    def reachable(repo: str, commit: str) -> bool:
+        key = (repo, commit)
+        if key not in cache:
+            if repo not in defaults:
+                defaults[repo] = get(f"https://api.github.com/repos/{repo}")["default_branch"]
+            status = get(f"https://api.github.com/repos/{repo}/compare/{defaults[repo]}...{commit}")["status"]
+            cache[key] = status in {"identical", "behind"}
+        return cache[key]
+
+    return reachable
+
+
 def verify_register(
     payload: Mapping[str, Any],
     *,
     fetch: Fetch,
     matches: Callable[[str, str], bool],
     resolve: Callable[[str], str | None] | None,
+    on_default_branch: Callable[[str, str], bool] | None = None,
 ) -> tuple[list[str], list[str]]:
-    """(issues, report lines). `resolve` None skips corpus texts, reported."""
+    """(issues, report lines). `resolve` None skips corpus texts, reported.
+
+    Every external commit (implementations, tests, snapshots) must be reachable
+    from its repository's default branch: the register records shipped code and
+    published captures, never a pull request's branch, whose commits a squash
+    merge leaves off the default branch. `on_default_branch` None skips that
+    check, reported."""
 
     issues: list[str] = []
     report: list[str] = []
+
+    def shipped(label: str, repo: str, commit: str) -> None:
+        if on_default_branch is None:
+            return
+        try:
+            ok = on_default_branch(repo, commit)
+        except (urllib.error.URLError, OSError, KeyError, ValueError) as exc:
+            issues.append(f"{label}: cannot tell whether {repo}@{commit[:12]} is on its default branch: {exc}")
+            return
+        if not ok:
+            issues.append(
+                f"{label}: {repo}@{commit[:12]} is not on {repo}'s default branch; pin a commit on it "
+                "(after a squash merge, the merge commit), or list an unmerged change under proposed."
+            )
+
+    if on_default_branch is None:
+        report.append("unchecked: default-branch reachability of external commits (no checker given)")
     counts = {"texts": 0, "pending_texts": 0, "implementations": 0, "tests": 0}
     for index, entry in enumerate(payload.get("entries") or []):
         label = f"{global_id(entry)} (entries[{index}])"
@@ -1121,6 +1195,7 @@ def verify_register(
         for p_index, item in enumerate(entry.get("pending_texts") or []):
             p_label = f"{label}.pending_texts[{p_index}]"
             snap = item["snapshot"]
+            shipped(p_label, snap["repo"], snap["commit"])
             try:
                 data = fetch(snap["repo"], snap["commit"], snap["path"])
             except (urllib.error.URLError, OSError) as exc:
@@ -1141,6 +1216,7 @@ def verify_register(
                 counts["pending_texts"] += 1
         for i_index, item in enumerate(entry.get("implementations") or []):
             i_label = f"{label}.implementations[{i_index}]"
+            shipped(i_label, item["repo"], item["commit"])
             try:
                 source = fetch(item["repo"], item["commit"], item["path"]).decode("utf-8")
             except (urllib.error.URLError, OSError, UnicodeDecodeError) as exc:
@@ -1161,6 +1237,11 @@ def verify_register(
                 report.append(
                     f"lags: {i_label} follows {item['follows']}, not the reading it adopts ({adopts})"
                 )
+        for r_index, item in enumerate(entry.get("proposed") or []):
+            report.append(
+                f"proposed: {label}.proposed[{r_index}] {item.get('pr')} would implement "
+                f"{item.get('follows')} in {item.get('repo')}:{item.get('path')} (not counted until merged)"
+            )
         for u_index, item in enumerate(entry.get("unpublished_sources") or []):
             report.append(
                 f"unverifiable: {label}.unpublished_sources[{u_index}] is unpublished "
@@ -1170,6 +1251,7 @@ def verify_register(
             if "repo" not in item:
                 continue  # checked offline
             t_label = f"{label}.tests[{t_index}]"
+            shipped(t_label, item["repo"], item["commit"])
             try:
                 source = fetch(item["repo"], item["commit"], item["path"]).decode("utf-8")
             except (urllib.error.URLError, OSError, UnicodeDecodeError) as exc:
@@ -1422,8 +1504,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             release, content_sha256 = _toolchain_pin(args.root)
             resolve = pinned_corpus_resolver(args.corpus_path, release, content_sha256, args.public_key)
+        token = os.environ.get("GITHUB_TOKEN")
         issues, report = verify_register(
-            payload, fetch=github_fetch(os.environ.get("GITHUB_TOKEN")), matches=matches, resolve=resolve
+            payload,
+            fetch=github_fetch(token),
+            matches=matches,
+            resolve=resolve,
+            on_default_branch=github_on_default_branch(token),
         )
         for line in report:
             print(line)
