@@ -103,6 +103,12 @@ class _Oracle:
     @pytest.hookimpl
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
         phases = self.record["reports"].setdefault(report.nodeid, {})
+        if report.when in phases:
+            # Two reports for one node id and phase (a duplicated or renamed
+            # item): a later pass must not hide an earlier failure, so the
+            # phase becomes an outcome the runner never passes.
+            phases[report.when] = {"outcome": "duplicate", "xfail": False, "message": "reported more than once"}
+            return
         phases[report.when] = {
             "outcome": report.outcome,
             "xfail": hasattr(report, "wasxfail"),

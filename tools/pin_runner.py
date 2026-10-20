@@ -9,13 +9,20 @@ pytest.
 
 For each (repository, commit) the register pins, it:
 
+0. asks GitHub, before fetching anything, whether the commit is shipped code
+   of that repository (`source_conflicts.commit_provenance`): the canonical
+   name must be exactly the pinned one, the repository must not be a fork,
+   and the commit must be reachable from its default branch. GitHub serves
+   every object of a fork network through the parent's URL, so the owner in
+   the URL proves nothing by itself;
 1. fetches the commit (`git fetch --depth 1`) into a fresh checkout;
 2. picks a Python: the newest of PYTHONS that the project's `requires-python`
    allows (the newest of PYTHONS when it has none);
 3. makes a fresh virtual environment and installs the repository's own test
    install (INSTALL_SPECS, default `-e ".[dev]"`) with
    `uv pip install --exclude-newer <the commit's committer date>`, so
-   dependencies resolve as they did when the commit was made;
+   registry packages resolve as they did when the commit was made (Git and
+   direct-URL requirements follow the repository's own declarations);
 4. runs pytest from the checkout root on the pinned files, under the
    repository's own ini, conftest files and addopts, with `-p no:cacheprovider`,
    a scratch `--basetemp` and the oracle plugin (tools/pin_oracle), which
@@ -25,13 +32,15 @@ For each (repository, commit) the register pins, it:
 
 Only the outcome `passed` passes: every collected case of the pinned function
 passed its setup, call and teardown, none was deselected, skipped, xfailed or
-xpassed, and pytest exited 0. Anything else is an issue: a fetch, venv or
+xpassed, and pytest's process exited 0, checked independently of the
+plugin's own record. Anything else is an issue: an unshipped or unprovable
+commit, a fetch, venv or
 install failure, a collection error, a missing or deselected test, a
 module-level skip, `skipped`, `xfail`, `xpass`, `failed` or `error`, a
 per-commit timeout (DEFAULT_TIMEOUT), and any exception in the runner itself.
 Pins this runner cannot execute fail too: a pin in a repository outside
-ALLOWED_OWNERS, a pin in this repository (no pinned commit), and a YAML test
-case.
+ALLOWED_OWNERS (matched exactly), a pin in this repository (no pinned
+commit), and a YAML test case.
 
 The claim, also stated in tools/README.md: the source-conflicts workflow's
 `pinned-tests` job passing means each pinned test was collected and passed at
@@ -44,7 +53,10 @@ secrets and passes its result on only as the JSON report (`--report`).
 Results that passed are cached (`--cache-dir`) under a key of the repository,
 the commit, the sorted pinned ids and the runner version (a hash of this file
 and the oracle plugin), so a runner change re-runs everything. Failures are
-never cached.
+never cached, a cached record is re-checked against the commit it is read
+for, and provenance is asked of GitHub again before any cached result is
+used. The workflow restores the cache only for pull requests, so pushes to
+main and the daily run execute every pin.
 """
 
 from __future__ import annotations
@@ -63,7 +75,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -97,7 +109,8 @@ PASSED = "passed"
 # Every outcome a pin can have; `summarize` prints nothing else.
 OUTCOMES = frozenset({
     PASSED, "failed", "error", "skipped", "xfail", "xpass", "not run", "deselected", "missing", "missing file",
-    "not collected", "collection error", "fetch failed", "install failed", "timed out", "runner error",
+    "not collected", "collection error", "untrusted commit", "fetch failed", "install failed", "timed out",
+    "runner error",
 })
 # Worst first: a pin's outcome is the worst of its cases.
 CASE_SEVERITY = ("error", "failed", "xpass", "xfail", "skipped", "not run", PASSED)
@@ -131,15 +144,15 @@ class StepError(Exception):
 
 
 def allowed_repo(repo: str) -> bool:
-    owner = repo.split("/", 1)[0].casefold()
-    return owner in {allowed.casefold() for allowed in ALLOWED_OWNERS}
+    """The owner is exactly one of ALLOWED_OWNERS. GitHub's canonical spelling
+    is required later (commit_provenance), so a case variant is refused."""
+
+    owner, _, name = repo.partition("/")
+    return owner in ALLOWED_OWNERS and name not in {"", ".", ".."}
 
 
 def install_spec(repo: str) -> tuple[str, ...]:
-    for name, spec in INSTALL_SPECS.items():
-        if name.casefold() == repo.casefold():
-            return spec
-    return DEFAULT_INSTALL
+    return INSTALL_SPECS.get(repo, DEFAULT_INSTALL)
 
 
 def _unrunnable(item: Any) -> str | None:
@@ -239,8 +252,13 @@ def _for_path(records: Any, path: str) -> list[Mapping[str, Any]]:
     return [record for record in records or [] if isinstance(record, Mapping) and record.get("path") == path]
 
 
-def classify(oracle: Mapping[str, Any], pins: Iterable[Pin], *, missing_files: Iterable[str] = ()) -> tuple[list[dict[str, Any]], list[str]]:
-    """(one result per pin, commit-level issues) from the oracle's record."""
+def classify(
+    oracle: Mapping[str, Any], pins: Iterable[Pin], *, process_exit: int | None, missing_files: Iterable[str] = ()
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """(one result per pin, commit-level issues) from the oracle's record and
+    pytest's process exit code (None when pytest did not run). The two are
+    checked independently: a repository hook can change the session's exit
+    status after the plugin has written its record."""
 
     missing_files = set(missing_files)
     commit_issues: list[str] = []
@@ -280,9 +298,13 @@ def classify(oracle: Mapping[str, Any], pins: Iterable[Pin], *, missing_files: I
                 bad = [case["nodeid"] for case in cases if case["outcome"] != PASSED]
                 result["detail"] = f"{len(bad)} of {len(cases)} case(s) did not pass, first {bad[0]}"
         results.append(result)
-    exitstatus = oracle.get("exitstatus")
-    if all(result["outcome"] == PASSED for result in results) and exitstatus != 0:
-        commit_issues.append(f"pytest exited {exitstatus} although every pinned case passed")
+    if process_exit is None:
+        commit_issues.append("pytest did not run")
+    else:
+        if process_exit != 0:
+            commit_issues.append(f"pytest's process exited {process_exit}")
+        if oracle.get("exitstatus") != 0:
+            commit_issues.append(f"pytest's session reported exit status {oracle.get('exitstatus')}")
     return results, commit_issues
 
 
@@ -350,6 +372,8 @@ class Settings:
     # uv's own cache and managed interpreters, shared across commits (they
     # hold downloads, not results).
     uv_dirs: Mapping[str, str] = dataclasses.field(default_factory=dict)
+    # GET a GitHub REST path; unauthenticated by default (the job holds no token).
+    api: Callable[[str], Any] = dataclasses.field(default_factory=sc.github_api)
 
 
 def _tail(path: Path) -> str:
@@ -408,8 +432,30 @@ def _base_env(work: Path) -> dict[str, str]:
     }
 
 
-def run_commit(repo: str, commit: str, pins: list[Pin], settings: Settings) -> dict[str, Any]:
-    """Fetch, install and run one commit's pins; never raises."""
+def _refused(repo: str, commit: str, pins: list[Pin], provenance: Mapping[str, Any]) -> dict[str, Any]:
+    detail = f"untrusted commit: {provenance.get('reason')}"
+    return {
+        "repo": repo, "commit": commit, "cached": False, "provenance": dict(provenance), "environment": {},
+        "seconds": {}, "issues": [detail], "pins": [_failed(pin, "untrusted commit", detail) for pin in pins],
+        "logs": {}, "pytest_exit": None,
+    }
+
+
+def run_commit(repo: str, commit: str, pins: list[Pin], settings: Settings, *, key: str | None = None) -> dict[str, Any]:
+    """Check provenance, then reuse a cached pass (`key`) or fetch, install and
+    run one commit's pins. Never raises."""
+
+    try:
+        provenance = sc.commit_provenance(repo, commit, settings.api)
+    except Exception as exc:  # noqa: BLE001 - an unanswerable question refuses
+        provenance = {"repo": repo, "commit": commit, "shipped": False, "reason": f"runner error: {exc}"}
+    if not provenance.get("shipped"):
+        return _refused(repo, commit, pins, provenance)
+    if key is not None:
+        hit = _cached(settings, key, repo, commit, pins)
+        if hit is not None:
+            hit["provenance"] = provenance
+            return hit
 
     started = time.monotonic()
     deadline = started + settings.timeout
@@ -423,6 +469,8 @@ def run_commit(repo: str, commit: str, pins: list[Pin], settings: Settings) -> d
         "repo": repo,
         "commit": commit,
         "cached": False,
+        "provenance": provenance,
+        "pytest_exit": None,
         "environment": {"install": list(spec)},
         "seconds": {},
         "issues": [],
@@ -442,7 +490,7 @@ def run_commit(repo: str, commit: str, pins: list[Pin], settings: Settings) -> d
         git = [settings.git, "-c", "credential.helper=", "-c", "core.hooksPath=" + os.devnull,
                "-c", "protocol.file.allow=always", "-c", "advice.detachedHead=false", "-C", str(tree)]
         tree.mkdir()
-        url = settings.repo_url.format(repo=repo)
+        url = settings.repo_url.format(repo=provenance["full_name"])
         for step, argv in (
             ("git-init", [*git, "init", "-q"]),
             ("fetch", [*git, "fetch", "-q", "--depth", "1", "--no-tags", url, commit]),
@@ -505,6 +553,7 @@ def run_commit(repo: str, commit: str, pins: list[Pin], settings: Settings) -> d
             argv = [str(python), "-m", "pytest", "-p", "no:cacheprovider", f"--basetemp={work / 'basetemp'}",
                     "-p", ORACLE_MODULE, *files]
             code, tail = timed("pytest", argv, cwd=tree, env=pytest_env)
+            result["pytest_exit"] = code
             result["logs"]["pytest"] = tail
             try:
                 oracle = json.loads(oracle_out.read_text(encoding="utf-8"))
@@ -515,7 +564,7 @@ def run_commit(repo: str, commit: str, pins: list[Pin], settings: Settings) -> d
             env_record["pytest"] = oracle.get("pytest")
             env_record["inifile"] = oracle.get("inifile")
             env_record["addopts"] = oracle.get("addopts")
-        pin_results, commit_issues = classify(oracle, pins, missing_files=missing)
+        pin_results, commit_issues = classify(oracle, pins, process_exit=result["pytest_exit"], missing_files=missing)
         result["pins"] = pin_results
         result["issues"].extend(commit_issues)
     except StepError as exc:
@@ -533,12 +582,34 @@ def _failed(pin: Pin, outcome: str, detail: str) -> dict[str, Any]:
     return {"entry": pin.entry, "label": pin.label, "id": pin.id, "cases": [], "outcome": outcome, "detail": detail}
 
 
+def _case_list_passed(cases: Any) -> bool:
+    return (
+        isinstance(cases, list)
+        and bool(cases)
+        and all(isinstance(case, Mapping) and case.get("outcome") == PASSED for case in cases)
+    )
+
+
 def commit_passed(result: Mapping[str, Any]) -> bool:
-    pins = result.get("pins") or []
-    return bool(pins) and not result.get("issues") and all(pin.get("outcome") == PASSED for pin in pins)
+    """Two independent conditions: pytest's process exited 0, and every pin
+    passed with at least one passing case. No issue may be recorded either."""
+
+    pins = result.get("pins")
+    return (
+        isinstance(pins, list)
+        and bool(pins)
+        and not result.get("issues")
+        and result.get("pytest_exit") == 0
+        and all(isinstance(pin, Mapping) and pin.get("outcome") == PASSED and _case_list_passed(pin.get("cases")) for pin in pins)
+    )
 
 
-def _cached(settings: Settings, key: str, pins: list[Pin]) -> dict[str, Any] | None:
+def _cached(settings: Settings, key: str, repo: str, commit: str, pins: list[Pin]) -> dict[str, Any] | None:
+    """A cached pass for exactly this repository, commit and set of ids, or
+    None. This catches corruption and stale records; it cannot authenticate
+    a deliberately forged one, so the workflow restores the cache only for
+    pull requests (see tools/README.md)."""
+
     if settings.cache_dir is None:
         return None
     path = settings.cache_dir / f"{key}.json"
@@ -546,10 +617,16 @@ def _cached(settings: Settings, key: str, pins: list[Pin]) -> dict[str, Any] | N
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not (isinstance(data, dict) and data.get("key") == key and commit_passed(data)):
+    if not (
+        isinstance(data, dict)
+        and data.get("key") == key
+        and data.get("repo") == repo
+        and data.get("commit") == commit
+        and commit_passed(data)
+    ):
         return None
     by_id = {result.get("id"): result for result in data["pins"]}
-    if set(by_id) != {pin.id for pin in pins}:
+    if set(by_id) != {pin.id for pin in pins} or len(data["pins"]) != len(by_id):
         return None
     # A result belongs to a test, not to the entries that pin it today.
     data["pins"] = [{**by_id[pin.id], "entry": pin.entry, "label": pin.label} for pin in pins]
@@ -611,9 +688,8 @@ def run_register(payload: Any, settings: Settings) -> dict[str, Any]:
         report["issues"].append(f"{pin['entry']} {pin['label']} {pin['pin']}: {pin['reason']}.")
     for (repo, commit), pins in sorted(groups.items()):
         key = cache_key(repo, commit, pins, version)
-        result = _cached(settings, key, pins)
-        if result is None:
-            result = run_commit(repo, commit, pins, settings)
+        result = run_commit(repo, commit, pins, settings, key=key)
+        if not result.get("cached"):
             result["ran_at"] = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             _store(settings, key, result)
         report["commits"].append(result)
@@ -638,12 +714,20 @@ def render(report: Mapping[str, Any]) -> str:
     lines = []
     for result in report["commits"]:
         env = result.get("environment", {})
+        provenance = result.get("provenance") or {}
+        if not provenance.get("shipped"):
+            lines.append(
+                f"{result['repo']}@{result['commit'][:12]}: refused before fetching, "
+                f"{len(result['pins'])} pin(s) not run: {provenance.get('reason')}"
+            )
+            continue
         cases = sum(case["outcome"] == PASSED for pin in result["pins"] for case in pin["cases"])
         lines.append(
             f"{result['repo']}@{result['commit'][:12]}: {sum(p['outcome'] == PASSED for p in result['pins'])} of "
             f"{len(result['pins'])} pin(s) passed, {cases} case(s); Python {env.get('python') or env.get('python_request')}, "
             f"resolved as of {env.get('exclude_newer')}, install {' '.join(env.get('install') or [])}; "
-            f"{result['seconds'].get('total')}s{' (cached)' if result.get('cached') else ''}"
+            f"pytest exit {result.get('pytest_exit')}; {result['seconds'].get('total')}s"
+            f"{' (cached)' if result.get('cached') else ''}"
         )
     summary = report["summary"]
     lines.append(
@@ -659,52 +743,52 @@ _SAFE_LABEL_RE = re.compile(r"entries\[[0-9]+\]\.tests\[[0-9]+\]")
 _SUMMARY_LIMIT = 100
 
 
-def summarize(path: Path) -> list[str]:
-    """Markdown lines naming the pins that did not pass, for the alarm issue.
+MISSING_ARTIFACT = "- pinned-tests artifact missing or unreadable; the `pinned-tests` job's log has the details."
+MALFORMED_ARTIFACT = "- pinned-tests artifact malformed; the `pinned-tests` job's log has the details."
 
-    The report comes from a job that ran other repositories' code, so it is
-    data: only fields that match fixed patterns (ids, commits, the outcome
-    vocabulary) are printed, never free text from the run."""
 
-    try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ["No readable pinned-test report was produced; the `pinned-tests` job's log has the details."]
-    if not isinstance(report, Mapping):
-        return ["The pinned-test report is not a JSON object; the `pinned-tests` job's log has the details."]
+def _safe(value: Any, pattern: re.Pattern[str]) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def _items(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _summary_lines(report: Mapping[str, Any]) -> list[str]:
     lines: list[str] = []
     malformed = 0
-
-    def safe(value: Any, pattern: Any) -> bool:
-        return isinstance(value, str) and pattern.fullmatch(value) is not None
-
-    for result in report.get("commits") if isinstance(report.get("commits"), list) else []:
-        if not (isinstance(result, Mapping) and safe(result.get("repo"), sc.REPO_RE) and safe(result.get("commit"), sc.COMMIT_RE)):
+    for key in ("commits", "unrun", "issues"):
+        if key in report and not isinstance(report[key], list):
+            malformed += 1
+    for result in _items(report.get("commits")):
+        if not (isinstance(result, Mapping) and _safe(result.get("repo"), sc.REPO_RE) and _safe(result.get("commit"), sc.COMMIT_RE)):
             malformed += 1
             continue
+        where = f"{result['repo']}@{result['commit'][:12]}"
+        malformed += sum(1 for key in ("pins", "issues") if key in result and not isinstance(result[key], list))
         if result.get("issues"):
-            lines.append(f"- `{result['repo']}@{result['commit'][:12]}`: the run of this commit reported an issue.")
-        for pin in result.get("pins") if isinstance(result.get("pins"), list) else []:
+            lines.append(f"- `{where}`: the run of this commit reported an issue.")
+        for pin in _items(result.get("pins")):
+            outcome = pin.get("outcome") if isinstance(pin, Mapping) else None
             if not (
                 isinstance(pin, Mapping)
-                and safe(pin.get("entry"), _SAFE_ENTRY_RE)
-                and safe(pin.get("label"), _SAFE_LABEL_RE)
-                and safe(pin.get("id"), _SAFE_ID_RE)
-                and pin.get("outcome") in OUTCOMES
+                and _safe(pin.get("entry"), _SAFE_ENTRY_RE)
+                and _safe(pin.get("label"), _SAFE_LABEL_RE)
+                and _safe(pin.get("id"), _SAFE_ID_RE)
+                and isinstance(outcome, str)
+                and outcome in OUTCOMES
             ):
                 malformed += 1
-            elif pin["outcome"] != PASSED:
-                lines.append(
-                    f"- `{pin['entry']}` {pin['label']}: `{result['repo']}@{result['commit'][:12]}:{pin['id']}` "
-                    f"{pin['outcome']}"
-                )
-    for pin in report.get("unrun") if isinstance(report.get("unrun"), list) else []:
-        if isinstance(pin, Mapping) and safe(pin.get("entry"), _SAFE_ENTRY_RE) and safe(pin.get("label"), _SAFE_LABEL_RE):
+            elif outcome != PASSED:
+                lines.append(f"- `{pin['entry']}` {pin['label']}: `{where}:{pin['id']}` {outcome}")
+    for pin in _items(report.get("unrun")):
+        if isinstance(pin, Mapping) and _safe(pin.get("entry"), _SAFE_ENTRY_RE) and _safe(pin.get("label"), _SAFE_LABEL_RE):
             lines.append(f"- `{pin['entry']}` {pin['label']}: the runner can't execute this pin.")
         else:
             malformed += 1
     if malformed:
-        lines.append(f"- {malformed} malformed report item(s); the `pinned-tests` job's log has the details.")
+        lines.append(MALFORMED_ARTIFACT.replace("malformed;", f"malformed ({malformed} item(s));"))
     if not lines:
         issues = report.get("issues")
         if isinstance(issues, list) and issues:
@@ -714,6 +798,27 @@ def summarize(path: Path) -> list[str]:
     if len(lines) > _SUMMARY_LIMIT:
         lines = lines[:_SUMMARY_LIMIT] + [f"- ... and {len(lines) - _SUMMARY_LIMIT} more; see the report artifact."]
     return lines
+
+
+def summarize(path: Path) -> list[str]:
+    """Markdown lines naming the pins that did not pass, for the alarm issue.
+
+    The report comes from a job that ran other repositories' code, so it is
+    data: every field's type and pattern is checked before use, only fields
+    that match fixed patterns (ids, commits, the outcome vocabulary) are
+    printed, and free text from the run never is. A missing or malformed
+    artifact is itself an alarm line; this never raises."""
+
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return [MISSING_ARTIFACT]
+    if not isinstance(report, Mapping):
+        return [MALFORMED_ARTIFACT]
+    try:
+        return _summary_lines(report)
+    except Exception:  # noqa: BLE001 - a malformed artifact must raise the alarm, never crash it
+        return [MALFORMED_ARTIFACT]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -728,10 +833,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="seconds per commit")
     parser.add_argument("--repo-url", default=REPO_URL, help="clone URL template with {repo}")
     parser.add_argument("--uv", default=shutil.which("uv"), help="uv executable")
+    parser.add_argument("--github-api", default=sc.GITHUB_API, help="GitHub REST API base URL (asked, unauthenticated, for provenance)")
     parser.add_argument("--git", default=shutil.which("git"), help="git executable")
     args = parser.parse_args(argv)
     if args.summarize is not None:
-        print("\n".join(summarize(args.summarize)))
+        try:
+            lines = summarize(args.summarize)
+        except Exception:  # noqa: BLE001 - the alarm step must always get its text
+            lines = [MALFORMED_ARTIFACT]
+        print("\n".join(lines))
         return 0
     if args.report is None:
         parser.error("--report is required for a run")
@@ -745,7 +855,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = sc.load_register(args.register or args.root / sc.REGISTER_FILENAME)
             settings = Settings(
                 uv=args.uv, git=args.git, work=work, timeout=args.timeout, repo_url=args.repo_url,
-                cache_dir=args.cache_dir, uv_dirs=uv_dirs(args.uv),
+                cache_dir=args.cache_dir, uv_dirs=uv_dirs(args.uv), api=sc.github_api(base_url=args.github_api),
             )
             report = run_register(payload, settings)
         except Exception as exc:  # noqa: BLE001 - fail closed, with a report

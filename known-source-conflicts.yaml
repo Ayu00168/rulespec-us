@@ -17,8 +17,10 @@
 # without an entry here (an unregistered open one is listed as a warning).
 # tools/source_conflicts.py verify (the source-conflicts workflow) checks
 # every excerpt verbatim: texts against the pinned corpus release,
-# pending_texts against their pinned snapshots. Field reference:
-# tools/README.md, "Source-conflict register".
+# pending_texts against their pinned snapshots. tools/pin_runner.py (its
+# pinned-tests job) runs every pinned test at its pinned commit, which must be
+# on its repository's default branch. Field reference: tools/README.md,
+# "Source-conflict register".
 #
 # Every alternative has an id. follows, adopts and pins name `reading` or an
 # alternative id, never a position. Code outside RuleSpec (implementations) may

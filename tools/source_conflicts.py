@@ -239,6 +239,8 @@ def load_register(path: Path) -> Any:
         return yaml.load(path.read_text(encoding="utf-8"), Loader=_NoAliasLoader)  # a SafeLoader subclass
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
         raise RegisterError(f"{path} is not valid UTF-8 YAML without anchors: {exc}") from exc
+    except RecursionError:
+        raise RegisterError(f"{path} nests too deeply to read") from None
 
 
 def _recursive(value: Any) -> bool:
@@ -655,14 +657,18 @@ def test_exists(path: str, name: str, data: bytes) -> bool:
 
 
 def _walk_strings(value: Any, label: str) -> Iterator[tuple[str, str]]:
-    if isinstance(value, str):
-        yield label, value
-    elif isinstance(value, dict):
-        for key, item in value.items():
-            yield from _walk_strings(item, f"{label}.{key}")
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            yield from _walk_strings(item, f"{label}[{index}]")
+    """Every string in a parsed value, in document order, with its label.
+    Iterative, so nesting depth is bounded by memory, not the call stack."""
+
+    stack: list[tuple[Any, str]] = [(value, label)]
+    while stack:
+        item, where = stack.pop()
+        if isinstance(item, str):
+            yield where, item
+        elif isinstance(item, dict):
+            stack.extend((child, f"{where}.{key}") for key, child in reversed(list(item.items())))
+        elif isinstance(item, list):
+            stack.extend((child, f"{where}[{index}]") for index, child in reversed(list(enumerate(item))))
 
 
 def hygiene_issues(payload: Any) -> list[str]:
@@ -1220,6 +1226,99 @@ def check_register(payload: Any, ctx: RepoContext, *, scan_modules: bool = True)
 
 
 # ---------------------------------------------------------------------------
+# Provenance: is a pinned commit shipped code of an allowed repository?
+
+GITHUB_API = "https://api.github.com"
+SHIPPED = frozenset({"identical", "behind"})  # compare <default branch>...<commit>
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A renamed or transferred repository answers with a redirect. That is a
+    refusal, never permission to read a different repository."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001 - urllib's signature
+        raise urllib.error.HTTPError(req.full_url, code, f"redirected to {newurl}", headers, fp)
+
+
+def github_api(token: str | None = None, base_url: str = GITHUB_API) -> Callable[[str], Any]:
+    """GET one GitHub REST path as JSON, without following redirects."""
+
+    opener = urllib.request.build_opener(_NoRedirect)
+    answers: dict[str, Any] = {}
+
+    def get(path: str) -> Any:
+        if path not in answers:
+            request = urllib.request.Request(
+                base_url + path, headers={"Accept": "application/vnd.github+json", "User-Agent": "axiom-source-conflicts"}
+            )
+            if token:
+                request.add_header("Authorization", f"Bearer {token}")
+            with opener.open(request, timeout=60) as response:
+                answers[path] = json.load(response)
+        return answers[path]
+
+    return get
+
+
+def commit_provenance(repo: str, commit: str, get: Callable[[str], Any]) -> dict[str, Any]:
+    """Whether `commit` is shipped code of `repo`, asked of GitHub.
+
+    It is when GitHub's canonical name for the repository is exactly `repo`
+    (no rename, transfer or redirect), the repository is not a fork, and
+    comparing its default branch with the commit says `identical` or
+    `behind`, so the commit is reachable from that branch. GitHub serves every
+    object of a fork network through the parent's URL, and refs/pull/* holds
+    other people's commits, so neither a successful fetch nor a pull-request
+    ref says who wrote a commit. Any API failure, including an exhausted rate
+    limit, is a refusal. Returns {"shipped": bool, "reason": str | None, ...}.
+    """
+
+    record: dict[str, Any] = {"repo": repo, "commit": commit, "shipped": False, "reason": None}
+    if not (REPO_RE.fullmatch(repo) and repo.split("/", 1)[1] not in {".", ".."} and COMMIT_RE.fullmatch(commit)):
+        record["reason"] = f"{repo}@{commit} is not a repository and full commit SHA"
+        return record
+    try:
+        meta = get(f"/repos/{repo}")
+        if not isinstance(meta, Mapping):
+            raise ValueError("the repository answer is not a JSON object")
+        record["full_name"], record["fork"] = meta.get("full_name"), meta.get("fork")
+        if meta.get("full_name") != repo:
+            record["reason"] = f"GitHub names this repository {meta.get('full_name')!r}, not {repo!r}"
+            return record
+        if meta.get("fork") is not False:
+            record["reason"] = f"{repo} is a fork (or GitHub did not say it is not)"
+            return record
+        branch = meta.get("default_branch")
+        if not (isinstance(branch, str) and branch):
+            raise ValueError("the repository answer names no default branch")
+        record["default_branch"] = branch
+        compare = get(f"/repos/{repo}/compare/{urllib.parse.quote(branch, safe='/')}...{commit}")
+        if not isinstance(compare, Mapping):
+            raise ValueError("the compare answer is not a JSON object")
+        record["status"] = compare.get("status")
+    except urllib.error.HTTPError as exc:
+        remaining = exc.headers.get("x-ratelimit-remaining") if exc.headers is not None else None
+        if exc.code in (403, 429) and remaining == "0":
+            record["reason"] = "GitHub's API rate limit is used up, so the commit's provenance is unknown"
+        elif 300 <= exc.code < 400:
+            record["reason"] = f"GitHub redirected the request ({exc.code}); the repository was renamed or moved"
+        else:
+            record["reason"] = f"GitHub answered {exc.code} ({exc.reason})"
+        return record
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        record["reason"] = f"GitHub's API could not be read: {exc}"
+        return record
+    if not (isinstance(record["status"], str) and record["status"] in SHIPPED):
+        record["reason"] = (
+            f"{commit[:12]} is not reachable from {repo}'s default branch {branch!r} "
+            f"(compare says {record['status']!r}); pin a commit on that branch"
+        )
+        return record
+    record["shipped"] = True
+    return record
+
+
+# ---------------------------------------------------------------------------
 # verify (network)
 
 Fetch = Callable[[str, str, str], bytes]
@@ -1298,27 +1397,22 @@ def pinned_corpus_resolver(corpus_path: Path, release: str, content_sha256: str,
 
 
 def github_on_default_branch(token: str | None = None) -> Callable[[str, str], bool]:
-    """Is a commit reachable from the repository's default branch? (GitHub compare:
-    default...commit is `identical` or `behind` exactly when it is.)"""
+    """Is a commit shipped code of its repository? The same question
+    tools/pin_runner.py asks before fetching (commit_provenance): GitHub's
+    canonical name is the pinned one, the repository is not a fork, and the
+    commit is reachable from its default branch. False when compare says the
+    commit is off that branch; any other refusal (an API failure, a rename, a
+    fork) raises ValueError with its reason, which verify reports."""
 
-    cache: dict[tuple[str, str], bool] = {}
-    defaults: dict[str, str] = {}
-
-    def get(url: str) -> Any:
-        request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
-        if token:
-            request.add_header("Authorization", f"Bearer {token}")
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return json.load(response)
+    get = github_api(token)
 
     def reachable(repo: str, commit: str) -> bool:
-        key = (repo, commit)
-        if key not in cache:
-            if repo not in defaults:
-                defaults[repo] = get(f"https://api.github.com/repos/{repo}")["default_branch"]
-            status = get(f"https://api.github.com/repos/{repo}/compare/{defaults[repo]}...{commit}")["status"]
-            cache[key] = status in {"identical", "behind"}
-        return cache[key]
+        record = commit_provenance(repo, commit, get)
+        if record["shipped"]:
+            return True
+        if isinstance(record.get("status"), str):
+            return False
+        raise ValueError(record["reason"])
 
     return reachable
 

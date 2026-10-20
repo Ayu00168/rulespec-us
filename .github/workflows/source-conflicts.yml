@@ -220,8 +220,11 @@ jobs:
     # executes code from other repositories, so the job holds nothing worth
     # taking: no secrets or tokens in any env, a checkout without persisted
     # credentials, contents: read and no id-token. Its result leaves only as
-    # the pinned-tests JSON artifact (no job outputs). Passing results are
-    # cached under (repository, commit, pinned ids, runner version).
+    # the pinned-tests JSON artifact (no job outputs). Before fetching a
+    # commit the runner asks GitHub's API (unauthenticated) that the
+    # repository is canonical and not a fork and that the commit is on its
+    # default branch. Passing results are cached under (repository, commit,
+    # pinned ids, runner version).
     # tests/test_pin_runner.py checks this job's isolation statically.
     name: pinned-tests
     runs-on: ubuntu-latest
@@ -243,9 +246,12 @@ jobs:
         run: python -m pip install pytest==9.1.1 pyyaml==6.0.3 hypothesis==6.170.5 uv==0.12.21
 
       - name: Restore passing results
-        # Each run saves its own snapshot (the key ends in the run id) and
-        # restores the newest one; entries are keyed inside by commit, ids and
-        # runner version, so an older snapshot is still safe to reuse.
+        # Pull requests only: pushes to main and the daily run execute every
+        # pin and save fresh results. Each run saves its own snapshot (the key
+        # ends in the run id) and restores the newest one; records are keyed
+        # inside by repository, commit, ids and runner version, and the runner
+        # re-checks each one and asks GitHub for provenance before using it.
+        if: github.event_name == 'pull_request'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/pin-runs-cache
