@@ -303,11 +303,10 @@ entries:
   - id: poms-unmarried-deemed
     reading: 'POMS RS 02501.140: deem an unmarried spouse or child receiving benefits on another record
       entitled.'
-    effect: The number holder's excess would also be charged against that recipient's benefit ($200 in
-      the invented case).
+    effect: The number holder's excess would also be charged against that recipient's benefit.
   - id: act-married-ordinary-child
     reading: 'Act 203(b)(1): deem a married ordinary adult child entitled, not only a disabled one.'
-    effect: The same $200 would be charged in the married ordinary-child version of the case.
+    effect: The excess would also be charged against a married ordinary deemed child's benefit.
   basis: The Act and the CFR both require marriage to the number holder; POMS's wording is broader, and
     the CFR's child basis is disability. No amount is computed for a case only the broader wording would
     reach.
@@ -615,7 +614,8 @@ entries:
     - before-age-less-own-benefit
   money_case:
     description: 'Method-B spouse, PIA $500, maximum $750, own RIB $64, 36 reduction months, two children:
-      record totals $750, $729 or $730.60 depending on the reading.'
+      children $125, $114.50 or $115.30 each and record totals $750, $729 or $730.60 depending on the reading
+      (the test takes the $20.90 age-reduction term and the $19.30 before-age amount as inputs).'
     amount: '21.00'
     currency: USD
     period: month
@@ -662,11 +662,11 @@ entries:
   - id: two-parents-first
     reading: 'Count two parents first: the first parent''s own benefit exceeds the two-parent rate, so
       only the other is entitled, at the one-parent rate.'
-    effect: The other parent is paid $825 in the invented case.
+    effect: The other parent is paid at the one-parent rate.
   - id: one-parent-rate-first
     reading: 'Test eligibility at the one-parent rate first: both count, and the other is paid at the
       two-parent rate.'
-    effect: The other parent is paid $750 in the invented case.
+    effect: The other parent is paid at the two-parent rate.
   basis: The entitlement test depends on the parent count and the count depends on entitlement; the sources
     fix no order.
   status: ruled
@@ -824,8 +824,7 @@ entries:
   - id: n11-instruction-lists
     reading: Follow the 2022-2025 N-11 lists, which put the over-$3,000 repayment among expenses subject to the
       2% floor and the $3,000-or-less repayment among expenses not subject to it.
-    effect: A $10,000 repayment by a filer with $50,000 of Hawaii AGI deducts $9,000 instead of $10,000; a $3,000
-      repayment deducts $3,000 instead of $2,000.
+    effect: Following the lists would put a repayment over $3,000 under the 2% floor, reducing its deduction by 2% of Hawaii AGI, and leave a repayment of $3,000 or less outside it.
   basis: Section 1341 became operative in Hawaii for taxable years beginning after December 31, 2021 (Act 56, SLH
     2023), so section 67(b)(9)'s exception for the section 1341 deduction applies through HRS 235-2.4(b). The N-11
     lists match the federal Schedule A categories transposed, and no Hawaii statute or rule adopts them.
@@ -886,8 +885,7 @@ entries:
   - id: it1040-federal-claim
     reading: Deduct only when the federal return claimed the section 1341 credit or itemized the repayment on Schedule
       A, as every IT 1040 edition from 2021 (line 23) to 2025 (line 29) instructs.
-    effect: An eligible repayment over $3,000 on a return that takes the federal standard deduction and whose section
-      1341 methods tie gets no Ohio deduction.
+    effect: An eligible repayment above the section 1341 threshold on a return that takes the federal standard deduction and whose section 1341 methods tie gets no Ohio deduction.
   basis: The statute conditions the deduction on its being allowable, not on a federal claim; the federal-claim
     condition appears only in the department's instructions, and no Ohio rule adopts it.
   status: open
@@ -904,10 +902,7 @@ entries:
 - id: claim-of-right-deduction-floor
   jurisdiction: us-ar
   program: income-tax
-  question: Does Arkansas's deduction for restoring more than $3,000 held under a claim of right (Ark. Code 26-51-457)
-    count toward the 2% floor on miscellaneous itemized deductions, whose list of exceptions does not name it, or
-    sit outside the floor as the Department of Finance and Administration treats the volunteer firefighter deduction
-    enacted in the same session?
+  question: Does Arkansas's deduction for restoring an amount held under a claim of right (Ark. Code 26-51-457) count toward the 2% floor on miscellaneous itemized deductions, whose list of exceptions does not name it, or sit outside the floor as the Department of Finance and Administration treats the volunteer firefighter deduction enacted in the same session?
   texts: []
   pending_texts:
   - citation: Act 1284 of 2013, section 1 (Ark. Code 26-51-457(a))
@@ -947,7 +942,7 @@ entries:
     reading: Deduct it in full outside the floor, as the department's forms treat the volunteer firefighter deduction
       (AR3 line 26, totaled with lines not subject to the 2% limitation), which the same 2013 session enacted without
       an express exception either.
-    effect: A filer with $60,000 of wages who repays $10,000 deducts $10,000 instead of $8,800.
+    effect: The repayment would be deducted in full rather than reduced by 2% of Arkansas AGI.
   - id: character-of-repayment
     reading: Place the deduction by the character of the repayment, outside the floor when deductible as a loss
       (the 26-51-437(b) exception for losses) and inside it when deductible as an employee expense.

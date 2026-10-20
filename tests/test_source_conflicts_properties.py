@@ -528,6 +528,7 @@ REFUSED_BUT_COLLECTED = {
     "__test__ = True": "any __test__ binding is refused",
     "async": "an async test fails without a plugin; refused rather than modelled",
     "__test__ store": "any store to __test__ (attribute, subscript, setattr) refuses the whole module",
+    "generator test": "a generator test anywhere refuses the whole module, even one rebound later",
     "def _annotated(a: globals().__setitem__('__test__', False)):\n    pass": (
         "annotations run at import before Python 3.14 (here they turn collection off); from 3.14 they are lazy"
     ),
@@ -589,6 +590,9 @@ MODULE_LINES = SCOPE_LINES + [
     "class object:\n    __test__ = False",
     "def __getattr__(name):\n    if name == '__test__':\n        return False\n    raise AttributeError(name)",
     "def _annotated(a: globals().__setitem__('__test__', False)):\n    pass",
+    # Final review of 6a21582e: a skip at import through a helper or an alias.
+    "def _require_data():\n    pytest.skip('no data', allow_module_level=True)\n_require_data()",
+    "skip_module = pytest.skip\nskip_module('no data', allow_module_level=True)",
 ]
 HEADER = (
     "import dataclasses\nimport unittest\nimport pytest\nfrom hypothesis import given, settings\n"
@@ -673,6 +677,9 @@ def generated_modules(draw):
         if "__test__" in tail:
             for refused, _ in candidates.values():
                 refused.add("__test__ store")
+    if "    yield 1" in "".join(parts):
+        for refused, _ in candidates.values():
+            refused.add("generator test")
     for decoy in ("test_missing", "TestK::test_missing"):
         candidates.setdefault(decoy, (set(), set()))
     return "\n".join(parts), candidates

@@ -596,6 +596,22 @@ HYPOTHESIS = "from hypothesis import given, settings\nimport hypothesis.strategi
         ("def __getattr__(name):\n    if name == '__test__':\n        return False\n    raise AttributeError(name)\ndef test_x():\n    pass\n", "test_x", False),
         ("def test_x():\n    pass\n[test_x][0].__test__ = False\n", "test_x", False),
         ("def test_x():\n    pass\nsetattr([test_x][0], '__test__', False)\n", "test_x", False),
+        # Final review of 6a21582e: a skip reached at import through a same-file
+        # helper (the optional-data pattern) or an alias.
+        (MODULE + "from pathlib import Path\ndef _require_reference_data():\n    if not Path(__file__).with_name('f.json').is_file():\n        pytest.skip('not downloaded', allow_module_level=True)\n_require_reference_data()\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "def _a():\n    _b()\ndef _b():\n    pytest.importorskip('no_such_module')\n_a()\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "def _load():\n    pytest.skip('x', allow_module_level=True)\nDATA = _load()\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "def deco(f):\n    pytest.skip('x', allow_module_level=True)\n    return f\n@deco\ndef helper():\n    pass\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "skip = pytest.skip\nskip('x', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "ios = pytest.importorskip\nnp = ios('numpy')\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "a = pytest.exit\nb = a\nb('x')\ndef test_x():\n    pass\n", "test_x", False),
+        ("import unittest\ndef _gate():\n    raise unittest.SkipTest('x')\n_gate()\ndef test_x():\n    pass\n", "test_x", False),
+        ("def _hide():\n    globals()['test_x'] = None\n_hide()\ndef test_x():\n    pass\n", "test_x", False),
+        ("import importlib\ndef test_x():\n    pass\nm = importlib.import_module(__name__)\nm.test_x = None\n", "test_x", False),
+        ("import sys\nmodules = sys.modules\ndef test_x():\n    pass\nmodules[__name__].test_x = None\n", "test_x", False),
+        # A helper nobody calls at import, or one that only raises loudly, changes nothing.
+        (MODULE + "def _maybe():\n    pytest.skip('x', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", True),
+        ("def _load():\n    raise ValueError('bad')\ndef test_x():\n    pass\n", "test_x", True),
         # A helper class's own __test__ = False is the usual way to keep it uncollected.
         ("class TestData:\n    __test__ = False\ndef test_x():\n    pass\n", "test_x", True),
         ("async def test_x():\n    pass\n", "test_x", False),  # fails without an async plugin
@@ -824,6 +840,66 @@ def test_money_case(tmp_path, field, value, fragment):
     assert any(fragment in issue for issue in check(make_repo(tmp_path), bad))
 
 
+def test_dollar_amounts_in_prose_need_a_money_case(tmp_path):
+    # Final review of 6a21582e: removing a money case left "$200 would be
+    # charged" in an alternative's effect. Every $ in the entry's own prose
+    # must be one its money case (backed by computed_by) states.
+    ctx = make_repo(tmp_path)
+    good = entry()
+    good["alternatives"][0]["effect"] = "The family is paid $21.00 less."
+    assert check(ctx, good) == []
+    bad = entry()
+    bad["alternatives"][0]["effect"] = "The family would be paid $825 instead."
+    issues = check(ctx, bad)
+    assert any("alternatives[0].effect states $825, which no money case backs" in issue for issue in issues), issues
+    no_case = entry()
+    del no_case["money_case"]
+    no_case["basis"] = "SSA pays $1,500.00 under its reading."
+    assert any("basis states $1500, which no money case backs" in issue for issue in check(ctx, no_case))
+    described = entry()
+    described["money_case"]["description"] = "A survivor family after a child ages out: $1,500.00 against $1,479."
+    described["reading"] = "Protect $1,500 from the earlier month."
+    assert check(ctx, described) == []
+
+
+def test_dollar_amounts_the_sources_state_or_consumers_write(tmp_path):
+    # A figure the entry's own verified excerpt states (a statutory threshold)
+    # is backed by it; consumer prose (an implementation's basis, the years'
+    # note, an unpublished source's description) is checked too.
+    ctx = make_repo(tmp_path)
+    quoted = entry()
+    quoted["texts"][0]["excerpt"] = "a repayment that exceeds $3,000"
+    quoted["question"] = "Does a repayment over $3,000 sit outside the floor?"
+    assert not [issue for issue in check(ctx, quoted) if "no money case backs" in issue]
+    for path, text in (
+        (("implementations", 0, "basis"), "The statute pays $900 more."),
+        (("years", "note"), "A program year worth $40."),
+    ):
+        value = entry(years={"from": 2024, "type": "program", "note": "July to June."})
+        target = value
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = text
+        assert any("which no money case backs" in issue for issue in check(ctx, value)), path
+
+
+def test_the_register_refuses_anchors_and_cycles(tmp_path):
+    # Final review of 6a21582e: a recursive alias made check raise RecursionError.
+    path = tmp_path / sc.REGISTER_FILENAME
+    path.write_text("version: 1\nentries: []\nextra: &self\n  self: *self\n")
+    with pytest.raises(sc.RegisterError, match="anchors and aliases are not allowed"):
+        sc.load_register(path)
+    path.write_text("version: 1\nentries: []\nshared: &a [1]\nother: *a\n")
+    with pytest.raises(sc.RegisterError, match="anchors and aliases are not allowed"):
+        sc.load_register(path)
+    recursive = yaml.safe_load("version: 1\nentries: []\nextra: &self\n  self: *self\n")
+    issues = sc.check_register(recursive, make_repo(tmp_path), scan_modules=True)
+    assert issues == [f"{sc.REGISTER_FILENAME} contains itself through an alias; anchors and aliases are not allowed."]
+    looped = {"version": 1, "entries": [entry()]}
+    looped["entries"][0]["alternatives"][0]["effect"] = looped["entries"]
+    assert "contains itself" in sc.check_register(looped, make_repo(tmp_path))[0]
+
+
 def test_a_money_case_names_the_pinned_test_that_computes_it(tmp_path):
     # Round-4 review: a public amount needs a pinned test that computes it.
     ctx = make_repo(tmp_path)
@@ -967,7 +1043,7 @@ UNPUBLISHED = {"kind": "agency-practice", "description": "MN DHS correspondence 
         ({}, None),
         ({"description": 'The department "approves one hundred dollars a month" in practice'}, "quotes more than 4 words"),
         ({"description": "The department \u201capproves one hundred dollars a month\u201d"}, "quotes more than 4 words"),
-        ({"description": 'The department "approves $100" in practice'}, None),
+        ({"description": 'The department "approves the waiver" in practice'}, None),
         ({"description": "Reply from someone@example.gov"}, "contains `@`"),
         ({"kind": "phone"}, "kind must be one of"),
         ({"date": "October 19"}, "date must be a real"),
