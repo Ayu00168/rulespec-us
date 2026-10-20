@@ -204,14 +204,27 @@ settings decide that, and no static check can.
 `tools/pin_runner.py` asks pytest. For each repository and commit the register
 pins, it:
 
+0. asks GitHub's API, before fetching anything, whether the commit is shipped
+   code of that repository. GitHub's canonical name must be exactly the pinned
+   one (no rename, transfer or redirect), the repository must not be a fork,
+   and comparing its default branch with the commit must say `identical` or
+   `behind`, meaning the commit is reachable from that branch. GitHub serves
+   every object of a fork network through the parent's URL, so a fetch that
+   succeeds proves nothing about who wrote a commit, and neither does a
+   `refs/pull/*` ref. Any failed or unexpected answer is a refusal, including
+   an exhausted rate limit; the job holds no token, so it asks
+   unauthenticated, which allows 60 requests an hour (one per repository plus
+   one per commit);
 1. fetches the commit (`git fetch --depth 1`) into a fresh checkout;
 2. picks the newest Python from 3.14 down to 3.9 that the project's
    `requires-python` allows;
 3. installs the repository's own test install into a fresh environment with
-   `uv pip install --exclude-newer <the commit's committer date>`, so
-   dependencies resolve as they did when the commit was made. The install is
-   `-e ".[dev]"`, or the repository's entry in `INSTALL_SPECS` if it keeps its
-   test dependencies elsewhere;
+   `uv pip install --exclude-newer <the commit's committer date>`, so registry
+   packages resolve as they did when the commit was made. `--exclude-newer`
+   applies to registry packages only; a Git or direct-URL requirement follows
+   the repository's own declaration. The install is `-e ".[dev]"`, or the
+   repository's entry in `INSTALL_SPECS` if it keeps its test dependencies
+   elsewhere;
 4. runs pytest from the checkout root on the pinned files, under the
    repository's own ini, conftest files and `addopts`, with
    `-p no:cacheprovider` and a scratch `--basetemp`. A plugin
@@ -224,12 +237,19 @@ passed at its pinned commit, in the repository's own install resolved as of
 that commit's date, under its own pytest configuration. `check` alone
 establishes nothing about running. A pin is established only once
 verification is green: the `pinned-tests` job, together with the
-`source-conflicts` job for the excerpts, snapshots and files.
+`source-conflicts` job for the excerpts, snapshots and files. The pinned
+commit is also shipped code: GitHub says it is on the default branch of the
+canonical, non-fork repository the pin names.
 
 Only the outcome `passed` passes. That means every collected case of the
-pinned function passed its setup, call and teardown, and pytest exited 0.
-Each of these fails the pin:
+pinned function passed its setup, call and teardown. Two further conditions
+are checked separately, and each alone fails the commit: pytest's process
+must exit 0, and the session status the plugin recorded must be 0. A
+repository hook can change the session's status after the plugin has written
+its record, so the process exit is authoritative. Each of these fails the pin:
 
+- a commit GitHub does not confirm as shipped code of the pinned repository
+  (`untrusted commit`); nothing is fetched;
 - a fetch, environment or install failure, or an install that does not
   provide pytest;
 - a collection error, a module skipped at collection (`not collected`), a
@@ -238,14 +258,15 @@ Each of these fails the pin:
   conftest hooks deselect;
 - a case that is `skipped`, `xfail`, `xpass`, `failed` or `error`, or that
   never ran;
-- a pytest exit other than 0, or a run that pytest-xdist distributes;
+- a pytest process exit other than 0, a session status other than 0, a case
+  reported twice for one phase, or a run that pytest-xdist distributes;
 - the per-commit timeout (15 minutes, from fetch to pytest);
 - any exception in the runner.
 
 Pins the runner cannot execute as stated fail too, with the reason:
 
-- a pin in a repository outside `TheAxiomFoundation/*` and `PolicyEngine/*`
-  ("the runner won't execute pins in <repo>");
+- a pin in a repository outside `TheAxiomFoundation/*` and `PolicyEngine/*`,
+  spelled exactly as GitHub does ("the runner won't execute pins in <repo>");
 - a pin in this repository, which has no pinned commit;
 - a YAML test case: a companion `.test.yaml` here, or another repository's
   YAML tests.
@@ -268,7 +289,13 @@ each commit:
 A commit whose pins all passed is cached (`--cache-dir`). The key is the
 repository, the commit, the sorted pinned ids and the runner version, a hash
 of the runner and the plugin, so a runner change re-runs everything. Failures
-are never cached.
+are never cached, and neither is a nonzero exit. A cached record is used only
+if it names the same repository, commit and ids, every pin passed with at
+least one passing case, and the process exit was 0; provenance is asked of
+GitHub again first. Those checks catch corruption and stale records, but
+they cannot authenticate a record someone forged on purpose. So the workflow
+restores the cache only for pull requests; pushes to main and the daily run
+execute every pin and save fresh results.
 
 **Isolation.** The runner executes code from other repositories, so its job
 holds nothing worth taking:
@@ -280,8 +307,11 @@ holds nothing worth taking:
   `HOME`.
 
 Its result leaves only as the JSON artifact. The alarm job reads that artifact
-with main's `pin_runner.py --summarize`, which prints only fields that match
-fixed patterns. No runner output is interpolated into a workflow script.
+with main's `pin_runner.py --summarize`, which checks every field's type and
+prints only fields that match fixed patterns. A missing or malformed artifact
+becomes its own alarm line ("pinned-tests artifact malformed"); the summary
+never crashes the alarm step. No runner output is interpolated into a
+workflow script.
 `tests/test_pin_runner.py` checks these properties of the workflow file.
 
 ### Merge gate
@@ -305,12 +335,22 @@ fails closed. The fixtures cover:
 - a failure, a fixture error and a collection error;
 - an install failure, a missing test and a missing file;
 - an unfetchable commit and a timeout;
+- round 8's probes: a `pytest_sessionfinish` hookwrapper that sets exit 1
+  after the plugin wrote, a `pytest_unconfigure` that raises, and a
+  duplicated item whose first run fails and second passes;
+- an outside contributor's commit kept only under `refs/pull/1/head` and
+  served through the parent's URL, a renamed repository, a fork, an unknown
+  commit, a redirect and an exhausted rate limit, each refused before any
+  fetch, against a fake GitHub API that answers from git itself;
 - a repository off the allowlist, and a deselection through `addopts = "-m
   'not slow'"`.
 
 The fixtures also check that no secret in the caller's environment reaches
 the pinned tests. `tests/test_pin_runner_properties.py` checks the classifier
-against an independent statement of when a pin passes.
+and the commit-level exit conditions against an independent statement of when
+a pin passes, provenance against an independent statement over any API
+answer, and that `--summarize` exits 0 with a valid summary or the
+malformed-artifact alarm for any JSON artifact.
 
 ### Known limits
 
@@ -331,5 +371,17 @@ against an independent statement of when a pin passes.
   test that runs from a clean checkout.
 - `passed` means pytest passed the test. Whether the test computes what an
   entry's money case states is for the entry's reviewers (`computed_by`).
+- The Python request is a minor version (the newest that `requires-python`
+  allows for some patch release). uv installs that minor's newest patch, and
+  a narrow patch constraint it misses fails the install, closed.
+- A conftest hook can rewrite a report, turning a failure into a pass. That
+  is the repository's own pytest configuration, which the claim covers; it
+  does not prove the underlying assertion.
+- The runner scrubs each step's environment and gives it a scratch `HOME`,
+  but it is not an operating-system sandbox: the pinned code runs as the job's
+  user. The job's isolation (no secrets, read-only permissions) is the
+  boundary.
+- Provenance is asked unauthenticated, so GitHub's rate limit (60 requests an
+  hour per address) can refuse a run; that fails closed and passes on retry.
 - Deliberate evasion, such as a test that detects the runner, is out of
   scope: the register guards against honest mistakes.

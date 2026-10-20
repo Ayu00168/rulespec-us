@@ -535,6 +535,29 @@ def test_check_is_total_with_module_scanning_on_a_malformed_adopted_by(tmp_path)
         assert any("adopted_by" in issue for issue in issues), (bad, issues)
 
 
+def test_check_is_total_on_deep_nesting(tmp_path):
+    # Round-8 review: 1,100 nested lists under an unknown field raised
+    # RecursionError in the hygiene walk. The walk is iterative now.
+    deep: list = []
+    cursor = deep
+    for _ in range(20000):
+        cursor.append([])
+        cursor = cursor[0]
+    value = entry()
+    value["extra_field"] = deep
+    issues = check(make_repo(tmp_path), value, scan=True)
+    assert issues == ["Entry `family-maximum-saving-clause` (entries[0]) has unknown key `extra_field`."]
+
+
+def test_a_register_nested_too_deeply_to_parse_is_refused(tmp_path, capsys):
+    path = tmp_path / sc.REGISTER_FILENAME
+    path.write_text("version: 1\nentries: " + "[" * 5000 + "]" * 5000 + "\n")
+    with pytest.raises(sc.RegisterError, match="nests too deeply"):
+        sc.load_register(path)
+    assert sc.main(["check", "--root", str(tmp_path)]) == 1
+    assert "nests too deeply" in capsys.readouterr().err
+
+
 def test_check_is_total_on_every_field(tmp_path):
     # Review of #1710 round 2: the Hypothesis totality property draws any one
     # field only a few times a run, so a crash on one field was caught in half
