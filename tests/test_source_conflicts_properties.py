@@ -36,13 +36,14 @@ Invariants, for every input:
     constructors, `__test__` in any form, pytestmark, module-level skips, a
     main guard's else branch, a shadowed `object`, a module `__getattr__`,
     annotations, generator and async tests, rebinding, and skips in bodies,
-    fixtures, setup functions, marks, parameter sets and Hypothesis phases),
-    the test-reference screen accepts a name only if pytest collects it,
-    accepts every collected name except the deliberate refusals in
-    `REFUSED_BUT_COLLECTED`, and warns on an accepted test exactly when the
-    file shows a skip; so an accepted test that pytest collects but does not
-    run is always warned. This is evidence for a screen over the shapes
-    generated, not a proof over all Python.
+    fixtures, setup functions, marks, parameter sets and Hypothesis phases,
+    import-time calls the screen cannot follow, project helpers called at
+    import, unreachable branches): an accepted, unwarned name is one pytest
+    collects; every collected name is accepted except the deliberate refusals
+    in `REFUSED_BUT_COLLECTED`; an accepted test that pytest does not collect
+    or does not run is always warned; and every visible skip planted is
+    warned. A warning may also fire on a test that runs. This is evidence for
+    a screen over the shapes generated, not a proof over all Python.
 12. References by id: a `follows`, `adopts` or `pins` value that is neither
     `reading` nor an alternative id of the entry is always reported, and
     reordering an entry's alternatives never changes whether it passes or
@@ -507,18 +508,18 @@ def test_word_runs_match_under_encoder_matcher(words, data):
     assert matches(text, " ".join(tokens[start:end]))
 
 
-# 11. Differential, both directions: the test-reference resolver against
+# 11. Differential, both directions: the test-reference screen against
 # pytest itself. Each example writes one to three generated test modules and
 # runs pytest on them in a subprocess (Hypothesis tests inside a Hypothesis
-# test do not run in-process). A plugin records every collected test, every
-# test whose call phase passed (not skipped, not xfail), and every file that
-# failed to collect. The resolver promises collection, not a run:
-# - accepted => collected, unless the module failed to collect (a loud error
-#   in the owning repository's own run);
+# test do not run in-process), next to a `helpers_mod` that stands in for
+# project code. A plugin records every collected test, every test whose call
+# phase passed (not skipped, not xfail), and every file that failed to
+# collect. Then:
+# - accepted and unwarned => collected, unless the module failed to collect
+#   (a loud error in the owning repository's own run);
 # - collected => accepted, except the deliberate refusals below;
-# - accepted, collected and not run => warned, since every skip these modules
-#   contain is visible in the file; and an accepted test is warned exactly
-#   when it has one of the visible skips the generator planted.
+# - accepted and (not collected or not run) => warned;
+# - a planted visible skip => warned.
 REFUSED_BUT_COLLECTED = {
     "testc": "collected by pytest's default python_functions, but not by repositories that set test_*",
     "@identity": "a decorator outside the allowed list could replace the function",
@@ -593,7 +594,23 @@ MODULE_LINES = SCOPE_LINES + [
     # Final review of 6a21582e: a skip at import through a helper or an alias.
     "def _require_data():\n    pytest.skip('no data', allow_module_level=True)\n_require_data()",
     "skip_module = pytest.skip\nskip_module('no data', allow_module_level=True)",
+    # Round-6 review: call forms the screen cannot follow; it warns on them.
+    "from functools import partial\nskip_if_missing = partial(pytest.skip, 'no data', allow_module_level=True)\nskip_if_missing()",
+    "skip_maybe = pytest.skip if EMPTY == [] else print\nskip_maybe('no data', allow_module_level=True)",
+    "skip_annotated: object = pytest.skip\nskip_annotated('no data', allow_module_level=True)",
+    "def _gate():\n    pytest.skip('no data', allow_module_level=True)\ngate = _gate\ngate()",
+    "try:\n    def _gate_in_try():\n        pytest.skip('no data', allow_module_level=True)\nexcept Exception:\n    pass\n_gate_in_try()",
+    # Project code called at import: one helper skips the module, one does nothing.
+    "from helpers_mod import require_data\nrequire_data()",
+    "from helpers_mod import prepare\nprepare()",
+    # Statically unreachable: never runs.
+    "def _never():\n    pytest.skip('no data', allow_module_level=True)\nif False:\n    _never()",
 ]
+HELPERS_MOD = (
+    "import pytest\n\n"
+    "def require_data():\n    pytest.skip('no data', allow_module_level=True)\n\n"
+    "def prepare():\n    return None\n"
+)
 HEADER = (
     "import dataclasses\nimport unittest\nimport pytest\nfrom hypothesis import given, settings\n"
     "import hypothesis.strategies as st\n\nEMPTY = []\n\n"
@@ -710,6 +727,7 @@ def _pytest_outcomes(folder: Path, files: list[str]) -> tuple[set[tuple[str, str
     failed to collect."""
 
     (folder / "_oracle.py").write_text(ORACLE_PLUGIN)
+    (folder / "helpers_mod.py").write_text(HELPERS_MOD)
     (folder / "pytest.ini").write_text("[pytest]\n")
     out = folder / "oracle.json"
     env = {**os.environ, "PYTHONPATH": str(folder), "ORACLE_OUT": str(out), "PYTHONDONTWRITEBYTECODE": "1"}
@@ -740,11 +758,15 @@ def test_resolver_accepts_exactly_what_pytest_collects(tmp_path_factory, modules
             accepted = sc.test_exists(path, name, source.encode())
             warned = bool(sc.python_test_warnings(source, name))
             seen = (path, name) in collected
-            assert seen or not accepted or path in broken, f"accepted {name}, which pytest did not collect:\n{source}"
+            # Accepted and unwarned implies collected, unless collection fails
+            # loudly in the owning repository's run.
+            assert seen or not accepted or warned or path in broken, f"accepted {name} unwarned, not collected:\n{source}"
             assert accepted or not seen or refused, f"refused {name}, which pytest collected:\n{source}"
             if accepted and path not in broken:
-                assert warned or (path, name) in ran, f"{name} was collected but did not run, with no warning:\n{source}"
-                assert warned == bool(skips), f"{name}: warned={warned}, visible skips={sorted(skips)}:\n{source}"
+                # Accepted and (not collected or not run) implies warned; a
+                # warning may also fire on a test that runs.
+                assert warned or (path, name) in ran, f"{name} did not run, with no warning:\n{source}"
+                assert warned or not skips, f"{name}: visible skips {sorted(skips)} but no warning:\n{source}"
 
 
 # 12. References by id

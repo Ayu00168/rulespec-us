@@ -59,7 +59,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -233,7 +233,7 @@ def load_register(path: Path) -> Any:
     if not path.is_file() or path.is_symlink():
         raise RegisterError(f"{path} must be a regular file")
     try:
-        return yaml.load(path.read_text(encoding="utf-8"), Loader=_NoAliasLoader)  # noqa: S506 - a SafeLoader
+        return yaml.load(path.read_text(encoding="utf-8"), Loader=_NoAliasLoader)  # a SafeLoader subclass
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
         raise RegisterError(f"{path} is not valid UTF-8 YAML without anchors: {exc}") from exc
 
@@ -357,19 +357,34 @@ def _check_record(record: Any, *, label: str, confirmation: bool, issues: list[s
         issues.append(f"{label}.record must be an https URL.")
 
 
-DOLLAR_RE = re.compile(r"\$\s?([0-9][0-9,]*(?:\.[0-9]+)?)")
+# The one way the register writes money: $, digits (commas between groups of
+# three allowed), and optionally two-digit cents. A sentence may end after it.
+DOLLAR_RE = re.compile(r"\$((?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]{2})?)(?![0-9A-Za-z_]|[.,][0-9])")
+# Anything else that reads as money is refused, so no figure escapes the
+# money-case rule by its spelling: "USD 200", "200 dollars", "$ 200", "$.50",
+# "$-200", "$1.5k", "US$200".
+MONEY_LIKE_RE = re.compile(
+    r"(?i)\bUS\$|\$|\bUSD\b|\b[0-9][0-9,.]*\s*(?:dollars?|cents?|bucks)\b|\bUSD\s*[0-9]"
+)
 
 
 def _dollar_values(text: str) -> set[str]:
     """Dollar amounts in text, normalised: "$4,200.00" and "$4,200" -> "4200"."""
 
-    found = set()
-    for match in DOLLAR_RE.finditer(text):
-        digits = match.group(1).replace(",", "").rstrip(".")
-        try:
-            found.add(format(Decimal(digits).normalize(), "f"))
-        except InvalidOperation:
+    return {
+        format(Decimal(match.group(1).replace(",", "")).normalize(), "f") for match in DOLLAR_RE.finditer(text)
+    }
+
+
+def _unsupported_money(text: str) -> list[str]:
+    """Spellings of money other than the one DOLLAR_RE accepts."""
+
+    canonical = {match.start() for match in DOLLAR_RE.finditer(text)}
+    found = []
+    for match in MONEY_LIKE_RE.finditer(text):
+        if match.group(0) == "$" and match.start() in canonical:
             continue
+        found.append(text[match.start() : match.start() + 12].split("\n")[0])
     return found
 
 
@@ -584,7 +599,11 @@ def yaml_test_case_names(text: str) -> set[str]:
 # "Code that runs at import" is module-level statements, a main guard's else
 # branch (not its body), class bodies, annotations (eager before 3.14), and
 # the same-file functions any of those call or use as a decorator,
-# transitively; simple aliases (`skip = pytest.skip`) resolve to what they name.
+# transitively; simple aliases (`skip = pytest.skip`) resolve to what they
+# name; `if False:` and `if TYPE_CHECKING:` bodies never run.
+# Import-time code is an allowlist: a call that resolves to neither a
+# known-safe callable (_SAFE_CALLS) nor a clean same-file helper warns (see
+# python_test_warnings). The guarantee is accepted and unwarned => collected.
 # A parametrized case id ([...]) is refused: pytest builds ids from sources the
 # file does not show.
 #
@@ -620,6 +639,29 @@ def python_test_file(path: str) -> bool:
     return PYTHON_TEST_FILE_RE.fullmatch(PurePosixPath(path).name) is not None
 
 
+def _outer(node: ast.AST) -> list[ast.AST]:
+    """The parts of a def, class or lambda its enclosing scope evaluates:
+    defaults, annotations (eagerly before Python 3.14), decorators, bases and
+    keywords."""
+
+    outer: list[ast.AST] = []
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        outer.extend(node.args.defaults)
+        outer.extend(d for d in node.args.kw_defaults if d is not None)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        arguments = node.args
+        every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg]
+        outer.extend(arg.annotation for arg in every if arg is not None and arg.annotation is not None)
+        if node.returns is not None:
+            outer.append(node.returns)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        outer.extend(node.decorator_list)
+    if isinstance(node, ast.ClassDef):
+        outer.extend(node.bases)
+        outer.extend(keyword.value for keyword in node.keywords)
+    return outer
+
+
 def _scope_walk(body: list[ast.stmt]) -> Iterator[ast.AST]:
     """Every node evaluated in this scope, including nested blocks, but not
     the bodies of nested functions, classes or lambdas (their names, decorators,
@@ -630,23 +672,43 @@ def _scope_walk(body: list[ast.stmt]) -> Iterator[ast.AST]:
         node = stack.pop()
         yield node
         if isinstance(node, _SCOPES):
-            outer: list[ast.AST] = []
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                outer.extend(node.args.defaults)
-                outer.extend(d for d in node.args.kw_defaults if d is not None)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                # Annotations run in this scope (eagerly before Python 3.14).
-                arguments = node.args
-                every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg]
-                outer.extend(arg.annotation for arg in every if arg is not None and arg.annotation is not None)
-                if node.returns is not None:
-                    outer.append(node.returns)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                outer.extend(node.decorator_list)
-            if isinstance(node, ast.ClassDef):
-                outer.extend(node.bases)
-                outer.extend(keyword.value for keyword in node.keywords)
-            stack.extend(reversed(outer))
+            stack.extend(reversed(_outer(node)))
+            continue
+        stack.extend(reversed(list(ast.iter_child_nodes(node))))
+
+
+def _never_runs(node: ast.AST) -> bool:
+    """`if False:`, `if TYPE_CHECKING:` and the body of a main guard: blocks
+    whose body never runs under pytest (their else branch does)."""
+
+    if not isinstance(node, ast.If):
+        return False
+    test = node.test
+    if isinstance(test, ast.Constant) and not test.value:
+        return True
+    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+        return True
+    if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
+        return True
+    return _main_guard(node)
+
+
+def _live_walk(body: list[ast.stmt], *, class_bodies: bool) -> Iterator[ast.AST]:
+    """Nodes this body evaluates when it runs: like _scope_walk, but skipping
+    the bodies of blocks that never run, and (with class_bodies) running class
+    bodies too, as importing a module does."""
+
+    stack: list[ast.AST] = list(reversed(body))
+    while stack:
+        node = stack.pop()
+        if _never_runs(node):
+            stack.extend(reversed(node.orelse))
+            continue
+        yield node
+        if isinstance(node, _SCOPES):
+            stack.extend(reversed(_outer(node)))
+            if class_bodies and isinstance(node, ast.ClassDef):
+                stack.extend(reversed(node.body))
             continue
         stack.extend(reversed(list(ast.iter_child_nodes(node))))
 
@@ -894,17 +956,12 @@ def _main_guard(node: ast.stmt) -> bool:
 
 
 def _import_time(body: list[ast.stmt]) -> Iterator[ast.AST]:
-    """Code that runs when the module is imported: module-level statements
-    (including a main guard's else branch, though not its body), class bodies
-    and annotations; not function bodies."""
+    """Code that runs when the module is imported: module-level statements,
+    class bodies, decorators, defaults and annotations; not function bodies,
+    and not blocks that never run (`if False:`, `if TYPE_CHECKING:`, a main
+    guard's body; their else branches do run)."""
 
-    statements: list[ast.stmt] = []
-    for node in body:
-        statements.extend(node.orelse if _main_guard(node) else [node])
-    for node in _scope_walk(statements):
-        yield node
-        if isinstance(node, ast.ClassDef):
-            yield from _import_time(node.body)
+    return _live_walk(body, class_bodies=True)
 
 
 def _stores_test_flag(node: ast.AST) -> bool:
@@ -937,7 +994,8 @@ def _module_collects(tree: ast.Module, imports: dict[str, str]) -> bool:
         return False
     # Same-file functions called at import run then too, transitively (the
     # optional-data helper `_require_data()` that skips the module).
-    for node in import_time + [node for helper in _called_at_import(tree, import_time) for node in ast.walk(helper)]:
+    helpers = _called_at_import(tree, import_time)
+    for node in import_time + [node for helper in helpers for node in _live_walk(helper.body, class_bodies=True)]:
         if isinstance(node, ast.Raise) and node.exc is not None and _possible(node.exc, every) & _SKIP_EXCEPTIONS:
             return False
         if isinstance(node, ast.Call) and _possible(node, every) & _MODULE_STOPS:
@@ -987,8 +1045,129 @@ def _called_at_import(tree: ast.Module, import_time: list[ast.AST]) -> list[ast.
     while pending - seen:
         name = min(pending - seen)
         seen.add(name)
-        pending |= callees(ast.walk(functions[name]))
+        pending |= callees(_live_walk(functions[name].body, class_bodies=True))
     return [functions[name] for name in sorted(seen)]
+
+
+# Callables import-time code may call without a warning: they cannot skip a
+# module or rebind its names. Anything else (project code, functools.partial,
+# an alias the screen cannot resolve, a helper not bound at the top level)
+# makes the screen warn that it cannot follow the call.
+_SAFE_CALLS = frozenset(
+    {
+        "collections.Counter", "collections.OrderedDict", "collections.defaultdict", "collections.namedtuple",
+        "datetime.date", "datetime.datetime", "datetime.timedelta", "decimal.Decimal", "fractions.Fraction",
+        "functools.cache", "functools.lru_cache", "functools.total_ordering", "functools.wraps",
+        "hypothesis.example", "hypothesis.given", "hypothesis.seed", "hypothesis.settings",
+        "json.dumps", "json.loads", "os.environ.get", "os.getenv", "pathlib.Path", "pathlib.PurePath",
+        "pathlib.PurePosixPath", "pytest.approx", "pytest.fixture", "pytest.param", "re.compile",
+        "textwrap.dedent", "unittest.mock.patch", "unittest.mock.patch.dict", "unittest.mock.patch.multiple",
+        "unittest.mock.patch.object",
+    }
+)
+_SAFE_PREFIXES = (
+    "dataclasses.", "enum.", "hypothesis.settings.", "hypothesis.strategies.", "itertools.", "math.", "operator.",
+    "os.path.", "pytest.mark.", "string.", "typing.",
+)
+_SAFE_BUILTINS = frozenset(
+    {
+        "abs", "all", "any", "bool", "bytes", "chr", "classmethod", "dict", "divmod", "enumerate", "filter",
+        "float", "format", "frozenset", "hash", "int", "isinstance", "issubclass", "iter", "len", "list", "map",
+        "max", "min", "next", "object", "ord", "pow", "print", "property", "range", "repr", "reversed", "round",
+        "set", "slice", "sorted", "staticmethod", "str", "sum", "tuple", "type", "zip",
+    }
+)
+
+
+def _safe_name(name: str) -> bool:
+    return name in _SAFE_CALLS or name.startswith(_SAFE_PREFIXES)
+
+
+def _bindings(body: list[ast.stmt]) -> dict[str, ast.expr]:
+    """Names a body binds once, by a plain assignment, to their values."""
+
+    values: dict[str, list[ast.expr]] = {}
+    for node in body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            values.setdefault(node.targets[0].id, []).append(node.value)
+    return {name: found[0] for name, found in values.items() if len(found) == 1}
+
+
+class _ImportTimeCalls:
+    """Classify each call that runs at import: safe, a same-file top-level
+    helper the screen follows, or one it cannot follow."""
+
+    def __init__(self, tree: ast.Module, every: dict[str, set[str]]):
+        self.every = every
+        self.functions = {
+            node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        self.module_bindings = _bindings(tree.body)
+        self.unfollowed: list[tuple[int, str]] = []
+        self._followed: set[str] = set()
+        self._scan(_import_time(tree.body), self.module_bindings)
+
+    def _scan(self, nodes: Iterable[ast.AST], bindings: dict[str, ast.expr]) -> None:
+        for node in nodes:
+            if isinstance(node, ast.Call):
+                self._call(node, node.func, bindings)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for decorator in node.decorator_list:
+                    if not isinstance(decorator, ast.Call):  # a bare decorator is called on the def
+                        self._call(decorator, decorator, bindings)
+
+    def _call(self, node: ast.AST, func: ast.expr, bindings: dict[str, ast.expr]) -> None:
+        if isinstance(func, ast.Name) and func.id in self.functions:
+            helper = self.functions[func.id]
+            # Calling a Hypothesis composite builds a strategy; its body runs
+            # at draw time, not at import.
+            lazy = any(
+                _possible(decorator, self.every) & {"hypothesis.strategies.composite"}
+                for decorator in helper.decorator_list
+            )
+            if func.id not in self._followed and not lazy:
+                self._followed.add(func.id)
+                self._scan(_live_walk(helper.body, class_bodies=True), {**self.module_bindings, **_bindings(helper.body)})
+            return
+        if self._safe_callee(func, bindings, depth=0):
+            return
+        self.unfollowed.append((getattr(node, "lineno", 0), ast.unparse(func)))
+
+    def _safe_callee(self, func: ast.expr, bindings: dict[str, ast.expr], *, depth: int) -> bool:
+        if isinstance(func, ast.Name) and func.id in _SAFE_BUILTINS and func.id not in self.every:
+            return True
+        names = _possible(func, self.every)
+        if names:
+            return all(_safe_name(name) for name in names)
+        # A method of a value the screen can see is plain data: a literal, a
+        # safe call's result, or a name bound to one (`Path(__file__).parent`).
+        return isinstance(func, ast.Attribute) and self._safe_value(func.value, bindings, depth=depth)
+
+    def _safe_value(self, expr: ast.expr, bindings: dict[str, ast.expr], *, depth: int) -> bool:
+        if depth > 8:
+            return False
+        if isinstance(expr, (ast.Constant, ast.JoinedStr)):
+            return True
+        if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
+            return all(self._safe_value(item, bindings, depth=depth + 1) for item in expr.elts)
+        if isinstance(expr, ast.Dict):
+            return all(
+                item is not None and self._safe_value(item, bindings, depth=depth + 1)
+                for item in [*expr.keys, *expr.values]
+            )
+        if isinstance(expr, ast.BinOp):
+            return self._safe_value(expr.left, bindings, depth=depth + 1) and self._safe_value(
+                expr.right, bindings, depth=depth + 1
+            )
+        if isinstance(expr, (ast.Attribute, ast.Subscript)):
+            return self._safe_value(expr.value, bindings, depth=depth + 1)
+        if isinstance(expr, ast.Call):
+            return self._safe_callee(expr.func, bindings, depth=depth + 1)
+        if isinstance(expr, ast.Name):
+            if expr.id in {"__file__", "__name__"} or expr.id in self.every:
+                return True
+            return expr.id in bindings and self._safe_value(bindings[expr.id], bindings, depth=depth + 1)
+        return False
 
 
 def _object_rebound(tree: ast.Module) -> bool:
@@ -1150,12 +1329,14 @@ def _usefixtures(marks: list[ast.expr], imports: dict[str, str]) -> set[str]:
 
 
 def python_test_warnings(source: str | bytes, name: str) -> list[str]:
-    """Ways this file shows that an accepted test may be collected and still
-    not run: skip calls in its body, in same-file fixtures it reaches, in
-    setup functions or in same-file functions any of those call; skip, skipif
-    or xfail marks (decorated, in pytestmark or applied by a call); an empty
-    parameter set; Hypothesis phases or a profile loaded at import. Conftest,
-    plugins and ini settings are not read."""
+    """Ways this file shows that an accepted test may not be collected or run:
+    skip calls in its body, in same-file fixtures it reaches, in setup
+    functions or in same-file functions any of those call; skip, skipif or
+    xfail marks (decorated, in pytestmark or applied by a call); an empty
+    parameter set; Hypothesis phases or a profile loaded at import; and any
+    import-time call the screen cannot resolve to a known-safe callable or a
+    same-file helper it follows. Conftest, plugins and ini settings are not
+    read."""
 
     resolved = _resolve(source, name)
     if resolved is None:
@@ -1220,6 +1401,10 @@ def python_test_warnings(source: str | bytes, name: str) -> list[str]:
     for node in _scope_walk(module):
         if isinstance(node, ast.Call) and (_qualified(node, imports) or "").endswith("settings.load_profile"):
             reasons.append("a Hypothesis profile loaded at import")
+    # Import-time code the screen cannot follow could stop the module being
+    # collected at all; accepted-and-unwarned is what implies collected.
+    for line, callee in _ImportTimeCalls(tree, every).unfollowed:
+        reasons.append(f"import-time code the screen can't follow: `{callee}` at line {line}; the test may not be collected")
     return list(dict.fromkeys(reasons))
 
 
@@ -1644,6 +1829,15 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
         for item in quoted if isinstance(quoted, list) else []:
             if isinstance(item, dict) and isinstance(item.get("excerpt"), str):
                 covered |= _dollar_values(item["excerpt"])
+    spelled = list(_prose_fields(entry, label))
+    if isinstance(money.get("description"), str):
+        spelled.append((f"{label}.money_case.description", money["description"]))
+    for field_label, text in spelled:
+        for odd in _unsupported_money(text):
+            issues.append(
+                f"{field_label} writes money as `{odd}`; write it as $ and digits, with commas and cents "
+                "where needed (such as $1,234.56), so the money-case rule can see it."
+            )
     for field_label, text in _prose_fields(entry, label):
         for amount in sorted(_dollar_values(text) - covered):
             issues.append(
