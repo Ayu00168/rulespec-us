@@ -25,7 +25,8 @@ Three commands:
   tests/test_source_conflicts.py): the schema, the status rules, public-repo
   hygiene, and every reference into this checkout: adopting modules carry the
   entry verbatim as a `module.interpretations` entry whose `affects` names
-  real rules, in-repo tests exist, and every ruled, confirmed or
+  real rules, in-repo test files define their pinned tests (a syntactic
+  screen, which says nothing about running), and every ruled, confirmed or
   contradicted module interpretation whose texts cite two or more provisions
   (provisions in tension) is registered; an unregistered open one is a
   warning, listed by the workflow.
@@ -33,8 +34,10 @@ Three commands:
   verbatim at its citation in the pinned corpus release, and every
   `pending_texts` excerpt is verbatim in its pinned snapshot, both judged by
   axiom-encode's own proof-atom matcher; snapshot hashes match; external
-  implementations and tests exist at their pinned commits, and each
-  implementation's `cites_entry` claim matches the file.
+  implementations and test files exist at their pinned commits, each test
+  file defines its pinned test (the same screen), and each implementation's
+  `cites_entry` claim matches the file. Running the pinned tests is
+  tools/pin_runner.py's job (the workflow's isolated `pinned-tests` job).
 - `aggregate` (network): collect every rulespec repository's register into
   one JSON or Markdown view, checking that global ids are unique and each
   entry's jurisdiction belongs to its repository.
@@ -467,846 +470,66 @@ def yaml_test_case_names(text: str) -> set[str]:
     return {case["name"] for case in cases if isinstance(case, dict) and isinstance(case.get("name"), str)}
 
 
-# A Python test reference names a whole test function that pytest's default
-# collection picks up from the file alone. The rules below are a screen for
-# the ways an honest test file stops a test being collected, not a proof
-# against deliberately obfuscated import-time code (see tools/README.md, Test
-# references). They accept a deliberately narrow shape and refuse everything
-# else (fail closed):
-# - names every common pytest configuration collects: files test_*.py,
-#   functions test_*, classes Test* (python_files, python_functions and
-#   python_classes are not read);
-# - a plain def (not async, not a generator) that is the final binding of its
-#   name at module level, or in a Test* class at module level that has no
-#   bases, no metaclass, no __init__/__new__ and no __test__;
-# - decorators limited to pytest marks, Hypothesis and unittest.mock.patch,
-#   resolved through imports bound nowhere else: anything else (a fixture,
-#   property, dataclass or a home-made wrapper) can stop pytest collecting it;
-# - nothing visible that rebinds the function, its class or an imported name:
-#   a later store, del or attribute set (in a class body too), a call that
-#   takes the function other than a pytest mark, `global`, or exec, eval,
-#   globals(), vars() or sys.modules in code that runs at import;
-# - no __test__ or store to __test__ in any form, no module __getattr__, a
-#   pytestmark of marks only, no shadowed `object` behind a class base, no
-#   pytest.skip/importorskip/xfail/fail/exit or raise in code that runs at
-#   import, and no generator test anywhere (pytest 9 refuses the whole module).
-# "Code that runs at import" is module-level statements, a main guard's else
-# branch (not its body), class bodies, annotations (eager before 3.14), and
-# the same-file functions any of those call or use as a decorator,
-# transitively; simple aliases (`skip = pytest.skip`) resolve to what they
-# name; `if False:` and `if TYPE_CHECKING:` bodies never run.
-# Import-time code is an allowlist: a call that resolves to neither a
-# known-safe callable (_SAFE_CALLS) nor a clean same-file helper warns (see
-# python_test_warnings). The guarantee is accepted and unwarned => collected.
-# A parametrized case id ([...]) is refused: pytest builds ids from sources the
-# file does not show.
-#
-# Whether a collected test runs and passes belongs to the owning repository's
-# CI. A skip in its body, fixtures or setup functions, a skip or xfail mark, an
-# empty parameter set or Hypothesis phases can stop it running without failing
-# anything; `python_test_warnings` reports the ones the file shows. Conftest
-# fixtures and hooks, plugins, ini or addopts selection and runtime rebinding
-# can do the same, and nothing here checks for them.
+# A Python test reference is screened by syntax alone, and the screen is not
+# evidence that the test runs. It needs a test file (test_*.py) that parses and
+# defines the named function: a def at module level, or a def in a body of a
+# module-level class for Class::function. Defs under `if`, `try`, `with`, loops
+# and `match` count as module level. What pytest actually collects depends on
+# import-time code, conftest files, plugins and ini settings, which no screen
+# can decide. tools/pin_runner.py asks pytest instead: it runs each pinned test
+# at its pinned commit, and only `passed` establishes a pin (see tools/README.md,
+# Test references). A parametrized case id ([...]) is refused, because pytest
+# builds case ids from more than the file shows.
 PYTHON_TEST_FILE_RE = re.compile(r"test_[^/]*\.py")
-_TEST_DECORATORS = frozenset(
-    {
-        "hypothesis.example",
-        "hypothesis.given",
-        "hypothesis.seed",
-        "hypothesis.settings",
-        "unittest.mock.patch",
-        "unittest.mock.patch.dict",
-        "unittest.mock.patch.multiple",
-        "unittest.mock.patch.object",
-    }
-)
-_SKIP_MARKS = frozenset({"skip", "skipif", "xfail"})
-_SKIP_CALLS = frozenset({"pytest.importorskip", "pytest.skip", "pytest.xfail"})
-_MODULE_STOPS = _SKIP_CALLS | {"pytest.exit", "pytest.fail"}
-_SKIP_EXCEPTIONS = frozenset({"pytest.skip.Exception", "unittest.SkipTest", "_pytest.outcomes.Skipped"})
-_REBINDING_BUILTINS = frozenset({"eval", "exec", "globals", "vars"})
-_SETUPS = {"module": ("setup_module", "setup_function"), "class": ("setup_class", "setup_method")}
-_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
+_BLOCKS = (ast.If, ast.Try, ast.TryStar, ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While, ast.Match)
 
 
 def python_test_file(path: str) -> bool:
     return PYTHON_TEST_FILE_RE.fullmatch(PurePosixPath(path).name) is not None
 
 
-def _outer(node: ast.AST) -> list[ast.AST]:
-    """The parts of a def, class or lambda its enclosing scope evaluates:
-    defaults, annotations (eagerly before Python 3.14), decorators, bases and
-    keywords."""
+def _scope_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
+    """Statements in this scope, including those inside compound statements
+    such as if, try, with, loops and match, but not inside defs or classes."""
 
-    outer: list[ast.AST] = []
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-        outer.extend(node.args.defaults)
-        outer.extend(d for d in node.args.kw_defaults if d is not None)
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        arguments = node.args
-        every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg]
-        outer.extend(arg.annotation for arg in every if arg is not None and arg.annotation is not None)
-        if node.returns is not None:
-            outer.append(node.returns)
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        outer.extend(node.decorator_list)
-    if isinstance(node, ast.ClassDef):
-        outer.extend(node.bases)
-        outer.extend(keyword.value for keyword in node.keywords)
-    return outer
-
-
-def _scope_walk(body: list[ast.stmt]) -> Iterator[ast.AST]:
-    """Every node evaluated in this scope, including nested blocks, but not
-    the bodies of nested functions, classes or lambdas (their names, decorators,
-    bases and defaults belong to this scope)."""
-
-    stack: list[ast.AST] = list(reversed(body))
-    while stack:
-        node = stack.pop()
-        yield node
-        if isinstance(node, _SCOPES):
-            stack.extend(reversed(_outer(node)))
-            continue
-        stack.extend(reversed(list(ast.iter_child_nodes(node))))
-
-
-def _never_runs(node: ast.AST) -> bool:
-    """`if False:`, `if TYPE_CHECKING:` and the body of a main guard: blocks
-    whose body never runs under pytest (their else branch does)."""
-
-    if not isinstance(node, ast.If):
-        return False
-    test = node.test
-    if isinstance(test, ast.Constant) and not test.value:
-        return True
-    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
-        return True
-    if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
-        return True
-    return _main_guard(node)
-
-
-def _live_walk(body: list[ast.stmt], *, class_bodies: bool) -> Iterator[ast.AST]:
-    """Nodes this body evaluates when it runs: like _scope_walk, but skipping
-    the bodies of blocks that never run, and (with class_bodies) running class
-    bodies too, as importing a module does."""
-
-    stack: list[ast.AST] = list(reversed(body))
-    while stack:
-        node = stack.pop()
-        if _never_runs(node):
-            stack.extend(reversed(node.orelse))
-            continue
-        yield node
-        if isinstance(node, _SCOPES):
-            stack.extend(reversed(_outer(node)))
-            if class_bodies and isinstance(node, ast.ClassDef):
-                stack.extend(reversed(node.body))
-            continue
-        stack.extend(reversed(list(ast.iter_child_nodes(node))))
-
-
-def _root(node: ast.expr) -> str | None:
-    """`a.b[c].d` -> "a"."""
-
-    while isinstance(node, (ast.Attribute, ast.Subscript)):
-        node = node.value
-    return node.id if isinstance(node, ast.Name) else None
-
-
-def _binds(node: ast.AST, name: str) -> bool:
-    """Does this node bind, rebind, delete or mutate `name` in its scope?"""
-
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return node.name == name
-    if isinstance(node, ast.Name):
-        return node.id == name and isinstance(node.ctx, (ast.Store, ast.Del))
-    if isinstance(node, (ast.Attribute, ast.Subscript)):  # name.a = ..., name.__dict__[k] = ..., del name.a
-        return isinstance(node.ctx, (ast.Store, ast.Del)) and _root(node) == name
-    if isinstance(node, (ast.Import, ast.ImportFrom)):
-        return any((alias.asname or alias.name.split(".")[0]) == name for alias in node.names)
-    if isinstance(node, (ast.Global, ast.Nonlocal)):
-        return name in node.names
-    if isinstance(node, ast.ExceptHandler):
-        return node.name == name
-    if isinstance(node, (ast.MatchAs, ast.MatchStar)):
-        return node.name == name
-    if isinstance(node, ast.MatchMapping):
-        return node.rest == name
-    return False
-
-
-def _passes(node: ast.AST, name: str) -> bool:
-    """A call that receives `name` itself, which could mutate or replace it."""
-
-    if not isinstance(node, ast.Call):
-        return False
-    values = [*node.args, *(keyword.value for keyword in node.keywords)]
-    return any(
-        _root(value.value if isinstance(value, ast.Starred) else value) == name for value in values
-    )
-
-
-def _final_definition(body: list[ast.stmt], name: str, imports: dict[str, str]) -> ast.stmt | None:
-    """The top-level def or class `name` in this body, when nothing after it in
-    the scope rebinds, deletes or mutates the name, or hands it to a call other
-    than a pytest mark (pytest sees the final object), else None."""
-
-    found = None
-    for index, node in enumerate(body):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
-            found = index
-    if found is None:
-        return None
-    later = list(_scope_walk(body[found + 1 :]))
-    # Class bodies run at import too; there a plain name binds a class
-    # attribute, but a store under the name or a call taking it reaches it.
-    in_classes = [
-        node
-        for statement in body
-        for cls in _scope_walk([statement])
-        if isinstance(cls, ast.ClassDef)
-        for node in _import_time(cls.body)
-    ]
-    if any(_binds(node, name) for node in later):
-        return None
-    if any(isinstance(node, (ast.Attribute, ast.Subscript)) and _binds(node, name) for node in in_classes):
-        return None
-    if any(_passes(node, name) and not _is_mark(node, imports, applied=True) for node in later + in_classes):
-        return None
-    if any(_binds(node, name) for node in _scope_walk([body[found]]) if node is not body[found]):
-        return None  # e.g. the decorator rebinds it with a walrus
-    return body[found]
-
-
-def _imports(tree: ast.Module) -> dict[str, str]:
-    """Local name -> imported dotted name, for names bound only by imports:
-    not rebound at module level, not declared `global` anywhere, and with no
-    store anywhere under them (`pytest.mark.slow = ...`)."""
-
-    seen: dict[str, set[str]] = {}
-    for node in _scope_walk(tree.body):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.asname:
-                    seen.setdefault(alias.asname, set()).add(alias.name)
-                else:
-                    root = alias.name.split(".")[0]
-                    seen.setdefault(root, set()).add(root)
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            for alias in node.names:
-                seen.setdefault(alias.asname or alias.name, set()).add(f"{node.module}.{alias.name}")
-    everywhere = list(ast.walk(tree))
-    names: dict[str, str] = {}
-    for local, targets in seen.items():
-        rebound = any(
-            _binds(node, local) and not isinstance(node, (ast.Import, ast.ImportFrom))
-            for node in _scope_walk(tree.body)
-        ) or any(
-            isinstance(node, (ast.Global, ast.Nonlocal)) and local in node.names
-            or isinstance(node, (ast.Attribute, ast.Subscript)) and _binds(node, local)
-            for node in everywhere
-        )
-        if len(targets) == 1 and not rebound:
-            names[local] = next(iter(targets))
-    return names
-
-
-def _every_import(tree: ast.Module) -> dict[str, set[str]]:
-    """Local name -> every dotted name any import anywhere binds it to,
-    trusted or not. Refusals and warnings resolve through this, so a name
-    made untrusted (`pytest.foo = 1`) cannot hide a `pytest.skip`."""
-
-    found: dict[str, set[str]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                local = alias.asname or alias.name.split(".")[0]
-                found.setdefault(local, set()).add(alias.name if alias.asname else local)
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            for alias in node.names:
-                found.setdefault(alias.asname or alias.name, set()).add(f"{node.module}.{alias.name}")
-    # Simple aliases, in any scope: `skip = pytest.skip`, `m = sys.modules`.
-    aliases = [
-        (node.targets[0].id, node.value)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign)
-        and len(node.targets) == 1
-        and isinstance(node.targets[0], ast.Name)
-        and isinstance(node.value, (ast.Name, ast.Attribute))
-    ]
-    changed = True
-    while changed:
-        changed = False
-        for name, value in aliases:
-            more = _possible(value, found) - found.get(name, set())
-            if more:
-                found.setdefault(name, set()).update(more)
-                changed = True
-    return found
-
-
-def _possible(node: ast.expr, every: dict[str, set[str]]) -> set[str]:
-    """Every dotted name `node` (or the function a call names) could be."""
-
-    target = node.func if isinstance(node, ast.Call) else node
-    parts: list[str] = []
-    while isinstance(target, ast.Attribute):
-        parts.append(target.attr)
-        target = target.value
-    if not isinstance(target, ast.Name):
-        return set()
-    return {".".join([base, *reversed(parts)]) for base in every.get(target.id, ())}
-
-
-def _qualified(node: ast.expr, imports: dict[str, str]) -> str | None:
-    """`pt.mark.slow(...)` with `import pytest as pt` -> "pytest.mark.slow"."""
-
-    target = node.func if isinstance(node, ast.Call) else node
-    parts: list[str] = []
-    while isinstance(target, ast.Attribute):
-        parts.append(target.attr)
-        target = target.value
-    if not isinstance(target, ast.Name) or target.id not in imports:
-        return None
-    return ".".join([imports[target.id], *reversed(parts)])
-
-
-def _mark_name(node: ast.expr, imports: dict[str, str]) -> str | None:
-    """"skip" for `pytest.mark.skip` or `pytest.mark.skip(...)`, else None."""
-
-    name = _qualified(node, imports)
-    if name is None or not name.startswith("pytest.mark."):
-        return None
-    mark = name.removeprefix("pytest.mark.")
-    return None if "." in mark else mark
-
-
-def _is_mark(node: ast.expr, imports: dict[str, str], *, applied: bool = False) -> bool:
-    """A pytest mark: as a decorator or in pytestmark, or (applied) called on
-    the test, `pytest.mark.slow(test_x)`. A bare `parametrize` is an error."""
-
-    mark = _mark_name(node.func if applied and isinstance(node, ast.Call) else node, imports)
-    if mark is None:
-        return False
-    return mark != "parametrize" or applied or isinstance(node, ast.Call)
-
-
-def _collects_with(node: ast.expr, imports: dict[str, str]) -> bool:
-    return _is_mark(node, imports) or _qualified(node, imports) in _TEST_DECORATORS
-
-
-def _marks(value: ast.expr | None, imports: dict[str, str]) -> list[ast.expr] | None:
-    """The marks a pytestmark value holds, or None if it is not only marks."""
-
-    items = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
-    return items if all(item is not None and _is_mark(item, imports) for item in items) else None
-
-
-def _pytestmarks(body: list[ast.stmt], imports: dict[str, str]) -> list[ast.expr] | None:
-    """Every mark a scope's pytestmark assignments hold, or None when one of
-    them is anything but a plain assignment of marks."""
-
-    found: list[ast.expr] = []
     for node in body:
-        if not any(_binds(sub, "pytestmark") for sub in _scope_walk([node])):
-            continue
-        if not (isinstance(node, ast.Assign) and [type(target) for target in node.targets] == [ast.Name]):
-            return None
-        marks = _marks(node.value, imports)
-        if marks is None:
-            return None
-        found.extend(marks)
-    return found
-
-
-def _scope_collects(body: list[ast.stmt], imports: dict[str, str]) -> bool:
-    """No `__test__`, and any `pytestmark` is marks only."""
-
-    for node in _scope_walk(body):
-        if _binds(node, "__test__") and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            return False
-    return _pytestmarks(body, imports) is not None
-
-
-def _is_generator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    return any(isinstance(sub, (ast.Yield, ast.YieldFrom)) for sub in _scope_walk(node.body))
-
-
-def _is_fixture(node: ast.FunctionDef | ast.AsyncFunctionDef, imports: dict[str, str]) -> bool:
-    return any((_qualified(decorator, imports) or "").endswith("fixture") for decorator in node.decorator_list)
-
-
-def _main_guard(node: ast.stmt) -> bool:
-    """`if __name__ == "__main__":`, which never runs under pytest."""
-
-    if not (isinstance(node, ast.If) and isinstance(node.test, ast.Compare) and len(node.test.ops) == 1):
-        return False
-    sides = [node.test.left, *node.test.comparators]
-    return isinstance(node.test.ops[0], ast.Eq) and any(
-        isinstance(side, ast.Name) and side.id == "__name__" for side in sides
-    ) and any(isinstance(side, ast.Constant) and side.value == "__main__" for side in sides)
-
-
-def _import_time(body: list[ast.stmt]) -> Iterator[ast.AST]:
-    """Code that runs when the module is imported: module-level statements,
-    class bodies, decorators, defaults and annotations; not function bodies,
-    and not blocks that never run (`if False:`, `if TYPE_CHECKING:`, a main
-    guard's body; their else branches do run)."""
-
-    return _live_walk(body, class_bodies=True)
-
-
-def _stores_test_flag(node: ast.AST) -> bool:
-    """A store to `__test__` through an attribute, a subscript or setattr,
-    whatever the target (`[test_x][0].__test__ = False`)."""
-
-    if isinstance(node, ast.Attribute):
-        return node.attr == "__test__" and isinstance(node.ctx, (ast.Store, ast.Del))
-    if isinstance(node, ast.Subscript):
-        key = node.slice
-        return isinstance(node.ctx, (ast.Store, ast.Del)) and isinstance(key, ast.Constant) and key.value == "__test__"
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"setattr", "delattr"}:
-        return len(node.args) > 1 and isinstance(node.args[1], ast.Constant) and node.args[1].value == "__test__"
-    return False
-
-
-def _module_collects(tree: ast.Module, imports: dict[str, str]) -> bool:
-    """Nothing in the module visibly stops pytest collecting it, or rebinds
-    names behind the check's back."""
-
-    if not _scope_collects(tree.body, imports):
-        return False
-    if any(_binds(node, "__getattr__") for node in _scope_walk(tree.body)):
-        return False  # a module __getattr__ can answer pytest's __test__ lookup
-    if any(_stores_test_flag(node) for node in ast.walk(tree)):
-        return False
-    every = _every_import(tree)
-    import_time = list(_import_time(tree.body))
-    if any(isinstance(node, ast.Raise) for node in import_time):
-        return False
-    # Same-file functions called at import run then too, transitively (the
-    # optional-data helper `_require_data()` that skips the module).
-    helpers = _called_at_import(tree, import_time)
-    for node in import_time + [node for helper in helpers for node in _live_walk(helper.body, class_bodies=True)]:
-        if isinstance(node, ast.Raise) and node.exc is not None and _possible(node.exc, every) & _SKIP_EXCEPTIONS:
-            return False
-        if isinstance(node, ast.Call) and _possible(node, every) & _MODULE_STOPS:
-            return False
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _REBINDING_BUILTINS:
-            return False
-        if isinstance(node, (ast.Attribute, ast.Name)) and "sys.modules" in _possible(node, every):
-            return False
-        if (
-            isinstance(node, ast.Call)
-            and "importlib.import_module" in _possible(node, every)
-            and any(isinstance(arg, ast.Name) and arg.id == "__name__" for arg in node.args)
-        ):
-            return False  # the module itself, to rebind its names
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.FunctionDef)
-            and node.name.startswith("test")
-            and _is_generator(node)
-            and not _is_fixture(node, imports)
-        ):
-            return False  # pytest 9 fails the module: "'yield' keyword is allowed in fixtures, but not in tests"
-    return True
-
-
-def _called_at_import(tree: ast.Module, import_time: list[ast.AST]) -> list[ast.AST]:
-    """Module-level functions that import-time code calls, by name or as a
-    decorator, and the ones those call in turn."""
-
-    functions = {
-        node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-
-    def callees(nodes: Iterable[ast.AST]) -> set[str]:
-        names = set()
-        for node in nodes:
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
-                names.add(node.func.id)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                for decorator in node.decorator_list:
-                    target = decorator.func if isinstance(decorator, ast.Call) else decorator
-                    if isinstance(target, ast.Name) and target.id in functions:
-                        names.add(target.id)
-        return names
-
-    pending, seen = callees(import_time), set()
-    while pending - seen:
-        name = min(pending - seen)
-        seen.add(name)
-        pending |= callees(_live_walk(functions[name].body, class_bodies=True))
-    return [functions[name] for name in sorted(seen)]
-
-
-# Callables import-time code may call without a warning: they cannot skip a
-# module or rebind its names. Anything else (project code, functools.partial,
-# an alias the screen cannot resolve, a helper not bound at the top level)
-# makes the screen warn that it cannot follow the call.
-_SAFE_CALLS = frozenset(
-    {
-        "collections.Counter", "collections.OrderedDict", "collections.defaultdict", "collections.namedtuple",
-        "datetime.date", "datetime.datetime", "datetime.timedelta", "decimal.Decimal", "fractions.Fraction",
-        "functools.cache", "functools.lru_cache", "functools.total_ordering", "functools.wraps",
-        "hypothesis.example", "hypothesis.given", "hypothesis.seed", "hypothesis.settings",
-        "json.dumps", "json.loads", "os.environ.get", "os.getenv", "pathlib.Path", "pathlib.PurePath",
-        "pathlib.PurePosixPath", "pytest.approx", "pytest.fixture", "pytest.param", "re.compile",
-        "textwrap.dedent", "unittest.mock.patch", "unittest.mock.patch.dict", "unittest.mock.patch.multiple",
-        "unittest.mock.patch.object",
-    }
-)
-_SAFE_PREFIXES = (
-    "dataclasses.", "enum.", "hypothesis.settings.", "hypothesis.strategies.", "itertools.", "math.", "operator.",
-    "os.path.", "pytest.mark.", "string.", "typing.",
-)
-_SAFE_BUILTINS = frozenset(
-    {
-        "abs", "all", "any", "bool", "bytes", "chr", "classmethod", "dict", "divmod", "enumerate", "filter",
-        "float", "format", "frozenset", "hash", "int", "isinstance", "issubclass", "iter", "len", "list", "map",
-        "max", "min", "next", "object", "ord", "pow", "print", "property", "range", "repr", "reversed", "round",
-        "set", "slice", "sorted", "staticmethod", "str", "sum", "tuple", "type", "zip",
-    }
-)
-
-
-def _safe_name(name: str) -> bool:
-    return name in _SAFE_CALLS or name.startswith(_SAFE_PREFIXES)
-
-
-def _bindings(body: list[ast.stmt]) -> dict[str, ast.expr]:
-    """Names a body binds once, by a plain assignment, to their values."""
-
-    values: dict[str, list[ast.expr]] = {}
-    for node in body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            values.setdefault(node.targets[0].id, []).append(node.value)
-    return {name: found[0] for name, found in values.items() if len(found) == 1}
-
-
-class _ImportTimeCalls:
-    """Classify each call that runs at import: safe, a same-file top-level
-    helper the screen follows, or one it cannot follow."""
-
-    def __init__(self, tree: ast.Module, every: dict[str, set[str]]):
-        self.every = every
-        self.functions = {
-            node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-        self.module_bindings = _bindings(tree.body)
-        self.unfollowed: list[tuple[int, str]] = []
-        self._followed: set[str] = set()
-        self._scan(_import_time(tree.body), self.module_bindings)
-
-    def _scan(self, nodes: Iterable[ast.AST], bindings: dict[str, ast.expr]) -> None:
-        for node in nodes:
-            if isinstance(node, ast.Call):
-                self._call(node, node.func, bindings)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                for decorator in node.decorator_list:
-                    if not isinstance(decorator, ast.Call):  # a bare decorator is called on the def
-                        self._call(decorator, decorator, bindings)
-
-    def _call(self, node: ast.AST, func: ast.expr, bindings: dict[str, ast.expr]) -> None:
-        if isinstance(func, ast.Name) and func.id in self.functions:
-            helper = self.functions[func.id]
-            # Calling a Hypothesis composite builds a strategy; its body runs
-            # at draw time, not at import.
-            lazy = any(
-                _possible(decorator, self.every) & {"hypothesis.strategies.composite"}
-                for decorator in helper.decorator_list
-            )
-            if func.id not in self._followed and not lazy:
-                self._followed.add(func.id)
-                self._scan(_live_walk(helper.body, class_bodies=True), {**self.module_bindings, **_bindings(helper.body)})
-            return
-        if self._safe_callee(func, bindings, depth=0):
-            return
-        self.unfollowed.append((getattr(node, "lineno", 0), ast.unparse(func)))
-
-    def _safe_callee(self, func: ast.expr, bindings: dict[str, ast.expr], *, depth: int) -> bool:
-        if isinstance(func, ast.Name) and func.id in _SAFE_BUILTINS and func.id not in self.every:
-            return True
-        names = _possible(func, self.every)
-        if names:
-            return all(_safe_name(name) for name in names)
-        # A method of a value the screen can see is plain data: a literal, a
-        # safe call's result, or a name bound to one (`Path(__file__).parent`).
-        return isinstance(func, ast.Attribute) and self._safe_value(func.value, bindings, depth=depth)
-
-    def _safe_value(self, expr: ast.expr, bindings: dict[str, ast.expr], *, depth: int) -> bool:
-        if depth > 8:
-            return False
-        if isinstance(expr, (ast.Constant, ast.JoinedStr)):
-            return True
-        if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
-            return all(self._safe_value(item, bindings, depth=depth + 1) for item in expr.elts)
-        if isinstance(expr, ast.Dict):
-            return all(
-                item is not None and self._safe_value(item, bindings, depth=depth + 1)
-                for item in [*expr.keys, *expr.values]
-            )
-        if isinstance(expr, ast.BinOp):
-            return self._safe_value(expr.left, bindings, depth=depth + 1) and self._safe_value(
-                expr.right, bindings, depth=depth + 1
-            )
-        if isinstance(expr, (ast.Attribute, ast.Subscript)):
-            return self._safe_value(expr.value, bindings, depth=depth + 1)
-        if isinstance(expr, ast.Call):
-            return self._safe_callee(expr.func, bindings, depth=depth + 1)
-        if isinstance(expr, ast.Name):
-            if expr.id in {"__file__", "__name__"} or expr.id in self.every:
-                return True
-            return expr.id in bindings and self._safe_value(bindings[expr.id], bindings, depth=depth + 1)
-        return False
-
-
-def _object_rebound(tree: ast.Module) -> bool:
-    """Is the builtin `object`, the one base a test class may name, shadowed
-    (`class object: __test__ = False`) or declared global anywhere?"""
-
-    return any(_binds(node, "object") for node in _scope_walk(tree.body)) or any(
-        isinstance(node, (ast.Global, ast.Nonlocal)) and "object" in node.names for node in ast.walk(tree)
-    )
-
-
-def _collected_test(node: ast.stmt | None, imports: dict[str, str]) -> ast.FunctionDef | None:
-    if (
-        isinstance(node, ast.FunctionDef)
-        and node.name.startswith("test_")
-        and all(_collects_with(decorator, imports) for decorator in node.decorator_list)
-    ):
-        return node
-    return None
-
-
-def _resolve(source: str | bytes, name: str):
-    """(tree, imports, function, class or None) for an accepted reference,
-    else None."""
-
-    match = TEST_NAME_RE.fullmatch(name)
-    if match is None:
-        return None
-    try:
-        tree = ast.parse(source)  # bytes honour a PEP 263 coding cookie
-    except (SyntaxError, ValueError, UnicodeDecodeError):
-        return None
-    imports = _imports(tree)
-    if not _module_collects(tree, imports):
-        return None
-    scope = match.group("scope")
-    declared_global = {name for node in ast.walk(tree) if isinstance(node, ast.Global) for name in node.names}
-    if {match.group("name"), (scope or "::")[:-2]} & declared_global:
-        return None  # a function could rebind it at import time
-    if not scope:
-        function = _collected_test(_final_definition(tree.body, match.group("name"), imports), imports)
-        return (tree, imports, function, None) if function else None
-    cls = _final_definition(tree.body, scope[:-2], imports)
-    if not (
-        isinstance(cls, ast.ClassDef)
-        and cls.name.startswith("Test")
-        and all(isinstance(base, ast.Name) and base.id == "object" for base in cls.bases)
-        and not (cls.bases and _object_rebound(tree))
-        and not cls.keywords
-        and all(_is_mark(decorator, imports) for decorator in cls.decorator_list)
-        and _scope_collects(cls.body, imports)
-        and not any(_binds(node, special) for node in _scope_walk(cls.body) for special in ("__init__", "__new__"))
-    ):
-        return None
-    function = _collected_test(_final_definition(cls.body, match.group("name"), imports), imports)
-    return (tree, imports, function, cls) if function else None
+        yield node
+        if isinstance(node, _BLOCKS):
+            for field in ("body", "orelse", "finalbody"):
+                yield from _scope_statements(getattr(node, field, None) or [])
+            for handler in getattr(node, "handlers", None) or []:
+                yield from _scope_statements(handler.body)
+            for case in getattr(node, "cases", None) or []:
+                yield from _scope_statements(case.body)
 
 
 def python_test_exists(source: str | bytes, name: str) -> bool:
-    """Does `name` (test_function, or TestClass::test_method) name a whole test
-    that pytest's default collection picks up from this file, by the rules
-    above? Whether it then runs is not decided here."""
+    """The syntactic screen: does this file define `name` (function, or
+    Class::function)? This decides nothing about collection or running."""
 
-    return _resolve(source, name) is not None
-
-
-def _bound_value(values: ast.expr | None, module: list[ast.stmt]) -> ast.expr | None:
-    """A parameter set as written, or the value a module-level name is bound
-    to once (`CASES = [...]`)."""
-
-    if isinstance(values, ast.Name):
-        bound = [
-            node.value
-            for node in module
-            if isinstance(node, ast.Assign) and [getattr(t, "id", None) for t in node.targets] == [values.id]
-        ]
-        return bound[0] if len(bound) == 1 else None
-    return values
-
-
-def _empty_values(values: ast.expr | None) -> bool:
-    """A parameter set the file shows is empty: `[]`, `()`, `list()`,
-    `range(0)`, or a comprehension over one of those."""
-
-    if isinstance(values, (ast.List, ast.Tuple, ast.Set)):
-        return not values.elts
-    if isinstance(values, ast.Call) and isinstance(values.func, ast.Name) and values.func.id in {"list", "tuple", "range"}:
-        args = values.args
-        return not args or (values.func.id == "range" and len(args) == 1 and isinstance(args[0], ast.Constant) and args[0].value == 0) or (
-            values.func.id != "range" and len(args) == 1 and _empty_values(args[0])
-        )
-    if isinstance(values, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-        return any(_empty_values(generator.iter) for generator in values.generators)
-    return False
-
-
-def _mark_skips(node: ast.expr, imports: dict[str, str], module: list[ast.stmt]) -> str | None:
-    """Why a mark can stop the test running, if it visibly can."""
-
-    mark = _mark_name(node, imports)
-    if mark in _SKIP_MARKS:
-        return f"a pytest.mark.{mark} mark"
-    if mark != "parametrize" or not isinstance(node, ast.Call):
-        return None
-    values = _bound_value(
-        node.args[1] if len(node.args) > 1 else next((k.value for k in node.keywords if k.arg == "argvalues"), None),
-        module,
-    )
-    if _empty_values(values):
-        return "an empty parameter set"
-    if isinstance(values, (ast.List, ast.Tuple)) and values.elts and all(
-        isinstance(value, ast.Call)
-        and _qualified(value, imports) == "pytest.param"
-        and any(
-            keyword.arg == "marks"
-            and any(_mark_name(item, imports) in _SKIP_MARKS for item in ast.walk(keyword.value) if isinstance(item, ast.expr))
-            for keyword in value.keywords
-        )
-        for value in values.elts
-    ):
-        return "a skip or xfail mark on every case"
-    return None
-
-
-def _skip_calls(function: ast.AST, every: dict[str, set[str]]) -> list[str]:
-    return sorted(
-        {name for node in ast.walk(function) if isinstance(node, ast.Call) for name in _possible(node, every) & _SKIP_CALLS}
-    )
-
-
-def _fixtures(body: list[ast.stmt], imports: dict[str, str]) -> dict[str, tuple[ast.FunctionDef, bool]]:
-    """Fixture name -> (def, autouse) for the fixtures defined in this body."""
-
-    found = {}
-    for node in body:
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for decorator in node.decorator_list:
-            if not (_qualified(decorator, imports) or "").endswith("fixture"):
-                continue
-            keywords = {k.arg: k.value for k in decorator.keywords} if isinstance(decorator, ast.Call) else {}
-            name = keywords.get("name")
-            autouse = keywords.get("autouse")
-            found[name.value if isinstance(name, ast.Constant) and isinstance(name.value, str) else node.name] = (
-                node,
-                isinstance(autouse, ast.Constant) and autouse.value is True,
-            )
-    return found
-
-
-def _usefixtures(marks: list[ast.expr], imports: dict[str, str]) -> set[str]:
-    return {
-        arg.value
-        for mark in marks
-        if isinstance(mark, ast.Call) and _mark_name(mark, imports) == "usefixtures"
-        for arg in mark.args
-        if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
-    }
-
-
-def python_test_warnings(source: str | bytes, name: str) -> list[str]:
-    """Ways this file shows that an accepted test may not be collected or run:
-    skip calls in its body, in same-file fixtures it reaches, in setup
-    functions or in same-file functions any of those call; skip, skipif or
-    xfail marks (decorated, in pytestmark or applied by a call); an empty
-    parameter set; Hypothesis phases or a profile loaded at import; and any
-    import-time call the screen cannot resolve to a known-safe callable or a
-    same-file helper it follows. Conftest, plugins and ini settings are not
-    read."""
-
-    resolved = _resolve(source, name)
-    if resolved is None:
-        return []
-    tree, imports, function, cls = resolved
-    module = tree.body
-    marks = list(function.decorator_list)
-    marks += _pytestmarks(module, imports) or []
-    if cls is not None:
-        marks += list(cls.decorator_list) + (_pytestmarks(cls.body, imports) or [])
-    targets = {function.name} if cls is None else {cls.name}
-    for node in _scope_walk(module):
-        if _passes(node, next(iter(targets))) and _is_mark(node, imports, applied=True):
-            marks.append(node.func)  # pytest.mark.skip(test_x) applied by a call
-    reasons = [reason for reason in (_mark_skips(mark, imports, module) for mark in marks) if reason]
-
-    places = [("its body", function)]
-    available = _fixtures(module, imports)
-    if cls is not None:
-        available.update(_fixtures(cls.body, imports))
-    wanted = {arg.arg for arg in function.args.args + function.args.kwonlyargs} - {"self", "cls"}
-    wanted |= _usefixtures(marks, imports)
-    wanted |= {fixture for fixture, (_, autouse) in available.items() if autouse}
-    reached: set[str] = set()
-    while wanted - reached:
-        fixture = min(wanted - reached)
-        reached.add(fixture)
-        if fixture in available:
-            node = available[fixture][0]
-            places.append((f"fixture {fixture}", node))
-            wanted |= {arg.arg for arg in node.args.args + node.args.kwonlyargs} - {"self", "cls", "request"}
-    setups = [(module, _SETUPS["module"])] + ([(cls.body, _SETUPS["class"])] if cls is not None else [])
-    for body, setup_names in setups:
-        for node in body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in setup_names:
-                places.append((node.name, node))
-    # Same-file module-level functions these call, transitively (a data-gated
-    # test often skips inside a helper such as `_published_case(...)`).
-    helpers = {
-        node.name: node for node in module if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not _is_fixture(node, imports)
-    }
-    queue, called = [node for _, node in places], set()
-    while queue:
-        for call in ast.walk(queue.pop()):
-            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in helpers:
-                if call.func.id not in called and helpers[call.func.id] is not function:
-                    called.add(call.func.id)
-                    places.append((f"{call.func.id}, which it calls", helpers[call.func.id]))
-                    queue.append(helpers[call.func.id])
-    every = _every_import(tree)
-    for where, node in places:
-        reasons.extend(f"{call} in {where}" for call in _skip_calls(node, every))
-
-    for decorator in function.decorator_list:
-        if _qualified(decorator, imports) == "hypothesis.settings" and isinstance(decorator, ast.Call):
-            keywords = {k.arg: k.value for k in decorator.keywords}
-            if "phases" in keywords:
-                reasons.append("Hypothesis settings that set phases")
-            examples = keywords.get("max_examples")
-            if isinstance(examples, ast.Constant) and examples.value == 0:
-                reasons.append("Hypothesis max_examples=0")
-    for node in _scope_walk(module):
-        if isinstance(node, ast.Call) and (_qualified(node, imports) or "").endswith("settings.load_profile"):
-            reasons.append("a Hypothesis profile loaded at import")
-    # Import-time code the screen cannot follow could stop the module being
-    # collected at all; accepted-and-unwarned is what implies collected.
-    for line, callee in _ImportTimeCalls(tree, every).unfollowed:
-        reasons.append(f"import-time code the screen can't follow: `{callee}` at line {line}; the test may not be collected")
-    return list(dict.fromkeys(reasons))
+    match = TEST_NAME_RE.fullmatch(name)
+    if match is None:
+        return False
+    try:
+        tree = ast.parse(source)  # bytes honour a PEP 263 coding cookie
+    except (SyntaxError, ValueError, UnicodeDecodeError):
+        return False
+    body = tree.body
+    scope = match.group("scope")
+    if scope:
+        classes = [node for node in _scope_statements(body) if isinstance(node, ast.ClassDef) and node.name == scope[:-2]]
+        if not classes:
+            return False
+        body = [statement for cls in classes for statement in cls.body]
+    return any(isinstance(node, _DEFS) and node.name == match.group("name") for node in _scope_statements(body))
 
 
 def missing_test(name: str, where: str) -> str:
     """Why a test reference does not resolve, worded for its kind of file."""
 
     if where.endswith(".py"):
-        return f"{name} is not a test pytest collects from {where} (see tools/README.md, Test references)."
+        return f"{name} is not a test function defined in {where} (see tools/README.md, Test references)."
     return f"{name} is not a test case in {where}."
 
 
@@ -1687,27 +910,6 @@ def unregistered_tensions(root: Path, payload: Any) -> tuple[list[str], list[str
     return failures, warnings
 
 
-def test_pin_warnings(payload: Any, root: Path) -> list[str]:
-    """Non-blocking: in-repo Python tests that are collected but that the file
-    shows may not run (see python_test_warnings)."""
-
-    warnings = []
-    entries = payload.get("entries") if isinstance(payload, dict) else None
-    for index, entry in enumerate(entries if isinstance(entries, list) else []):
-        tests = entry.get("tests") if isinstance(entry, dict) else None
-        for t_index, item in enumerate(tests if isinstance(tests, list) else []):
-            if not isinstance(item, dict) or "repo" in item:
-                continue
-            path, name = item.get("path"), item.get("name")
-            if not (isinstance(path, str) and isinstance(name, str) and path.endswith(".py") and _relative_path(path)):
-                continue
-            local = root / path
-            if local.is_file():
-                for reason in python_test_warnings(local.read_bytes(), name):
-                    warnings.append(f"entries[{index}].tests[{t_index}] {path}::{name} may not run: {reason}.")
-    return warnings
-
-
 def check_register(payload: Any, ctx: RepoContext, *, scan_modules: bool = True) -> list[str]:
     issues: list[str] = []
     if not isinstance(payload, dict):
@@ -1903,9 +1105,6 @@ def verify_register(
                 issues.append(f"{t_label}: {missing_test(item['name'], where)}")
             else:
                 counts["tests"] += 1
-                if item["path"].endswith(".py"):
-                    for reason in python_test_warnings(source, item["name"]):
-                        report.append(f"may not run: {t_label} {where}::{item['name']}: {reason}")
     report.insert(
         0,
         "verified: "
@@ -2072,7 +1271,7 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument(
         "--warnings-file",
         type=Path,
-        help="also write the warnings here, one per line: unregistered open interpretations and pinned tests that may not run",
+        help="also write the warnings here, one per line: unregistered open module interpretations",
     )
     verify = sub.add_parser("verify", help="network checks: excerpts, snapshots, external refs")
     verify.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
@@ -2093,18 +1292,18 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         issues = check_register(payload, RepoContext(root=args.root, repo=args.repo))
         warnings = unregistered_tensions(args.root, payload)[1] if isinstance(payload, dict) else []
-        pin_warnings = test_pin_warnings(payload, args.root)
         for issue in issues:
             print(f"- {issue}", file=sys.stderr)
-        for warning in warnings + pin_warnings:
+        for warning in warnings:
             print(f"warning: {warning}")
         if args.warnings_file is not None:
-            args.warnings_file.write_text("".join(f"{warning}\n" for warning in warnings + pin_warnings))
+            args.warnings_file.write_text("".join(f"{warning}\n" for warning in warnings))
         entries = payload.get("entries") if isinstance(payload, dict) else None
         count = len(entries) if isinstance(entries, list) else 0
         print(
             f"{REGISTER_FILENAME}: {count} entr{'y' if count == 1 else 'ies'}, {len(issues)} issue(s), "
-            f"{len(warnings)} unregistered open interpretation(s), {len(pin_warnings)} pinned test(s) that may not run."
+            f"{len(warnings)} unregistered open interpretation(s). This screen does not run pinned tests; "
+            "tools/pin_runner.py does."
         )
         return 1 if issues else 0
 

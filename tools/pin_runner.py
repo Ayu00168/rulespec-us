@@ -1,0 +1,769 @@
+"""Run every pinned test at its pinned commit and ask pytest what happened.
+
+A register entry's `tests` pin readings to tests in other repositories at
+fixed commits. `source_conflicts.py check` only screens a pin's syntax: the
+file is a test_*.py file and defines the named function. Whether pytest
+collects and passes that test depends on import-time code, conftest files,
+plugins and ini settings, which no static check can decide. This runner asks
+pytest.
+
+For each (repository, commit) the register pins, it:
+
+1. fetches the commit (`git fetch --depth 1`) into a fresh checkout;
+2. picks a Python: the newest of PYTHONS that the project's `requires-python`
+   allows (the newest of PYTHONS when it has none);
+3. makes a fresh virtual environment and installs the repository's own test
+   install (INSTALL_SPECS, default `-e ".[dev]"`) with
+   `uv pip install --exclude-newer <the commit's committer date>`, so
+   dependencies resolve as they did when the commit was made;
+4. runs pytest from the checkout root on the pinned files, under the
+   repository's own ini, conftest files and addopts, with `-p no:cacheprovider`,
+   a scratch `--basetemp` and the oracle plugin (tools/pin_oracle), which
+   records what pytest collected, deselected and reported, and keeps only
+   the pinned tests;
+5. classifies each pin from that record (`classify`).
+
+Only the outcome `passed` passes: every collected case of the pinned function
+passed its setup, call and teardown, none was deselected, skipped, xfailed or
+xpassed, and pytest exited 0. Anything else is an issue: a fetch, venv or
+install failure, a collection error, a missing or deselected test, a
+module-level skip, `skipped`, `xfail`, `xpass`, `failed` or `error`, a
+per-commit timeout (DEFAULT_TIMEOUT), and any exception in the runner itself.
+Pins this runner cannot execute fail too: a pin in a repository outside
+ALLOWED_OWNERS, a pin in this repository (no pinned commit), and a YAML test
+case.
+
+The claim, also stated in tools/README.md: the source-conflicts workflow's
+`pinned-tests` job passing means each pinned test was collected and passed at
+its pinned commit, in the repository's own install resolved as of that
+commit's date, under its own pytest configuration.
+
+The job that runs this executes code from other repositories, so it holds no
+secrets and passes its result on only as the JSON report (`--report`).
+
+Results that passed are cached (`--cache-dir`) under a key of the repository,
+the commit, the sorted pinned ids and the runner version (a hash of this file
+and the oracle plugin), so a runner change re-runs everything. Failures are
+never cached.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import dataclasses
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from collections.abc import Iterable, Mapping
+from pathlib import Path
+from typing import Any
+
+import tomllib
+
+TOOLS = Path(__file__).resolve().parent
+if str(TOOLS) not in sys.path:
+    sys.path.insert(0, str(TOOLS))
+
+import source_conflicts as sc  # noqa: E402 - beside this file
+
+ORACLE_DIR = TOOLS / "pin_oracle"
+ORACLE_MODULE = "axiom_pin_oracle"
+RUNNER_FILES = (Path(__file__).resolve(), ORACLE_DIR / f"{ORACLE_MODULE}.py")
+REPORT_VERSION = 1
+
+# The runner executes code only from these GitHub owners.
+ALLOWED_OWNERS = ("TheAxiomFoundation", "PolicyEngine")
+# `uv pip install` arguments, run from the checkout root. A repository without
+# a `dev` extra that holds its test dependencies gets an entry here.
+DEFAULT_INSTALL = ("-e", ".[dev]")
+INSTALL_SPECS: dict[str, tuple[str, ...]] = {}
+# Newest first: the first that `requires-python` allows is used.
+PYTHONS = ("3.14", "3.13", "3.12", "3.11", "3.10", "3.9")
+DEFAULT_TIMEOUT = 15 * 60  # seconds per commit: fetch, environment, install and pytest
+REPO_URL = "https://github.com/{repo}.git"
+THREAD_CAPS = {"OMP_NUM_THREADS": "4", "OPENBLAS_NUM_THREADS": "4", "MKL_NUM_THREADS": "4"}
+_LOG_TAIL = 4000
+
+PASSED = "passed"
+# Every outcome a pin can have; `summarize` prints nothing else.
+OUTCOMES = frozenset({
+    PASSED, "failed", "error", "skipped", "xfail", "xpass", "not run", "deselected", "missing", "missing file",
+    "not collected", "collection error", "fetch failed", "install failed", "timed out", "runner error",
+})
+# Worst first: a pin's outcome is the worst of its cases.
+CASE_SEVERITY = ("error", "failed", "xpass", "xfail", "skipped", "not run", PASSED)
+
+
+@dataclasses.dataclass(frozen=True)
+class Pin:
+    entry: str  # global id, <jurisdiction>:<id>
+    label: str  # entries[i].tests[j]
+    repo: str
+    commit: str
+    path: str
+    name: str  # function, or Class::function
+
+    @property
+    def id(self) -> str:
+        return f"{self.path}::{self.name}"
+
+
+class StepError(Exception):
+    """A step that failed; `outcome` is what every pin of the commit gets."""
+
+    def __init__(self, outcome: str, detail: str) -> None:
+        super().__init__(detail)
+        self.outcome = outcome
+        self.detail = detail
+
+
+# ---------------------------------------------------------------------------
+# Which pins run
+
+
+def allowed_repo(repo: str) -> bool:
+    owner = repo.split("/", 1)[0].casefold()
+    return owner in {allowed.casefold() for allowed in ALLOWED_OWNERS}
+
+
+def install_spec(repo: str) -> tuple[str, ...]:
+    for name, spec in INSTALL_SPECS.items():
+        if name.casefold() == repo.casefold():
+            return spec
+    return DEFAULT_INSTALL
+
+
+def _unrunnable(item: Any) -> str | None:
+    """Why the runner will not execute this pin, or None."""
+
+    if not isinstance(item, Mapping):
+        return "is not a mapping; run `source_conflicts.py check`"
+    repo, commit, path, name = (item.get(key) for key in ("repo", "commit", "path", "name"))
+    if repo is None:
+        return (
+            "is a test in this repository, which has no pinned commit; the runner executes only "
+            "Python tests in other repositories"
+        )
+    if not (isinstance(repo, str) and sc.REPO_RE.fullmatch(repo)):
+        return "has a malformed repo; run `source_conflicts.py check`"
+    if not (isinstance(commit, str) and sc.COMMIT_RE.fullmatch(commit)):
+        return "has a malformed commit; run `source_conflicts.py check`"
+    if not (isinstance(path, str) and sc._relative_path(path)):
+        return "has a malformed path; run `source_conflicts.py check`"
+    if not path.endswith(".py"):
+        return "is a YAML test case; the runner executes only Python tests"
+    if not (isinstance(name, str) and sc.TEST_NAME_RE.fullmatch(name)):
+        return "has a malformed name; run `source_conflicts.py check`"
+    if not sc.python_test_file(path):
+        return "is not in a test_*.py file"
+    if not allowed_repo(repo):
+        return f"the runner won't execute pins in {repo} (allowed owners: {', '.join(ALLOWED_OWNERS)})"
+    return None
+
+
+def collect_pins(payload: Any) -> tuple[dict[tuple[str, str], list[Pin]], list[dict[str, str]]]:
+    """Runnable pins grouped by (repo, commit), and the pins that can't run."""
+
+    groups: dict[tuple[str, str], list[Pin]] = {}
+    unrun: list[dict[str, str]] = []
+    entries = payload.get("entries") if isinstance(payload, Mapping) else None
+    for index, entry in enumerate(entries if isinstance(entries, list) else []):
+        if not isinstance(entry, Mapping):
+            continue  # `check` reports it; it has no pins to run
+        gid = f"{entry.get('jurisdiction')}:{entry.get('id')}"
+        tests = entry.get("tests")
+        for t_index, item in enumerate(tests if isinstance(tests, list) else []):
+            label = f"entries[{index}].tests[{t_index}]"
+            reason = _unrunnable(item)
+            if reason is not None:
+                where = item.get("path") if isinstance(item, Mapping) else None
+                name = item.get("name") if isinstance(item, Mapping) else None
+                unrun.append({"entry": gid, "label": label, "pin": f"{where}::{name}", "reason": reason})
+                continue
+            pin = Pin(gid, label, item["repo"], item["commit"], item["path"], item["name"])
+            groups.setdefault((pin.repo, pin.commit), []).append(pin)
+    return groups, unrun
+
+
+# ---------------------------------------------------------------------------
+# Classification (pure; tests/test_pin_runner.py covers every branch)
+
+
+def case_outcome(phases: Mapping[str, Any] | None) -> str:
+    """One collected case's outcome from its setup, call and teardown reports."""
+
+    if not phases:
+        return "not run"
+    for report in phases.values():
+        if not isinstance(report, Mapping) or report.get("outcome") not in ("passed", "failed", "skipped"):
+            return "error"
+    setup, call, teardown = (phases.get(when) for when in ("setup", "call", "teardown"))
+    if setup is None:
+        return "not run"
+    if setup["outcome"] == "failed":
+        return "error"
+    if setup["outcome"] == "skipped":
+        return "xfail" if setup.get("xfail") else "skipped"
+    if call is None:
+        return "not run"
+    if call["outcome"] == "failed":
+        return "failed"  # a strict xpass is reported as failed
+    if call["outcome"] == "skipped":
+        return "xfail" if call.get("xfail") else "skipped"
+    if call.get("xfail"):
+        return "xpass"
+    if teardown is None or teardown["outcome"] != "passed":
+        return "error"
+    return PASSED
+
+
+def worst(outcomes: Iterable[str]) -> str:
+    """The worst case outcome; no cases, or one outside CASE_SEVERITY, is an error."""
+
+    outcomes = list(outcomes)
+    if not outcomes or any(outcome not in CASE_SEVERITY for outcome in outcomes):
+        return "error"
+    return min(outcomes, key=CASE_SEVERITY.index)
+
+
+def _for_path(records: Any, path: str) -> list[Mapping[str, Any]]:
+    return [record for record in records or [] if isinstance(record, Mapping) and record.get("path") == path]
+
+
+def classify(oracle: Mapping[str, Any], pins: Iterable[Pin], *, missing_files: Iterable[str] = ()) -> tuple[list[dict[str, Any]], list[str]]:
+    """(one result per pin, commit-level issues) from the oracle's record."""
+
+    missing_files = set(missing_files)
+    commit_issues: list[str] = []
+    if oracle.get("xdist"):
+        commit_issues.append("pytest-xdist distributes this run (the repository's addopts); the runner needs one process")
+    collected = [item for item in oracle.get("collected") or [] if isinstance(item, Mapping)]
+    deselected = set(oracle.get("deselected") or [])
+    reports = oracle.get("reports") or {}
+    results = []
+    for pin in pins:
+        result: dict[str, Any] = {"entry": pin.entry, "label": pin.label, "id": pin.id, "cases": []}
+        items = [item for item in collected if item.get("path") == pin.path and item.get("name") == pin.name]
+        if pin.path in missing_files:
+            result.update(outcome="missing file", detail=f"{pin.path} is not in the checkout")
+        elif oracle.get("xdist"):
+            result.update(outcome="error", detail=commit_issues[0])
+        elif not items:
+            errors = _for_path(oracle.get("collect_errors"), pin.path)
+            skips = _for_path(oracle.get("collect_skips"), pin.path)
+            if errors:
+                result.update(outcome="collection error", detail=f"pytest could not collect {pin.path}")
+            elif skips:
+                result.update(outcome="not collected", detail=f"pytest skipped {pin.path} at collection")
+            else:
+                result.update(outcome="missing", detail=f"{pin.id} is not in pytest's collection")
+        elif any(item.get("nodeid") in deselected for item in items):
+            result.update(outcome="deselected", detail="the repository's own configuration deselects it")
+        else:
+            cases = [
+                {"nodeid": item.get("nodeid"), "outcome": case_outcome(reports.get(item.get("nodeid")))}
+                for item in items
+            ]
+            result["cases"] = cases
+            outcome = worst(case["outcome"] for case in cases)
+            result["outcome"] = outcome
+            if outcome != PASSED:
+                bad = [case["nodeid"] for case in cases if case["outcome"] != PASSED]
+                result["detail"] = f"{len(bad)} of {len(cases)} case(s) did not pass, first {bad[0]}"
+        results.append(result)
+    exitstatus = oracle.get("exitstatus")
+    if all(result["outcome"] == PASSED for result in results) and exitstatus != 0:
+        commit_issues.append(f"pytest exited {exitstatus} although every pinned case passed")
+    return results, commit_issues
+
+
+# ---------------------------------------------------------------------------
+# Running one commit
+
+
+def runner_version() -> str:
+    digest = hashlib.sha256()
+    for path in RUNNER_FILES:
+        digest.update(path.name.encode() + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
+def cache_key(repo: str, commit: str, pins: Iterable[Pin], version: str) -> str:
+    ids = sorted({pin.id for pin in pins})
+    blob = json.dumps({"repo": repo, "commit": commit, "ids": ids, "runner": version}, sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def pick_python(requires_python: str | None, candidates: Iterable[str] = PYTHONS) -> str:
+    """The newest candidate minor version that `requires-python` allows."""
+
+    from packaging.specifiers import (  # a dependency of pytest
+        InvalidSpecifier,
+        SpecifierSet,
+    )
+
+    candidates = list(candidates)
+    if requires_python is None:
+        return candidates[0]
+    try:
+        allowed = SpecifierSet(requires_python)
+    except InvalidSpecifier as exc:
+        raise StepError("install failed", f"requires-python {requires_python!r} is not a valid specifier: {exc}") from None
+    for version in candidates:
+        if any(allowed.contains(f"{version}.{patch}") for patch in range(40)):
+            return version
+    raise StepError("install failed", f"none of Python {', '.join(candidates)} satisfies requires-python {requires_python!r}")
+
+
+def requires_python(tree: Path) -> str | None:
+    pyproject = tree / "pyproject.toml"
+    if not pyproject.is_file():
+        return None
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise StepError("install failed", f"pyproject.toml is not readable TOML: {exc}") from None
+    project = data.get("project")
+    value = project.get("requires-python") if isinstance(project, dict) else None
+    if value is not None and not isinstance(value, str):
+        raise StepError("install failed", "pyproject.toml's requires-python is not a string")
+    return value
+
+
+@dataclasses.dataclass
+class Settings:
+    uv: str
+    git: str
+    work: Path
+    timeout: float = DEFAULT_TIMEOUT
+    repo_url: str = REPO_URL
+    cache_dir: Path | None = None
+    # uv's own cache and managed interpreters, shared across commits (they
+    # hold downloads, not results).
+    uv_dirs: Mapping[str, str] = dataclasses.field(default_factory=dict)
+
+
+def _tail(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[-_LOG_TAIL:]
+    except OSError:
+        return ""
+
+
+def _kill_group(pid: int) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, signal.SIGKILL)
+
+
+def _run(argv: list[str], *, step: str, cwd: Path, env: Mapping[str, str], deadline: float, logs: Path) -> tuple[int, str]:
+    """Run one step in its own process group; (exit code, output tail).
+    Raises StepError("timed out") when the commit's deadline passes."""
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise StepError("timed out", f"the per-commit timeout ran out before {step}")
+    logs.mkdir(parents=True, exist_ok=True)
+    log = logs / f"{step}.log"
+    with log.open("wb") as handle:
+        process = subprocess.Popen(
+            argv, cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            code = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            _kill_group(process.pid)
+            process.wait()
+            raise StepError("timed out", f"the per-commit timeout ran out during {step}") from None
+        finally:
+            _kill_group(process.pid)  # anything the step left running in its group
+    return code, _tail(log)
+
+
+def _base_env(work: Path) -> dict[str, str]:
+    """A fixed, minimal environment for every step: nothing inherited but
+    PATH, so no token or credential reaches code from another repository. HOME
+    is a scratch directory, so no user git, uv or netrc configuration applies."""
+
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(work / "home"),
+        "TMPDIR": str(work / "tmp"),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "UV_NO_CONFIG": "1",
+        **THREAD_CAPS,
+    }
+
+
+def run_commit(repo: str, commit: str, pins: list[Pin], settings: Settings) -> dict[str, Any]:
+    """Fetch, install and run one commit's pins; never raises."""
+
+    started = time.monotonic()
+    deadline = started + settings.timeout
+    work = Path(tempfile.mkdtemp(prefix=f"{repo.replace('/', '-')}-{commit[:12]}-", dir=settings.work))
+    tree, logs = work / "checkout", work / "logs"
+    (work / "home").mkdir()
+    (work / "tmp").mkdir()
+    base = _base_env(work)
+    spec = install_spec(repo)
+    result: dict[str, Any] = {
+        "repo": repo,
+        "commit": commit,
+        "cached": False,
+        "environment": {"install": list(spec)},
+        "seconds": {},
+        "issues": [],
+        "pins": [],
+        "logs": {},
+    }
+    env_record = result["environment"]
+
+    def timed(step: str, argv: list[str], *, cwd: Path, env: Mapping[str, str]) -> tuple[int, str]:
+        began = time.monotonic()
+        try:
+            return _run(argv, step=step, cwd=cwd, env=env, deadline=deadline, logs=logs)
+        finally:
+            result["seconds"][step] = round(time.monotonic() - began, 2)
+
+    try:
+        git = [settings.git, "-c", "credential.helper=", "-c", "core.hooksPath=" + os.devnull,
+               "-c", "protocol.file.allow=always", "-c", "advice.detachedHead=false", "-C", str(tree)]
+        tree.mkdir()
+        url = settings.repo_url.format(repo=repo)
+        for step, argv in (
+            ("git-init", [*git, "init", "-q"]),
+            ("fetch", [*git, "fetch", "-q", "--depth", "1", "--no-tags", url, commit]),
+            ("checkout", [*git, "checkout", "-q", commit]),
+        ):
+            code, tail = timed(step, argv, cwd=tree, env=base)
+            if code != 0:
+                result["logs"][step] = tail
+                raise StepError("fetch failed", f"git {step} exited {code}")
+        code, out = timed("commit-date", [*git, "show", "-s", "--format=%H %ct", commit], cwd=tree, env=base)
+        head, _, stamp = out.strip().partition(" ")
+        if code != 0 or head != commit or not stamp.isdigit():
+            raise StepError("fetch failed", f"could not read commit {commit} after fetching it")
+        exclude_newer = dt.datetime.fromtimestamp(int(stamp), dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        env_record["exclude_newer"] = exclude_newer
+
+        env_record["requires_python"] = requires_python(tree)
+        env_record["python_request"] = pick_python(env_record["requires_python"])
+        venv = work / "venv"
+        uv_env = {**base, **settings.uv_dirs}
+        code, tail = timed("venv", [settings.uv, "venv", "--quiet", "--python", env_record["python_request"], str(venv)], cwd=work, env=uv_env)
+        if code != 0:
+            result["logs"]["venv"] = tail
+            raise StepError("install failed", f"uv venv --python {env_record['python_request']} exited {code}")
+        python = venv / "bin" / "python"
+        code, tail = timed(
+            "install",
+            [settings.uv, "pip", "install", "--quiet", "--python", str(python), "--exclude-newer", exclude_newer, *spec],
+            cwd=tree,
+            env=uv_env,
+        )
+        if code != 0:
+            result["logs"]["install"] = tail
+            raise StepError("install failed", f"uv pip install {' '.join(spec)} exited {code}")
+        code, out = timed(
+            "python-version",
+            [str(python), "-c", "import platform, pytest; print(platform.python_version(), pytest.__version__)"],
+            cwd=work,
+            env=base,
+        )
+        if code != 0:
+            result["logs"]["python-version"] = out
+            raise StepError("install failed", f"the install ({' '.join(spec)}) does not provide pytest")
+        env_record["python"] = out.split()[0]
+
+        missing = sorted({pin.path for pin in pins if not (tree / pin.path).is_file()})
+        files = sorted({pin.path for pin in pins} - set(missing))
+        oracle_out = work / "oracle.json"
+        oracle: Mapping[str, Any] = {"collected": [], "exitstatus": None}
+        if files:
+            pytest_env = {
+                **base,
+                "PATH": f"{venv / 'bin'}{os.pathsep}{base['PATH']}",
+                "VIRTUAL_ENV": str(venv),
+                "PYTHONPATH": str(ORACLE_DIR),
+                "AXIOM_PIN_ORACLE_OUT": str(oracle_out),
+                "AXIOM_PIN_ORACLE_ROOT": str(tree),
+                "AXIOM_PIN_ORACLE_PINS": json.dumps(sorted([pin.path, pin.name] for pin in pins)),
+            }
+            argv = [str(python), "-m", "pytest", "-p", "no:cacheprovider", f"--basetemp={work / 'basetemp'}",
+                    "-p", ORACLE_MODULE, *files]
+            code, tail = timed("pytest", argv, cwd=tree, env=pytest_env)
+            result["logs"]["pytest"] = tail
+            try:
+                oracle = json.loads(oracle_out.read_text(encoding="utf-8"))
+                if not isinstance(oracle, dict):
+                    raise ValueError("not a JSON object")
+            except (OSError, ValueError) as exc:
+                raise StepError("error", f"pytest exited {code} without the oracle's record ({exc})") from None
+            env_record["pytest"] = oracle.get("pytest")
+            env_record["inifile"] = oracle.get("inifile")
+            env_record["addopts"] = oracle.get("addopts")
+        pin_results, commit_issues = classify(oracle, pins, missing_files=missing)
+        result["pins"] = pin_results
+        result["issues"].extend(commit_issues)
+    except StepError as exc:
+        result["issues"].append(exc.detail)
+        result["pins"] = [_failed(pin, exc.outcome, exc.detail) for pin in pins]
+    except Exception as exc:  # noqa: BLE001 - a runner bug fails the pins, never passes them
+        detail = f"runner error: {type(exc).__name__}: {exc}"
+        result["issues"].append(detail)
+        result["pins"] = [_failed(pin, "runner error", detail) for pin in pins]
+    result["seconds"]["total"] = round(time.monotonic() - started, 2)
+    return result
+
+
+def _failed(pin: Pin, outcome: str, detail: str) -> dict[str, Any]:
+    return {"entry": pin.entry, "label": pin.label, "id": pin.id, "cases": [], "outcome": outcome, "detail": detail}
+
+
+def commit_passed(result: Mapping[str, Any]) -> bool:
+    pins = result.get("pins") or []
+    return bool(pins) and not result.get("issues") and all(pin.get("outcome") == PASSED for pin in pins)
+
+
+def _cached(settings: Settings, key: str, pins: list[Pin]) -> dict[str, Any] | None:
+    if settings.cache_dir is None:
+        return None
+    path = settings.cache_dir / f"{key}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not (isinstance(data, dict) and data.get("key") == key and commit_passed(data)):
+        return None
+    by_id = {result.get("id"): result for result in data["pins"]}
+    if set(by_id) != {pin.id for pin in pins}:
+        return None
+    # A result belongs to a test, not to the entries that pin it today.
+    data["pins"] = [{**by_id[pin.id], "entry": pin.entry, "label": pin.label} for pin in pins]
+    data["cached"] = True
+    return data
+
+
+def _store(settings: Settings, key: str, result: dict[str, Any]) -> None:
+    if settings.cache_dir is None or not commit_passed(result):
+        return
+    settings.cache_dir.mkdir(parents=True, exist_ok=True)
+    payload = {**result, "key": key, "logs": {}}
+    temporary = settings.cache_dir / f".{key}.tmp"
+    temporary.write_text(json.dumps(payload, indent=1, sort_keys=True))
+    temporary.replace(settings.cache_dir / f"{key}.json")
+
+
+# ---------------------------------------------------------------------------
+# The whole register
+
+
+def _version(argv: list[str]) -> str | None:
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=60, check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def uv_dirs(uv: str) -> dict[str, str]:
+    """uv's cache and interpreter directories as the caller's environment has them."""
+
+    dirs = {}
+    for variable, argv in (("UV_CACHE_DIR", [uv, "cache", "dir"]), ("UV_PYTHON_INSTALL_DIR", [uv, "python", "dir"])):
+        value = _version(argv)
+        if value:
+            dirs[variable] = value
+    return dirs
+
+
+def run_register(payload: Any, settings: Settings) -> dict[str, Any]:
+    version = runner_version()
+    groups, unrun = collect_pins(payload)
+    report: dict[str, Any] = {
+        "report_version": REPORT_VERSION,
+        "runner": {
+            "version": version,
+            "uv": _version([settings.uv, "--version"]),
+            "git": _version([settings.git, "--version"]),
+            "host_python": sys.version.split()[0],
+            "timeout_seconds": settings.timeout,
+            "allowed_owners": list(ALLOWED_OWNERS),
+            "started_at": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+        "commits": [],
+        "unrun": unrun,
+        "issues": [],
+    }
+    for pin in unrun:
+        report["issues"].append(f"{pin['entry']} {pin['label']} {pin['pin']}: {pin['reason']}.")
+    for (repo, commit), pins in sorted(groups.items()):
+        key = cache_key(repo, commit, pins, version)
+        result = _cached(settings, key, pins)
+        if result is None:
+            result = run_commit(repo, commit, pins, settings)
+            result["ran_at"] = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            _store(settings, key, result)
+        report["commits"].append(result)
+        where = f"{repo}@{commit[:12]}"
+        for issue in result["issues"]:
+            report["issues"].append(f"{where}: {issue}")
+        for pin in result["pins"]:
+            if pin["outcome"] != PASSED:
+                detail = f" ({pin['detail']})" if pin.get("detail") else ""
+                report["issues"].append(f"{pin['entry']} {pin['label']} {where}:{pin['id']}: {pin['outcome']}{detail}.")
+    pins = [pin for result in report["commits"] for pin in result["pins"]]
+    report["summary"] = {
+        "pins": len(pins) + len(unrun),
+        "passed": sum(pin["outcome"] == PASSED for pin in pins),
+        "cases_passed": sum(case["outcome"] == PASSED for pin in pins for case in pin["cases"]),
+        "issues": len(report["issues"]),
+    }
+    return report
+
+
+def render(report: Mapping[str, Any]) -> str:
+    lines = []
+    for result in report["commits"]:
+        env = result.get("environment", {})
+        cases = sum(case["outcome"] == PASSED for pin in result["pins"] for case in pin["cases"])
+        lines.append(
+            f"{result['repo']}@{result['commit'][:12]}: {sum(p['outcome'] == PASSED for p in result['pins'])} of "
+            f"{len(result['pins'])} pin(s) passed, {cases} case(s); Python {env.get('python') or env.get('python_request')}, "
+            f"resolved as of {env.get('exclude_newer')}, install {' '.join(env.get('install') or [])}; "
+            f"{result['seconds'].get('total')}s{' (cached)' if result.get('cached') else ''}"
+        )
+    summary = report["summary"]
+    lines.append(
+        f"pinned tests: {summary['passed']} of {summary['pins']} pin(s) passed, {summary['cases_passed']} case(s), "
+        f"{summary['issues']} issue(s)."
+    )
+    return "\n".join(lines)
+
+
+_SAFE_ID_RE = re.compile(r"[A-Za-z0-9_./-]+::[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)?")
+_SAFE_ENTRY_RE = re.compile(r"[a-z0-9-]+:[a-z0-9-]+")
+_SAFE_LABEL_RE = re.compile(r"entries\[[0-9]+\]\.tests\[[0-9]+\]")
+_SUMMARY_LIMIT = 100
+
+
+def summarize(path: Path) -> list[str]:
+    """Markdown lines naming the pins that did not pass, for the alarm issue.
+
+    The report comes from a job that ran other repositories' code, so it is
+    data: only fields that match fixed patterns (ids, commits, the outcome
+    vocabulary) are printed, never free text from the run."""
+
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ["No readable pinned-test report was produced; the `pinned-tests` job's log has the details."]
+    if not isinstance(report, Mapping):
+        return ["The pinned-test report is not a JSON object; the `pinned-tests` job's log has the details."]
+    lines: list[str] = []
+    malformed = 0
+
+    def safe(value: Any, pattern: Any) -> bool:
+        return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+    for result in report.get("commits") if isinstance(report.get("commits"), list) else []:
+        if not (isinstance(result, Mapping) and safe(result.get("repo"), sc.REPO_RE) and safe(result.get("commit"), sc.COMMIT_RE)):
+            malformed += 1
+            continue
+        if result.get("issues"):
+            lines.append(f"- `{result['repo']}@{result['commit'][:12]}`: the run of this commit reported an issue.")
+        for pin in result.get("pins") if isinstance(result.get("pins"), list) else []:
+            if not (
+                isinstance(pin, Mapping)
+                and safe(pin.get("entry"), _SAFE_ENTRY_RE)
+                and safe(pin.get("label"), _SAFE_LABEL_RE)
+                and safe(pin.get("id"), _SAFE_ID_RE)
+                and pin.get("outcome") in OUTCOMES
+            ):
+                malformed += 1
+            elif pin["outcome"] != PASSED:
+                lines.append(
+                    f"- `{pin['entry']}` {pin['label']}: `{result['repo']}@{result['commit'][:12]}:{pin['id']}` "
+                    f"{pin['outcome']}"
+                )
+    for pin in report.get("unrun") if isinstance(report.get("unrun"), list) else []:
+        if isinstance(pin, Mapping) and safe(pin.get("entry"), _SAFE_ENTRY_RE) and safe(pin.get("label"), _SAFE_LABEL_RE):
+            lines.append(f"- `{pin['entry']}` {pin['label']}: the runner can't execute this pin.")
+        else:
+            malformed += 1
+    if malformed:
+        lines.append(f"- {malformed} malformed report item(s); the `pinned-tests` job's log has the details.")
+    if not lines:
+        issues = report.get("issues")
+        if isinstance(issues, list) and issues:
+            lines.append(f"- The runner reported {len(issues)} issue(s) outside any pin; see the `pinned-tests` job's log.")
+        else:
+            lines.append("No pinned test failed.")
+    if len(lines) > _SUMMARY_LIMIT:
+        lines = lines[:_SUMMARY_LIMIT] + [f"- ... and {len(lines) - _SUMMARY_LIMIT} more; see the report artifact."]
+    return lines
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--root", type=Path, default=TOOLS.parent, help="rulespec repository holding the register")
+    parser.add_argument("--register", type=Path, help="register file (default: <root>/known-source-conflicts.yaml)")
+    parser.add_argument("--report", type=Path, help="write the JSON report here (required for a run)")
+    parser.add_argument("--summarize", type=Path, metavar="REPORT", help="print the failing pins of a report as Markdown, and exit")
+    parser.add_argument("--cache-dir", type=Path, help="reuse and record passing results here")
+    parser.add_argument("--work-dir", type=Path, help="scratch directory (default: a new temporary directory)")
+    parser.add_argument("--keep-work", action="store_true", help="keep checkouts, environments and logs")
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="seconds per commit")
+    parser.add_argument("--repo-url", default=REPO_URL, help="clone URL template with {repo}")
+    parser.add_argument("--uv", default=shutil.which("uv"), help="uv executable")
+    parser.add_argument("--git", default=shutil.which("git"), help="git executable")
+    args = parser.parse_args(argv)
+    if args.summarize is not None:
+        print("\n".join(summarize(args.summarize)))
+        return 0
+    if args.report is None:
+        parser.error("--report is required for a run")
+
+    work = args.work_dir or Path(tempfile.mkdtemp(prefix="pin-runs-"))
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        try:
+            if not args.uv or not args.git:
+                raise RuntimeError("uv and git must be on PATH (or given with --uv and --git)")
+            payload = sc.load_register(args.register or args.root / sc.REGISTER_FILENAME)
+            settings = Settings(
+                uv=args.uv, git=args.git, work=work, timeout=args.timeout, repo_url=args.repo_url,
+                cache_dir=args.cache_dir, uv_dirs=uv_dirs(args.uv),
+            )
+            report = run_register(payload, settings)
+        except Exception as exc:  # noqa: BLE001 - fail closed, with a report
+            report = {
+                "report_version": REPORT_VERSION, "runner": {}, "commits": [], "unrun": [],
+                "issues": [f"runner error: {type(exc).__name__}: {exc}"],
+                "summary": {"pins": 0, "passed": 0, "cases_passed": 0, "issues": 1},
+            }
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(report, indent=1) + "\n")
+        print(render(report))
+        for issue in report["issues"]:
+            print(f"- {issue}", file=sys.stderr)
+        return 1 if report["issues"] else 0
+    finally:
+        if not args.keep_work and args.work_dir is None:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

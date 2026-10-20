@@ -112,7 +112,7 @@ Register-only fields:
 | `outcome` | `computed` or `refused`: whether the adopted reading computes the contested cases or refuses them. For a refusal, `reading` says what is refused and the substantive readings go in `alternatives`. |
 | `adopted_by` | RuleSpec modules in this repository that carry the entry, as `module` (path) and `interpretation` (id) pairs. |
 | `implementations` | Code outside RuleSpec that adopts a reading: `repo`, `commit`, `path`, `follows` (`reading` or `alternatives[N]`, meaning what the code does today) and `cites_entry`, which says whether the file contains the global id. |
-| `tests` | Tests that pin readings: `path`, `name` (a test function, `Class::function`, or a companion-test case name) and `pins`, a list of `reading` or `alternatives[N]`. Add `repo` and `commit` for a test in another repository. A Python test must be a whole test function that pytest's default collection picks up from the file; whether it runs is the owning repository's CI's business. See [Test references](#test-references). |
+| `tests` | Tests that pin readings: `path`, `name` (a test function, `Class::function`, or a companion-test case name) and `pins`, a list of `reading` or `alternatives[N]`. Add `repo` and `commit` for a test in another repository. A Python test is a whole test function. `check` screens only a pin's syntax; a pin is established once the `pinned-tests` job has run it at its pinned commit and it passed. See [Test references](#test-references). |
 | `money_case` | Optional. An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency`, `period` (once, week, month or year) and `computed_by`, the name of the one test in the entry's `tests` that computes the amount, asserting it or both figures whose difference it is. A public file carries no amount that no pinned test computes: leave the money case out instead. `check` also requires every `$` amount in the entry's own prose (`question`, `reading`, `basis`, each alternative's `reading` and `effect`) to be one the money case states, so an entry without one has no dollar figures. Money is written one way, `$` and digits with commas between groups of three and optional two-digit cents (`$1,234.56`); other spellings (`USD 200`, `200 dollars`, `$ 200`, `$.50`, `$1.5k`) are issues. |
 
 The register is public. These publication rules are reviewed by hand: it
@@ -135,10 +135,9 @@ of these:
 - a hygiene hit (one of the four token patterns below);
 - an adopting module that is missing, or that does not carry the entry's
   interpretation core unchanged, or whose `affects` name no rule in the module;
-- an in-repo test that does not exist, or is not a test pytest collects
-  (see [Test references](#test-references)). A pinned test that the file
-  shows may not run (a skip, xfail, empty parameter set or Hypothesis phases)
-  is a warning, not a failure;
+- an in-repo test whose file does not exist or does not define the named
+  test. This is a syntactic screen and says nothing about running (see
+  [Test references](#test-references));
 - a followed reading that no test pins, or a module adopter whose `reading`
   no test pins;
 - a ruled, confirmed or contradicted module interpretation whose texts cite
@@ -149,31 +148,37 @@ of these:
   workflow lists those warnings in a tracking issue. Its entry is written when
   a ruling or a publisher's reply arrives.
 
-`tools/source_conflicts.py verify` needs the network and runs in the
-`source-conflicts` workflow on pull requests touching the register, on pushes
-to main, daily and on dispatch. It checks:
+Verification needs the network and runs in the `source-conflicts` workflow
+on pull requests touching the register or these tools, on pushes to main,
+daily and on dispatch, as two jobs. `tools/source_conflicts.py verify` (the
+`source-conflicts` job) checks:
 
 - every `texts` excerpt is verbatim at its citation in the pinned corpus release
   from `.axiom/toolchain.toml`;
 - every `pending_texts` excerpt is verbatim in its snapshot, whose sha256 must
   match;
-- external implementations exist at their pinned commits, and external tests
-  are tests pytest collects there, by the same rules. The report lists
-  external tests the file shows may not run;
+- external implementations and test files exist at their pinned commits, and
+  each test file defines its pinned test (the same syntactic screen);
 - each `cites_entry` claim matches its file.
+
+`tools/pin_runner.py` (the `pinned-tests` job) runs every pinned test at its
+pinned commit and fails unless pytest reports it passed; see
+[Test references](#test-references).
 
 Both excerpt checks use axiom-encode's own resolver and proof-atom matcher at
 `axiom_encode_ref`. The verify report lists implementations that do not cite
 their entry yet and implementations that follow an alternative rather than
-the adopted reading. The workflow is not a required check; a red scheduled or
-main run opens an alarm issue. `tests/test_source_conflicts_properties.py`
-(Hypothesis) states the tool's invariants, including a differential test
-against axiom-encode's `_validate_module_interpretations` that runs once the
-pinned encoder has module interpretations, and a two-way differential of the
-test-reference rules against what pytest collects. The `source-conflicts`
-workflow is the gate for these properties: it installs Hypothesis and the
-pinned pytest. Repository Checks' shared workflow runs the suite without
-Hypothesis, so the properties skip there.
+the adopted reading. Neither job is a required check; a red scheduled or main
+run opens an alarm issue (see [Merge gate](#merge-gate)).
+`tests/test_source_conflicts_properties.py` (Hypothesis) states the tool's
+invariants, including a differential test against axiom-encode's
+`_validate_module_interpretations` that runs once the pinned encoder has
+module interpretations, and a differential of the syntactic test screen
+against Python's own symbol table. `tests/test_pin_runner_properties.py`
+states the runner classifier's. The `source-conflicts` workflow is the gate
+for these properties: it installs Hypothesis and the pinned pytest.
+Repository Checks' shared workflow runs the suite without Hypothesis, so the
+properties skip there.
 
 Run locally:
 
@@ -181,128 +186,150 @@ Run locally:
 python tools/source_conflicts.py check
 AXIOM_CORPUS_RELEASE_PUBLIC_KEY=... python tools/source_conflicts.py verify \
   --corpus-path ../axiom-corpus          # needs axiom-encode importable
+python tools/pin_runner.py --report /tmp/pinned-tests.json   # needs git and uv
 python tools/source_conflicts.py aggregate --markdown /tmp/conflicts.md
 ```
 
 ## Test references
 
-The check screens a pinned Python test for one thing: that pytest's default
-collection picks it up from the test file alone, at the pinned commit. The
-guarantee is **accepted and unwarned ⇒ collected**, for a file whose
-repository adds no conftest or ini effects and that contains no deliberate
-evasion. Whether the test then runs and passes belongs to the owning
-repository's CI. The screen catches the ways an honest test file stops a test
-being collected. It
-is not a proof against deliberately obfuscated import-time code (another
-module's helper that rebinds this one's names, `setattr` with a computed
-name, and the like); that is out of scope, and such findings go in the
-limits below rather than into new rules. It reads only that file, so it
-accepts one narrow shape and refuses everything else:
+A pinned test is established only by running it. `tools/source_conflicts.py
+check` screens a pin's syntax, and that is all it does: the path is a
+`test_*.py` file (or a companion `.test.yaml`), and the file defines the named
+function at module level or in a module-level class (`Class::function`), or
+has a case with that name. Definitions under `if`, `try`, `with`, loops and
+`match` count as module level. The screen says nothing about whether pytest
+collects or runs the test: import-time code, conftest files, plugins and ini
+settings decide that, and no static check can.
 
-- a `test_*.py` file, and a `test_*` function at module level or in a `Test*`
-  class at module level. These are the names every common pytest
-  configuration collects; the repository's `python_files`, `python_functions`
-  and `python_classes` settings are not read;
-- a plain `def`: not `async` (it fails without a plugin) and not a generator;
-- the final binding of its name: nothing later in the file rebinds, deletes
-  or sets attributes on the function or its class, or passes it to a call
-  other than a pytest mark;
-- decorators only from pytest marks, Hypothesis (`given`, `settings`,
-  `example`, `seed`) and `unittest.mock.patch`, through imports bound nowhere
-  else (no `global`, no store under the name such as `pytest.mark.slow =
-  ...`). A fixture, `property`, `staticmethod`, `dataclass` or any other
-  wrapper is refused, because it can stop pytest collecting the function;
-- a class with no bases other than `object`, no metaclass, no `__init__`,
-  `__new__` or `__test__`, and only pytest marks as decorators;
-- a module with no `__test__` (and no store to `__test__` in any form, such
-  as `[test_x][0].__test__ = False`), no module `__getattr__`, no
-  `pytestmark` other than marks, no shadowed `object` when a class names it as
-  a base, and no generator test anywhere (pytest 9 rejects the whole module);
-- no `pytest.skip`/`importorskip`/`xfail`/`fail`/`exit` call, `exec`,
-  `eval`, `globals()`, `vars()`, `sys.modules` or
-  `importlib.import_module(__name__)` in code that runs at import, and no
-  `raise` in it directly. Code that runs at import means module-level
-  statements, the `else` branch of an `if __name__ == "__main__":` guard (not
-  its body), class bodies, annotations (which run at import before Python
-  3.14), and the same-file top-level functions any of that calls or uses as
-  a decorator, followed transitively, so an optional-data helper that skips
-  the module is refused. A same-file helper may raise an ordinary error,
-  which fails loudly, but not a skip exception. Simple aliases such as
-  `skip = pytest.skip` resolve to what they name. Blocks that never run,
-  `if False:` and `if TYPE_CHECKING:`, are skipped (their `else` runs).
+`tools/pin_runner.py` asks pytest. For each repository and commit the register
+pins, it:
 
-A parametrized case (`test_x[case-1]`) cannot be pinned. pytest builds case
-ids from more than the file shows (fixture `params`, `pytestmark`,
-`pytest_generate_tests`, base classes, conftest hooks) and its escaping rules
-change between versions. Pin the whole function.
+1. fetches the commit (`git fetch --depth 1`) into a fresh checkout;
+2. picks the newest Python from 3.14 down to 3.9 that the project's
+   `requires-python` allows;
+3. installs the repository's own test install into a fresh environment with
+   `uv pip install --exclude-newer <the commit's committer date>`, so
+   dependencies resolve as they did when the commit was made. The install is
+   `-e ".[dev]"`, or the repository's entry in `INSTALL_SPECS` if it keeps its
+   test dependencies elsewhere;
+4. runs pytest from the checkout root on the pinned files, under the
+   repository's own ini, conftest files and `addopts`, with
+   `-p no:cacheprovider` and a scratch `--basetemp`. A plugin
+   (`tools/pin_oracle`) records what pytest collected, deselected and
+   reported, and lets only the pinned tests run;
+5. classifies each pin from that record.
 
-**Import-time code is an allowlist.** Every call that runs at import must
-resolve to a known-safe callable or to a same-file top-level function the
-screen follows and finds clean. Anything else gets a warning: "import-time
-code the screen can't follow: `<callee>` at line N; the test may not be
-collected". That covers calls into project code, `functools.partial`, an
-alias the screen cannot resolve, and a helper bound outside the top level.
-The known-safe callables are:
-- pytest marks, `pytest.param`, `pytest.fixture` and `pytest.approx`;
-- Hypothesis strategies, `settings` (and its methods), `given`, `example`
-  and `seed`; calling a `@composite` strategy runs nothing at import;
-- `re.compile`, `pathlib` paths, `os.path.*`, `os.environ.get` and
-  `os.getenv`;
-- `typing`, `dataclasses`, `enum`, `collections` (`namedtuple`,
-  `defaultdict`, `OrderedDict`, `Counter`), `itertools`, `math`, `operator`,
-  `string` and `textwrap.dedent`;
-- `fractions.Fraction`, `decimal.Decimal`, `datetime` dates and times,
-  `json.loads` and `json.dumps`;
-- `functools` decorators (`lru_cache`, `cache`, `wraps`, `total_ordering`)
-  and `unittest.mock.patch`;
-- pure builtins (`len`, `range`, `dict`, `list`, `tuple`, `set`,
-  `frozenset`, `sorted`, `int`, `float`, `str`, `bool`, `min`, `max`, `sum`,
-  `zip`, `enumerate` and the like);
-- any method of a value the screen can see is plain data: a literal, a safe
-  call's result, or a name bound once to one, such as
-  `Path(__file__).parent`.
+**The claim.** Verification passing means each pinned test was collected and
+passed at its pinned commit, in the repository's own install resolved as of
+that commit's date, under its own pytest configuration. `check` alone
+establishes nothing about running. A pin is established only once
+verification is green: the `pinned-tests` job, together with the
+`source-conflicts` job for the excerpts, snapshots and files.
 
-Warnings are information, not failures. A test whose module builds project
-objects at import warns and still runs in its repository's CI. Of the 18
-Python pins in the register today, 12 warn for that reason: their modules
-call project code such as `g.YearMonth(...)` or `ssa_params()` at import.
+Only the outcome `passed` passes. That means every collected case of the
+pinned function passed its setup, call and teardown, and pytest exited 0.
+Each of these fails the pin:
 
-**A collected test can still not run, and nothing fails.** `check` (for tests
-here) and `verify` (for tests elsewhere) also warn when the file shows one of
-these: a `pytest.skip`, `importorskip` or `xfail` call in the test, in a
-same-file fixture it reaches (by argument, `usefixtures` or `autouse`), in
-`setup_module`, `setup_function`, `setup_class` or `setup_method`, or in a
-same-file module-level function any of those call; a `skip`,
-`skipif` or `xfail` mark, however applied; an empty parameter set, or one
-whose every case carries such a mark; Hypothesis `settings` that set `phases`
-or `max_examples=0`, or a profile loaded at import. These are warnings, not
-failures: a data-gated test that skips locally can run in its repository's
-CI.
+- a fetch, environment or install failure, or an install that does not
+  provide pytest;
+- a collection error, a module skipped at collection (`not collected`), a
+  test that is not in pytest's collection (`missing`), a pinned file that is
+  not in the checkout, or a case that the repository's own `-m`, `-k` or
+  conftest hooks deselect;
+- a case that is `skipped`, `xfail`, `xpass`, `failed` or `error`, or that
+  never ran;
+- a pytest exit other than 0, or a run that pytest-xdist distributes;
+- the per-commit timeout (15 minutes, from fetch to pytest);
+- any exception in the runner.
 
-Known limits. The register does not check, and cannot see:
-- conftest fixtures and hooks (`pytest_collection_modifyitems`,
-  `pytest_runtest_setup`, `collect_ignore`, `pytest_ignore_collect`);
-- plugins;
-- ini or `addopts` selection (`-m`, `-k`, `--deselect`, `--ignore`,
-  `testpaths`, `norecursedirs`, `empty_parameter_set_mark`);
-- deliberately obfuscated import-time code: rebinding through another
-  module's helper, `getattr`/`setattr` with computed names, `eval` of built
-  strings reached indirectly, homoglyph names, and similar.
+Pins the runner cannot execute as stated fail too, with the reason:
 
-Any of these can stop a pinned test being collected or run while every run
-exits 0. Import errors and modules that fail to collect do fail loudly.
+- a pin in a repository outside `TheAxiomFoundation/*` and `PolicyEngine/*`
+  ("the runner won't execute pins in <repo>");
+- a pin in this repository, which has no pinned commit;
+- a YAML test case: a companion `.test.yaml` here, or another repository's
+  YAML tests.
 
-The evidence for the screen is `test_resolver_accepts_exactly_what_pytest_collects`
-(property 11). It runs pytest on generated modules, next to a stand-in for
-project code, and checks four things:
-- accepted and unwarned ⇒ collected;
-- collected ⇒ accepted, except the deliberate refusals listed in
-  `REFUSED_BUT_COLLECTED`;
-- accepted and (not collected or not run) ⇒ warned;
-- every visible skip the generator plants is warned.
+So every pin in the register must, for now, be a Python test in an allowed
+repository. Running in-repo and YAML pins is future work.
 
-A warning may also fire on a test that runs.
+A parametrized case (`test_x[case-1]`) cannot be pinned. Pin the whole
+function; every case pytest collects for it must pass.
 
-The generator plants every shape that the reviews of this tool found in
-honest-looking files. The unit tests in `test_python_test_resolution` and
-`test_python_test_warnings` pin each of those shapes.
+The report (`--report`, kept as the `pinned-tests` artifact) records, for
+each commit:
+
+- the Python chosen, the Python installed and the `requires-python` it came
+  from;
+- the uv version, the `--exclude-newer` date and the install spec;
+- pytest's version, ini file and `addopts`;
+- each step's time, and each pin's outcome and cases.
+
+A commit whose pins all passed is cached (`--cache-dir`). The key is the
+repository, the commit, the sorted pinned ids and the runner version, a hash
+of the runner and the plugin, so a runner change re-runs everything. Failures
+are never cached.
+
+**Isolation.** The runner executes code from other repositories, so its job
+holds nothing worth taking:
+
+- no secret or token reaches its environment;
+- the checkout does not persist credentials;
+- its permissions are `contents: read`, with no `id-token`;
+- every step the runner starts gets a fixed environment with a scratch
+  `HOME`.
+
+Its result leaves only as the JSON artifact. The alarm job reads that artifact
+with main's `pin_runner.py --summarize`, which prints only fields that match
+fixed patterns. No runner output is interpolated into a workflow script.
+`tests/test_pin_runner.py` checks these properties of the workflow file.
+
+### Merge gate
+
+Neither verification job is a required check in branch protection, so an
+outage of GitHub or a package index cannot block a merge mechanically. Register
+pull requests are merged only when every check on the head is green
+(`gh pr checks` exits 0), so a register change lands only on a green run of
+both jobs on its head.
+
+### Evidence
+
+`tests/test_pin_runner.py` runs the runner on fixture repositories (`git
+init` in a temporary directory, a small `pyproject.toml`), one per way a pin
+fails closed. The fixtures cover:
+
+- a pass;
+- round 6's module skip through `partial(pytest.skip, allow_module_level=True)`;
+- a skip mark, a skip in the body, and a skip that a conftest hook adds;
+- xfail, xpass and strict xpass;
+- a failure, a fixture error and a collection error;
+- an install failure, a missing test and a missing file;
+- an unfetchable commit and a timeout;
+- a repository off the allowlist, and a deselection through `addopts = "-m
+  'not slow'"`.
+
+The fixtures also check that no secret in the caller's environment reaches
+the pinned tests. `tests/test_pin_runner_properties.py` checks the classifier
+against an independent statement of when a pin passes.
+
+### Known limits
+
+- The install is the repository's own, resolved as of the commit date. It is
+  not the exact environment its CI used: a dependency released between the
+  commit and that CI run is excluded, and a release yanked since can make an
+  old commit uninstallable. That fails closed.
+- One Python runs, the newest the project allows. The repository's CI may
+  test others.
+- The runner names the pinned files on pytest's command line. Settings that
+  only shape a default run (`testpaths`, `norecursedirs`, `collect_ignore`,
+  `--ignore`) do not stop a named file being collected. So a pinned test that
+  the repository's own CI never runs is still run here, and its result stands
+  for the pinned commit. Marks, `-m`, `-k`, `--deselect` and conftest hooks
+  still apply.
+- A pinned test needs whatever it reads to be in the repository at that
+  commit. A test that needs unpublished data skips and fails the pin; pin a
+  test that runs from a clean checkout.
+- `passed` means pytest passed the test. Whether the test computes what an
+  entry's money case states is for the entry's reviewers (`computed_by`).
+- Deliberate evasion, such as a test that detects the runner, is out of
+  scope: the register guards against honest mistakes.

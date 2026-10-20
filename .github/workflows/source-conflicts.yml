@@ -1,18 +1,30 @@
 name: Source conflicts
 
-# Network verification of known-source-conflicts.yaml (tools/source_conflicts.py).
-# The offline checks (schema, status rules, hygiene, in-repo references and
-# the scan for unregistered module interpretations) run inside the required
-# Repository Checks pytest leg. This workflow checks what needs the network:
-# every `texts` excerpt verbatim at its citation in the PINNED corpus release
-# (.axiom/toolchain.toml) and every `pending_texts` excerpt verbatim in its
-# pinned snapshot, both judged by axiom-encode's own proof-atom matcher at
-# axiom_encode_ref; snapshot hashes; and external implementations and tests at
-# their pinned commits. It is deliberately not a required check, so an outage
-# of a source host never blocks merges; a red scheduled or main run opens an
-# alarm issue instead. Scheduled, main and dispatched runs also keep a
-# tracking issue listing unregistered open module interpretations, which
-# `check` reports as warnings rather than failures.
+# Network verification of known-source-conflicts.yaml. The offline checks
+# (tools/source_conflicts.py check: schema, status rules, hygiene, in-repo
+# references, the syntactic screen of test pins and the scan for unregistered
+# module interpretations) run inside the required Repository Checks pytest
+# leg. This workflow checks what needs the network, in two jobs:
+#
+# - `verify` (check name source-conflicts): every `texts` excerpt verbatim at
+#   its citation in the PINNED corpus release (.axiom/toolchain.toml) and every
+#   `pending_texts` excerpt verbatim in its pinned snapshot, both judged by
+#   axiom-encode's own proof-atom matcher at axiom_encode_ref; snapshot hashes;
+#   and external implementations and test files at their pinned commits. It
+#   holds the corpus read credentials.
+# - `pinned-tests`: tools/pin_runner.py runs every pinned test at its pinned
+#   commit, in that repository's own install and pytest configuration, and
+#   only `passed` passes. It executes code from other repositories, so it is
+#   isolated: no secrets or tokens, contents: read, no id-token, no persisted
+#   checkout credentials, and its result leaves only as the `pinned-tests`
+#   JSON artifact, which the alarm job reads as data.
+#
+# Neither is a required check, so an outage of a source host never blocks
+# merges, but the merge rule for register pull requests is that every check is
+# green, so a register change lands only on a green run of both. A red
+# scheduled or main run opens an alarm issue. Scheduled, main and dispatched
+# runs also keep a tracking issue listing unregistered open module
+# interpretations, which `check` reports as warnings rather than failures.
 
 on:
   pull_request:
@@ -20,8 +32,12 @@ on:
     paths:
       - known-source-conflicts.yaml
       - tools/source_conflicts.py
+      - tools/pin_runner.py
+      - tools/pin_oracle/**
       - tests/test_source_conflicts.py
       - tests/test_source_conflicts_properties.py
+      - tests/test_pin_runner.py
+      - tests/test_pin_runner_properties.py
       - .github/workflows/source-conflicts.yml
       - .axiom/toolchain.toml
       - .axiom/workflow-toolchain.toml
@@ -30,6 +46,8 @@ on:
     paths:
       - known-source-conflicts.yaml
       - tools/source_conflicts.py
+      - tools/pin_runner.py
+      - tools/pin_oracle/**
       - .github/workflows/source-conflicts.yml
       - .axiom/toolchain.toml
       - .axiom/workflow-toolchain.toml
@@ -134,8 +152,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e axiom-encode
-          # The test-reference rules and the property tests are checked against
-          # these. Installed last, so the editable install can't re-resolve them.
+          # The tool's tests, property tests included, run against these.
+          # Installed last, so the editable install can't re-resolve them.
           python -m pip install pytest==9.1.1 pyyaml==6.0.3 hypothesis==6.170.5
 
       - name: Place provisions that live outside git
@@ -197,6 +215,71 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
+  pinned-tests:
+    # Runs every pinned test at its pinned commit (tools/pin_runner.py). This
+    # executes code from other repositories, so the job holds nothing worth
+    # taking: no secrets or tokens in any env, a checkout without persisted
+    # credentials, contents: read and no id-token. Its result leaves only as
+    # the pinned-tests JSON artifact (no job outputs). Passing results are
+    # cached under (repository, commit, pinned ids, runner version).
+    # tests/test_pin_runner.py checks this job's isolation statically.
+    name: pinned-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout rules repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: rulespec-us
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.14"
+
+      - name: Install the runner's tools
+        run: python -m pip install pytest==9.1.1 pyyaml==6.0.3 hypothesis==6.170.5 uv==0.12.21
+
+      - name: Restore passing results
+        # Each run saves its own snapshot (the key ends in the run id) and
+        # restores the newest one; entries are keyed inside by commit, ids and
+        # runner version, so an older snapshot is still safe to reuse.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/pin-runs-cache
+          key: pinned-tests-${{ hashFiles('rulespec-us/known-source-conflicts.yaml', 'rulespec-us/tools/pin_runner.py', 'rulespec-us/tools/pin_oracle/axiom_pin_oracle.py') }}-${{ github.run_id }}
+          restore-keys: |
+            pinned-tests-${{ hashFiles('rulespec-us/known-source-conflicts.yaml', 'rulespec-us/tools/pin_runner.py', 'rulespec-us/tools/pin_oracle/axiom_pin_oracle.py') }}-
+            pinned-tests-
+
+      - name: Test the runner on fixture repositories
+        working-directory: rulespec-us
+        env:
+          AXIOM_PIN_RUNNER_TESTS_REQUIRED: "1"
+        run: python -m pytest -q -p no:cacheprovider tests/test_pin_runner.py tests/test_pin_runner_properties.py
+
+      - name: Run the pinned tests
+        run: |
+          python rulespec-us/tools/pin_runner.py --root rulespec-us \
+            --report "$RUNNER_TEMP/pinned-tests.json" --cache-dir "$RUNNER_TEMP/pin-runs-cache"
+
+      - name: Save passing results
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/pin-runs-cache
+          key: pinned-tests-${{ hashFiles('rulespec-us/known-source-conflicts.yaml', 'rulespec-us/tools/pin_runner.py', 'rulespec-us/tools/pin_oracle/axiom_pin_oracle.py') }}-${{ github.run_id }}
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pinned-tests
+          path: ${{ runner.temp }}/pinned-tests.json
+          if-no-files-found: ignore
+
   open-interpretations:
     # Unregistered open module interpretations are warnings, not failures:
     # signed encoder re-encodes may emit them. A scheduled, main or dispatched
@@ -235,10 +318,7 @@ jobs:
             exit 0
           fi
           {
-            echo "\`tools/source_conflicts.py check\` warns, without failing, on two things:"
-            echo
-            echo "- a module interpretation that cites two or more provisions in tension, is \`open\`, and is not in known-source-conflicts.yaml. Give it an entry (adopted_by naming the module and interpretation) when it is ruled or confirmed; an unregistered ruled, confirmed or contradicted interpretation fails Repository Checks;"
-            echo "- a pinned test in this repository that its file shows may not run (a skip, xfail, empty parameter set or Hypothesis phases). It is still collected; confirm it runs in CI, or pin a test that does."
+            echo "\`tools/source_conflicts.py check\` warns, without failing, on a module interpretation that cites two or more provisions in tension, is \`open\`, and is not in known-source-conflicts.yaml. Give it an entry (adopted_by naming the module and interpretation) when it is ruled or confirmed; an unregistered ruled, confirmed or contradicted interpretation fails Repository Checks."
             echo
             echo "Generated by ${RUN_URL}:"
             echo
@@ -251,14 +331,38 @@ jobs:
           fi
 
   alarm:
-    # A red scheduled or main run opens (or refreshes) one tracking issue.
-    needs: verify
-    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push') && needs.verify.result != 'success' }}
+    # A red scheduled or main run opens (or refreshes) one tracking issue. The
+    # pinned-tests report comes from a job that ran other repositories' code,
+    # so it is parsed as data by main's own tools/pin_runner.py --summarize,
+    # which prints only validated fields; no runner output is interpolated
+    # into a script.
+    needs: [verify, pinned-tests]
+    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push') && (needs.verify.result != 'success' || needs.pinned-tests.result != 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: write
     steps:
+      - name: Checkout rules repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: rulespec-us
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.14"
+
+      - name: Install the summarizer's dependency
+        run: python -m pip install pyyaml==6.0.3
+
+      - name: Fetch the pinned-test report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with:
+          name: pinned-tests
+          path: ${{ runner.temp }}/pinned-tests
+
       - name: Open or refresh the source-conflicts alarm
         env:
           GH_TOKEN: ${{ github.token }}
@@ -267,20 +371,30 @@ jobs:
         run: |
           set -euo pipefail
           title="Source-conflict register verification is red on main"
-          body="The source-conflicts workflow failed on main (${EVENT_NAME}): ${RUN_URL}
-
-          Open the run to see which step failed. If it is \`source_conflicts.py verify\`,
-          an excerpt no longer matches the pinned corpus release or its snapshot, a
-          pinned snapshot or commit is unreadable, or an
-          implementation's cites_entry claim no longer matches its file: fix
-          known-source-conflicts.yaml (or the pin that moved). Any other step (setup,
-          the offline check, the tool's tests) needs its own fix. Close this issue
-          once the workflow is green."
+          python rulespec-us/tools/pin_runner.py \
+            --summarize "$RUNNER_TEMP/pinned-tests/pinned-tests.json" > "$RUNNER_TEMP/pins.md"
+          {
+            echo "The source-conflicts workflow failed on main (${EVENT_NAME}): ${RUN_URL}"
+            echo
+            echo "Open the run to see which job failed. If it is \`source_conflicts.py verify\`,"
+            echo "an excerpt no longer matches the pinned corpus release or its snapshot, a"
+            echo "pinned snapshot or commit is unreadable, or an implementation's cites_entry"
+            echo "claim no longer matches its file. If it is \`pinned-tests\`, a pinned test"
+            echo "did not pass at its pinned commit (below). Fix known-source-conflicts.yaml"
+            echo "(or the pin that moved). Any other step (setup, the offline check, the"
+            echo "tools' tests) needs its own fix. Close this issue once the workflow is green."
+            echo
+            cat "$RUNNER_TEMP/pins.md"
+          } > "$RUNNER_TEMP/body.md"
           existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
             --search "in:title \"$title\"" --json number --jq '.[0].number // empty')"
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" \
-              --body "Still red on $(date -u +%Y-%m-%dT%H:%MZ) (${EVENT_NAME}): ${RUN_URL}"
+            {
+              echo "Still red on $(date -u +%Y-%m-%dT%H:%MZ) (${EVENT_NAME}): ${RUN_URL}"
+              echo
+              cat "$RUNNER_TEMP/pins.md"
+            } > "$RUNNER_TEMP/comment.md"
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/comment.md"
           else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$RUNNER_TEMP/body.md"
           fi
