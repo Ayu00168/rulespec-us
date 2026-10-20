@@ -549,6 +549,14 @@ HYPOTHESIS = "from hypothesis import given, settings\nimport hypothesis.strategi
         ("def _hide():\n    globals()['test_x'] = None\n_hide()\ndef test_x():\n    pass\n", "test_x", False),
         ("import importlib\ndef test_x():\n    pass\nm = importlib.import_module(__name__)\nm.test_x = None\n", "test_x", False),
         ("import sys\nmodules = sys.modules\ndef test_x():\n    pass\nmodules[__name__].test_x = None\n", "test_x", False),
+        # Round-6 review: call forms the screen cannot follow are accepted with
+        # a warning (test_python_test_warnings), not refused.
+        (MODULE + "from functools import partial\nskip_if_missing = partial(pytest.skip, 'x', allow_module_level=True)\nskip_if_missing()\ndef test_x():\n    pass\n", "test_x", True),
+        # Statically unreachable branches run nothing (round-6 review, nit).
+        (MODULE + "def _gate():\n    pytest.skip('x', allow_module_level=True)\nif False:\n    _gate()\ndef test_x():\n    pass\n", "test_x", True),
+        (MODULE + "from typing import TYPE_CHECKING\ndef _gate():\n    pytest.skip('x', allow_module_level=True)\nif TYPE_CHECKING:\n    _gate()\ndef test_x():\n    pass\n", "test_x", True),
+        (MODULE + "import typing\nif typing.TYPE_CHECKING:\n    pytest.skip('x', allow_module_level=True)\nelse:\n    pass\ndef test_x():\n    pass\n", "test_x", True),
+        (MODULE + "if False:\n    pass\nelse:\n    pytest.skip('x', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", False),
         # A helper nobody calls at import, or one that only raises loudly, changes nothing.
         (MODULE + "def _maybe():\n    pytest.skip('x', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", True),
         ("def _load():\n    raise ValueError('bad')\ndef test_x():\n    pass\n", "test_x", True),
@@ -675,6 +683,21 @@ def test_check_is_total_on_every_field(tmp_path):
         (MODULE + "from hypothesis import given, settings, strategies as st\n@settings(phases=())\n@given(st.integers())\ndef test_x(h):\n    pass\n", "test_x", ["Hypothesis settings that set phases"]),
         (MODULE + "from hypothesis import settings\nsettings.register_profile('none', max_examples=0)\nsettings.load_profile('none')\ndef test_x():\n    pass\n", "test_x", ["a Hypothesis profile loaded at import"]),
         (MODULE + "pytest.foo = 1\ndef test_x():\n    pytest.skip('x')\n", "test_x", ["pytest.skip in its body"]),
+        # Round-6 review: import-time calls the screen cannot follow.
+        (MODULE + "from functools import partial\nskip_if_missing = partial(pytest.skip, 'x', allow_module_level=True)\nskip_if_missing()\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `partial` at line 3; the test may not be collected", "import-time code the screen can't follow: `skip_if_missing` at line 4; the test may not be collected"]),
+        (MODULE + "import os\nskip = pytest.skip if os.environ.get('X') else print\nskip('x', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `skip` at line 4; the test may not be collected"]),
+        (MODULE + "from typing import Callable\ns: Callable = pytest.skip\ns('x', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `s` at line 4; the test may not be collected"]),
+        (MODULE + "def _gate():\n    pytest.skip('x', allow_module_level=True)\ng = _gate\ng()\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `g` at line 5; the test may not be collected"]),
+        (MODULE + "try:\n    def _gate():\n        pytest.skip('x', allow_module_level=True)\nexcept Exception:\n    pass\n_gate()\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `_gate` at line 7; the test may not be collected"]),
+        (MODULE + "from mypkg.data import require_data\nrequire_data()\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `require_data` at line 3; the test may not be collected"]),
+        (MODULE + "@retry(3)\ndef helper():\n    pass\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `retry` at line 2; the test may not be collected"]),
+        (MODULE + "GATES = []\nfor gate in GATES:\n    gate.check()\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `gate.check` at line 4; the test may not be collected"]),
+        (MODULE + "from mypkg import configure\ndef _setup():\n    configure()\n_setup()\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `configure` at line 4; the test may not be collected"]),
+        (MODULE + "from mypkg import register\n@register\ndef helper():\n    pass\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `register` at line 3; the test may not be collected"]),
+        # Calling a Hypothesis composite at import runs nothing yet.
+        (MODULE + "from hypothesis import strategies as st\n@st.composite\ndef pairs(draw):\n    return draw(st.integers()), load_more()\nPAIRS = pairs()\ndef test_x():\n    pass\n", "test_x", []),
+        # Safe calls, values the screen can see, and clean helpers it follows give none.
+        (MODULE + "import re\nfrom pathlib import Path\nfrom fractions import Fraction as F\nPAT = re.compile('a')\nDATA = Path(__file__).parent / 'data'\nFILES = sorted(DATA.glob('*.json'))\nTWO = F(1, 2)\ndef _helper():\n    here = Path(__file__)\n    return here.with_name('x').is_file()\nOK = _helper()\n@pytest.mark.parametrize('x', [len('ab'), 2])\ndef test_x(x):\n    pass\n", "test_x", []),
         # A refused reference has no warnings: it fails instead.
         (MODULE + "def helper():\n    pytest.skip('x')\n", "helper", []),
     ],
@@ -773,6 +796,23 @@ def test_dollar_amounts_in_prose_need_a_money_case(tmp_path):
     described["money_case"]["description"] = "A survivor family after a child ages out: $1,500.00 against $1,479."
     described["reading"] = "Protect $1,500 from the earlier month."
     assert check(ctx, described) == []
+
+
+@pytest.mark.parametrize(
+    "spelling", ["USD 200", "200 dollars", "$  200", "$ 200", "$.50", "$-200", "$1.5k", "US$200", "$1.5", "$1,23", "50 cents"]
+)
+def test_money_has_one_spelling(tmp_path, spelling):
+    # Round-6 review, nit: other spellings slipped past the money-case rule.
+    value = entry()
+    value["alternatives"][0]["effect"] = f"The family is paid {spelling} less."
+    assert any("writes money as" in issue for issue in check(make_repo(tmp_path), value)), spelling
+
+
+def test_canonical_money_at_a_sentence_end(tmp_path):
+    value = entry()
+    value["money_case"]["description"] = "A family: $1,234.56 against $1,213.56."
+    value["alternatives"][0]["effect"] = "The family is paid $21.00, then $1,234.56."
+    assert check(make_repo(tmp_path), value) == []
 
 
 def test_the_register_refuses_anchors_and_cycles(tmp_path):

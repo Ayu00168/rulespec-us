@@ -113,7 +113,7 @@ Register-only fields:
 | `adopted_by` | RuleSpec modules in this repository that carry the entry, as `module` (path) and `interpretation` (id) pairs. |
 | `implementations` | Code outside RuleSpec that adopts a reading: `repo`, `commit`, `path`, `follows` (`reading` or `alternatives[N]`, meaning what the code does today) and `cites_entry`, which says whether the file contains the global id. |
 | `tests` | Tests that pin readings: `path`, `name` (a test function, `Class::function`, or a companion-test case name) and `pins`, a list of `reading` or `alternatives[N]`. Add `repo` and `commit` for a test in another repository. A Python test must be a whole test function that pytest's default collection picks up from the file; whether it runs is the owning repository's CI's business. See [Test references](#test-references). |
-| `money_case` | Optional. An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency`, `period` (once, week, month or year) and `computed_by`, the name of the one test in the entry's `tests` that computes the amount, asserting it or both figures whose difference it is. A public file carries no amount that no pinned test computes: leave the money case out instead. `check` also requires every `$` amount in the entry's own prose (`question`, `reading`, `basis`, each alternative's `reading` and `effect`) to be one the money case states, so an entry without one has no dollar figures. |
+| `money_case` | Optional. An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency`, `period` (once, week, month or year) and `computed_by`, the name of the one test in the entry's `tests` that computes the amount, asserting it or both figures whose difference it is. A public file carries no amount that no pinned test computes: leave the money case out instead. `check` also requires every `$` amount in the entry's own prose (`question`, `reading`, `basis`, each alternative's `reading` and `effect`) to be one the money case states, so an entry without one has no dollar figures. Money is written one way, `$` and digits with commas between groups of three and optional two-digit cents (`$1,234.56`); other spellings (`USD 200`, `200 dollars`, `$ 200`, `$.50`, `$1.5k`) are issues. |
 
 The register is public. These publication rules are reviewed by hand: it
 carries no people's names; `ruling.by` and `confirmation.by` name
@@ -187,9 +187,12 @@ python tools/source_conflicts.py aggregate --markdown /tmp/conflicts.md
 ## Test references
 
 The check screens a pinned Python test for one thing: that pytest's default
-collection picks it up from the test file alone, at the pinned commit. Whether
-the test then runs and passes belongs to the owning repository's CI. The
-screen catches the ways an honest test file stops a test being collected. It
+collection picks it up from the test file alone, at the pinned commit. The
+guarantee is **accepted and unwarned ⇒ collected**, for a file whose
+repository adds no conftest or ini effects and that contains no deliberate
+evasion. Whether the test then runs and passes belongs to the owning
+repository's CI. The screen catches the ways an honest test file stops a test
+being collected. It
 is not a proof against deliberately obfuscated import-time code (another
 module's helper that rebinds this one's names, `setattr` with a computed
 name, and the like); that is out of scope, and such findings go in the
@@ -221,19 +224,51 @@ accepts one narrow shape and refuses everything else:
   `raise` in it directly. Code that runs at import means module-level
   statements, the `else` branch of an `if __name__ == "__main__":` guard (not
   its body), class bodies, annotations (which run at import before Python
-  3.14), and the same-file functions any of that calls or uses as a
-  decorator, followed transitively, so an optional-data helper that skips
+  3.14), and the same-file top-level functions any of that calls or uses as
+  a decorator, followed transitively, so an optional-data helper that skips
   the module is refused. A same-file helper may raise an ordinary error,
   which fails loudly, but not a skip exception. Simple aliases such as
-  `skip = pytest.skip` resolve to what they name.
+  `skip = pytest.skip` resolve to what they name. Blocks that never run,
+  `if False:` and `if TYPE_CHECKING:`, are skipped (their `else` runs).
 
 A parametrized case (`test_x[case-1]`) cannot be pinned. pytest builds case
 ids from more than the file shows (fixture `params`, `pytestmark`,
 `pytest_generate_tests`, base classes, conftest hooks) and its escaping rules
 change between versions. Pin the whole function.
 
+**Import-time code is an allowlist.** Every call that runs at import must
+resolve to a known-safe callable or to a same-file top-level function the
+screen follows and finds clean. Anything else gets a warning: "import-time
+code the screen can't follow: `<callee>` at line N; the test may not be
+collected". That covers calls into project code, `functools.partial`, an
+alias the screen cannot resolve, and a helper bound outside the top level.
+The known-safe callables are:
+- pytest marks, `pytest.param`, `pytest.fixture` and `pytest.approx`;
+- Hypothesis strategies, `settings` (and its methods), `given`, `example`
+  and `seed`; calling a `@composite` strategy runs nothing at import;
+- `re.compile`, `pathlib` paths, `os.path.*`, `os.environ.get` and
+  `os.getenv`;
+- `typing`, `dataclasses`, `enum`, `collections` (`namedtuple`,
+  `defaultdict`, `OrderedDict`, `Counter`), `itertools`, `math`, `operator`,
+  `string` and `textwrap.dedent`;
+- `fractions.Fraction`, `decimal.Decimal`, `datetime` dates and times,
+  `json.loads` and `json.dumps`;
+- `functools` decorators (`lru_cache`, `cache`, `wraps`, `total_ordering`)
+  and `unittest.mock.patch`;
+- pure builtins (`len`, `range`, `dict`, `list`, `tuple`, `set`,
+  `frozenset`, `sorted`, `int`, `float`, `str`, `bool`, `min`, `max`, `sum`,
+  `zip`, `enumerate` and the like);
+- any method of a value the screen can see is plain data: a literal, a safe
+  call's result, or a name bound once to one, such as
+  `Path(__file__).parent`.
+
+Warnings are information, not failures. A test whose module builds project
+objects at import warns and still runs in its repository's CI. Of the 18
+Python pins in the register today, 12 warn for that reason: their modules
+call project code such as `g.YearMonth(...)` or `ssa_params()` at import.
+
 **A collected test can still not run, and nothing fails.** `check` (for tests
-here) and `verify` (for tests elsewhere) warn when the file shows one of
+here) and `verify` (for tests elsewhere) also warn when the file shows one of
 these: a `pytest.skip`, `importorskip` or `xfail` call in the test, in a
 same-file fixture it reaches (by argument, `usefixtures` or `autouse`), in
 `setup_module`, `setup_function`, `setup_class` or `setup_method`, or in a
@@ -258,12 +293,15 @@ Any of these can stop a pinned test being collected or run while every run
 exits 0. Import errors and modules that fail to collect do fail loudly.
 
 The evidence for the screen is `test_resolver_accepts_exactly_what_pytest_collects`
-(property 11). It runs pytest on generated modules and checks four things:
-- accepted ⇒ collected;
+(property 11). It runs pytest on generated modules, next to a stand-in for
+project code, and checks four things:
+- accepted and unwarned ⇒ collected;
 - collected ⇒ accepted, except the deliberate refusals listed in
   `REFUSED_BUT_COLLECTED`;
-- a test that is collected but doesn't run always carries a warning;
-- warnings appear exactly when the file shows a skip.
+- accepted and (not collected or not run) ⇒ warned;
+- every visible skip the generator plants is warned.
+
+A warning may also fire on a test that runs.
 
 The generator plants every shape that the reviews of this tool found in
 honest-looking files. The unit tests in `test_python_test_resolution` and
