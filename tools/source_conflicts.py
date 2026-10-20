@@ -601,15 +601,17 @@ def _scope_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
     """Statements in this scope, including those inside compound statements
     such as if, try, with, loops and match, but not inside defs or classes."""
 
-    for node in body:
+    stack = list(reversed(body))
+    while stack:
+        node = stack.pop()
         yield node
         if isinstance(node, _BLOCKS):
-            for field in ("body", "orelse", "finalbody"):
-                yield from _scope_statements(getattr(node, field, None) or [])
-            for handler in getattr(node, "handlers", None) or []:
-                yield from _scope_statements(handler.body)
-            for case in getattr(node, "cases", None) or []:
-                yield from _scope_statements(case.body)
+            nested = [
+                *(statement for field in ("body", "orelse", "finalbody") for statement in getattr(node, field, None) or []),
+                *(statement for handler in getattr(node, "handlers", None) or [] for statement in handler.body),
+                *(statement for case in getattr(node, "cases", None) or [] for statement in case.body),
+            ]
+            stack.extend(reversed(nested))
 
 
 def python_test_exists(source: str | bytes, name: str) -> bool:
@@ -621,7 +623,9 @@ def python_test_exists(source: str | bytes, name: str) -> bool:
         return False
     try:
         tree = ast.parse(source)  # bytes honour a PEP 263 coding cookie
-    except (SyntaxError, ValueError, UnicodeDecodeError):
+    except (SyntaxError, ValueError, UnicodeDecodeError, MemoryError, RecursionError):
+        # CPython's parser raises MemoryError ("source too complex") and
+        # RecursionError on deep input; either way the screen fails.
         return False
     body = tree.body
     scope = match.group("scope")
@@ -637,7 +641,10 @@ def missing_test(name: str, where: str) -> str:
     """Why a test reference does not resolve, worded for its kind of file."""
 
     if where.endswith(".py"):
-        return f"{name} is not a test function defined in {where} (see tools/README.md, Test references)."
+        return (
+            f"{name} is not a test function defined in {where}, or the file does not parse "
+            "(see tools/README.md, Test references)."
+        )
     return f"{name} is not a test case in {where}."
 
 

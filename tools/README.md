@@ -238,7 +238,9 @@ check` screens a pin's syntax, and that is all it does: the path is a
 `test_*.py` file (or a companion `.test.yaml`), and the file defines the named
 function at module level or in a module-level class (`Class::function`), or
 has a case with that name. Definitions under `if`, `try`, `with`, loops and
-`match` count as module level. The screen says nothing about whether pytest
+`match` count as module level. A file the parser can't handle (a syntax
+error, or input too deep or too complex for CPython's parser) fails the
+screen. The screen says nothing about whether pytest
 collects or runs the test: import-time code, conftest files, plugins and ini
 settings decide that, and no static check can.
 
@@ -349,7 +351,9 @@ holds nothing worth taking:
 
 Its result leaves only as the JSON artifact. The alarm job reads that artifact
 with main's `pin_runner.py --summarize`, which checks every field's type and
-prints only fields that match fixed patterns. A missing or malformed artifact
+prints only fields that match fixed patterns. A missing or malformed artifact,
+including one without the `commits`, `unrun` and `issues` lists or a commit
+without its `pins` and `issues` lists (the runner always writes them),
 becomes its own alarm line ("pinned-tests artifact malformed"); the summary
 never crashes the alarm step. No runner output is interpolated into a
 workflow script.

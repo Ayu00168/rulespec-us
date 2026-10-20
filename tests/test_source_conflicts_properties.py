@@ -35,7 +35,8 @@ Invariants, for every input:
     with Python's own symbol table on whether a generated module defines each
     name at module level or in a module-level class, through if, try, with,
     loops, match and nested functions; and it never raises on any text or
-    bytes. The screen decides nothing about collection; tools/pin_runner.py
+    bytes (input CPython's parser cannot handle, too deep or too complex, is a
+    failed screen; tests/test_source_conflicts.py has bounded cases). The screen decides nothing about collection; tools/pin_runner.py
     asks pytest (tests/test_pin_runner*.py).
 12. References by id: a `follows`, `adopts` or `pins` value that is neither
     `reading` nor an alternative id of the entry is always reported, and

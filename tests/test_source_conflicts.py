@@ -573,6 +573,39 @@ def test_python_test_resolution(source, name, expected):
     assert sc.python_test_exists(source.encode(), name) == expected
 
 
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        # Round-9 review: CPython's parser raises MemoryError ("source too
+        # complex") on 20,000 unary operators; deep brackets and indentation
+        # raise SyntaxError. Each is a failed screen, never an exception.
+        "x = " + "+" * 20000 + "1\n",
+        "x = " + "(" * 1000 + ")" * 1000 + "\n",
+        "".join("    " * level + "if x:\n" for level in range(101)) + "    " * 101 + "pass\n",
+        "x = " + "[" * 5000 + "]" * 5000 + "\n",
+    ],
+)
+def test_the_screen_fails_closed_on_input_the_parser_cannot_handle(tmp_path, prefix):
+    source = prefix + "def test_a():\n    pass\n"
+    assert sc.python_test_exists(source, "test_a") is False
+    assert sc.python_test_exists(source.encode(), "test_a") is False
+    ctx = make_repo(tmp_path)
+    (ctx.root / "tests" / "test_deep.py").write_text(source)
+    value = entry()
+    value.pop("money_case")
+    del value["implementations"]
+    value["tests"] = [{"path": "tests/test_deep.py", "name": "test_a", "pins": ["reading"]}]
+    assert any("test_a is not a test function defined in tests/test_deep.py, or the file does not parse" in issue
+               for issue in check(ctx, value))
+
+
+def test_the_screen_walks_deeply_nested_blocks():
+    # The walk over compound statements is iterative; 98 levels of `if`, with
+    # the def's body at the 100th (CPython's indentation limit), still find it.
+    source = "".join("    " * level + "if x:\n" for level in range(98)) + "    " * 98 + "def test_a():\n" + "    " * 99 + "pass\n"
+    assert sc.python_test_exists(source, "test_a") is True
+
+
 def _field_paths(value, prefix=()):
     if isinstance(value, dict):
         items = value.items()

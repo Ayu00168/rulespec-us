@@ -430,14 +430,39 @@ def test_one_malformed_pin_does_not_hide_the_others(tmp_path):
     # Every field is type-checked where it is read, so the malformed pin is
     # counted and the failing pin beside it still reaches the alarm.
     path = tmp_path / "report.json"
-    path.write_text(json.dumps({"commits": [{"repo": "PolicyEngine/a", "commit": COMMIT, "pins": [
+    path.write_text(json.dumps({"commits": [{"repo": "PolicyEngine/a", "commit": COMMIT, "issues": [], "pins": [
         {"entry": "us:x", "label": "entries[0].tests[0]", "id": "tests/test_a.py::test_x", "outcome": []},
         {"entry": "us:x", "label": "entries[0].tests[1]", "id": "tests/test_a.py::test_y", "outcome": "skipped"},
-    ]}]}))
+    ]}], "unrun": [], "issues": []}))
     assert runner.summarize(path) == [
         "- `us:x` entries[0].tests[1]: `PolicyEngine/a@cccccccccccc:tests/test_a.py::test_y` skipped",
         "- pinned-tests artifact malformed (1 item(s)); the `pinned-tests` job's log has the details.",
     ]
+
+
+@pytest.mark.parametrize(
+    ("report", "missing"),
+    [
+        # Round-9 review: `{}` and a commit without `pins` printed "No pinned
+        # test failed". The runner always writes these lists, so each one
+        # missing is a malformed artifact.
+        ({}, 3),
+        ({"commits": [], "unrun": []}, 1),
+        ({"commits": [], "issues": []}, 1),
+        ({"unrun": [], "issues": []}, 1),
+        ({"commits": [{"repo": "PolicyEngine/a", "commit": COMMIT, "issues": []}], "unrun": [], "issues": []}, 1),
+        ({"commits": [{"repo": "PolicyEngine/a", "commit": COMMIT, "pins": []}], "unrun": [], "issues": []}, 1),
+        ({"commits": [{"repo": "PolicyEngine/a", "commit": COMMIT}], "unrun": [], "issues": []}, 2),
+    ],
+)
+def test_an_incomplete_artifact_raises_the_alarm(tmp_path, report, missing, capsys):
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report))
+    assert runner.summarize(path) == [
+        f"- pinned-tests artifact malformed ({missing} item(s)); the `pinned-tests` job's log has the details."
+    ]
+    assert runner.main(["--summarize", str(path)]) == 0
+    assert "No pinned test failed" not in capsys.readouterr().out
 
 
 def test_summarize_never_raises(tmp_path, monkeypatch, capsys):

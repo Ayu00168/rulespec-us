@@ -758,15 +758,17 @@ def _items(value: Any) -> list[Any]:
 def _summary_lines(report: Mapping[str, Any]) -> list[str]:
     lines: list[str] = []
     malformed = 0
+    # The runner always writes these lists (an empty list, not a missing
+    # key), so a missing or mistyped one is a malformed artifact.
     for key in ("commits", "unrun", "issues"):
-        if key in report and not isinstance(report[key], list):
+        if not isinstance(report.get(key), list):
             malformed += 1
     for result in _items(report.get("commits")):
         if not (isinstance(result, Mapping) and _safe(result.get("repo"), sc.REPO_RE) and _safe(result.get("commit"), sc.COMMIT_RE)):
             malformed += 1
             continue
         where = f"{result['repo']}@{result['commit'][:12]}"
-        malformed += sum(1 for key in ("pins", "issues") if key in result and not isinstance(result[key], list))
+        malformed += sum(1 for key in ("pins", "issues") if not isinstance(result.get(key), list))
         if result.get("issues"):
             lines.append(f"- `{where}`: the run of this commit reported an issue.")
         for pin in _items(result.get("pins")):
