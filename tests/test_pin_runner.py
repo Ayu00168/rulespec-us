@@ -74,14 +74,22 @@ def phases(setup="passed", call="passed", teardown="passed", xfail=False):
 
 
 def oracle(items=(), *, reports=None, deselected=(), errors=(), skips=(), exitstatus=0, xdist=False):
-    """A synthetic oracle record; items are (nodeid, path, name)."""
+    """A synthetic oracle record; items are (nodeid, path, name), indexed in
+    order. `reports` and `deselected` name items by node id here, for
+    readability; the record keys them by index, as the oracle does."""
 
+    index = {}
+    for position, (nodeid, _, _) in enumerate(items):
+        index.setdefault(nodeid, position)
     return {
-        "collected": [{"nodeid": nodeid, "path": path, "name": name} for nodeid, path, name in items],
-        "deselected": list(deselected),
+        "collected": [
+            {"index": position, "nodeid": nodeid, "path": path, "name": name}
+            for position, (nodeid, path, name) in enumerate(items)
+        ],
+        "deselected": [index[nodeid] for nodeid in deselected],
         "collect_errors": [{"nodeid": path, "path": path, "message": "boom"} for path in errors],
         "collect_skips": [{"nodeid": path, "path": path, "message": "skip"} for path in skips],
-        "reports": reports or {},
+        "reports": {str(index[nodeid]): record for nodeid, record in (reports or {}).items()},
         "exitstatus": exitstatus,
         "xdist": xdist,
     }
@@ -233,14 +241,21 @@ def test_collect_pins_groups_runnable_pins_and_refuses_the_rest():
         {**good, "commit": "abc"},
         {**good, "path": "tests/helpers.py"},
         "junk",
+        # A YAML case runs where YAML_RUNNERS names its repository's runner.
+        {**good, "repo": "PolicyEngine/policyengine-us", "path": "policyengine_us/tests/a.yaml", "name": "A case (2024)"},
+        {**good, "repo": "PolicyEngine/policyengine-us", "path": "policyengine_us/tests/a.yaml", "name": "two\nlines"},
     ))
-    assert sorted(groups) == [("PolicyEngine/a", COMMIT)]
+    assert sorted(groups) == [("PolicyEngine/a", COMMIT), ("PolicyEngine/policyengine-us", COMMIT)]
     assert [p.name for p in groups[("PolicyEngine/a", COMMIT)]] == ["test_x", "TestK::test_y"]
+    (yaml_pin,) = groups[("PolicyEngine/policyengine-us", COMMIT)]
+    assert (yaml_pin.kind, yaml_pin.name) == ("yaml", "A case (2024)")
+    assert all(p.kind == "python" for p in groups[("PolicyEngine/a", COMMIT)])
     reasons = [item["reason"] for item in unrun]
-    assert len(reasons) == 7
+    assert len(reasons) == 8
+    assert "has a malformed name" in reasons[7]
     assert reasons[0].startswith("the runner won't execute pins in policyengine/b")
     assert reasons[1].startswith("the runner won't execute pins in SomeoneElse/c")
-    assert "YAML test case" in reasons[2]
+    assert "is a YAML test case in PolicyEngine/a, which has no YAML test runner here" in reasons[2]
     assert "this repository" in reasons[3]
     assert "malformed commit" in reasons[4]
     assert "not in a test_*.py file" in reasons[5]
@@ -824,6 +839,91 @@ PARTIAL_SKIP = textwrap.dedent(
 )
 
 
+# A stand-in for policyengine-core's YAML test runner, with the same shape:
+# it calls pytest.main itself, with a plugin that collects YAML files into
+# items whose name is "" until they run (so every case shares the node id
+# `path::`), and it is started as `python -m <module> test <files>`.
+FIXTURE_CORE = textwrap.dedent(
+    """\
+    import sys
+
+    import pytest
+    import yaml
+
+
+    class YamlFile(pytest.File):
+        def collect(self):
+            for test in yaml.safe_load(self.path.read_text()):
+                yield YamlItem.from_parent(self, name="", test=test)
+
+
+    class YamlItem(pytest.Item):
+        def __init__(self, *, test, **kwargs):
+            super().__init__(**kwargs)
+            self.test = test
+
+        def runtest(self):
+            self.name = self.test.get("name", "")
+            output = self.test.get("output")
+            if output == "skip":
+                pytest.skip("planted")
+            assert output == "ok", f"expected ok, got {output!r}"
+
+        def reportinfo(self):
+            return self.path, 0, self.test.get("name", "")
+
+
+    class Plugin:
+        def pytest_collect_file(self, parent, file_path):
+            if file_path.suffix in (".yaml", ".yml"):
+                return YamlFile.from_parent(parent, path=file_path)
+
+
+    def main():
+        args = sys.argv[1:]
+        assert args[0] == "test", args
+        paths = [arg for arg in args[1:] if arg.endswith((".yaml", ".yml"))]
+        return pytest.main(["--capture", "no", "--maxfail", "0", "--tb", "short", *paths], plugins=[Plugin()])
+
+
+    if __name__ == "__main__":
+        sys.exit(main())
+    """
+)
+FIXTURE_CORE_PYPROJECT = textwrap.dedent(
+    """\
+    [project]
+    name = "fixture-yaml"
+    version = "0"
+    requires-python = ">=3.10"
+
+    [project.optional-dependencies]
+    dev = ["pytest==9.1.1", "pyyaml==6.0.3"]
+
+    [build-system]
+    requires = ["setuptools>=68"]
+    build-backend = "setuptools.build_meta"
+
+    [tool.setuptools]
+    packages = ["fixture_core"]
+    """
+)
+YAML_CASES = textwrap.dedent(
+    """\
+    - name: A case that passes (2024)
+      output: ok
+    - name: A case that fails
+      output: bad
+    - name: A skipped case
+      output: skip
+    - name: Twice
+      output: ok
+    - name: Twice
+      output: bad
+    """
+)
+
+
 def _git(cwd: Path, *args: str) -> str:
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -955,6 +1055,14 @@ def fixtures(tmp_path_factory):
         "duplicate": fixture_repo(base, "PolicyEngine/fixture-duplicate", {
             "tests/test_a.py": "calls = 0\n\n\ndef test_a():\n    global calls\n    calls += 1\n    assert calls == 2\n",
             "conftest.py": "def pytest_collection_modifyitems(items):\n    items[:] = [items[0], items[0]]\n",
+        }),
+        "yaml": fixture_repo(base, "PolicyEngine/fixture-yaml", {
+            "pyproject.toml": FIXTURE_CORE_PYPROJECT,
+            "fixture_core/__init__.py": "",
+            "fixture_core/cli.py": FIXTURE_CORE,
+            "tests/policy/cases.yaml": YAML_CASES,
+            "tests/policy/passing.yaml": "- name: Only passing\n  output: ok\n",
+            "tests/test_py.py": "def test_ok():\n    pass\n",
         }),
         "slow": fixture_repo(base, "PolicyEngine/fixture-slow", {
             "tests/test_slow.py": "import time\n\n\ndef test_sleep():\n    time.sleep(600)\n",
@@ -1141,6 +1249,66 @@ def test_an_install_without_pytest_fails_every_pin(tmp_path, fixtures):
     report = runner.run_register(payload, settings(tmp_path, base))
     assert outcomes(report) == {"tests/test_a.py::test_a": "install failed"}
     assert report["issues"][0].endswith("the install (-e .[dev]) does not provide pytest")
+
+
+YAML_EXPECTED = {
+    "tests/policy/cases.yaml::A case that passes (2024)": "passed",
+    "tests/policy/cases.yaml::A case that fails": "failed",
+    "tests/policy/cases.yaml::A skipped case": "skipped",
+    # Two cases share the name; the one that fails fails the pin.
+    "tests/policy/cases.yaml::Twice": "failed",
+    "tests/policy/cases.yaml::No such case": "missing",
+    "tests/policy/missing.yaml::Anything": "missing file",
+    # A Python pin at the same commit runs under pytest, separately.
+    "tests/test_py.py::test_ok": "passed",
+}
+
+
+@needs_tools
+def test_yaml_cases_run_through_the_repositorys_own_yaml_runner(tmp_path, fixtures, monkeypatch):
+    base, commits = fixtures
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-yaml", ("fixture_core.cli", ()))
+    payload = register(*pinned("PolicyEngine/fixture-yaml", commits["yaml"], list(YAML_EXPECTED)))
+    report = runner.run_register(payload, settings(tmp_path, base))
+    assert outcomes(report) == YAML_EXPECTED
+    (result,) = report["commits"]
+    # Each kind ran once, with its own exit: pytest passed, the YAML run failed.
+    assert result["runs"]["python"]["exit"] == 0
+    assert result["runs"]["yaml"]["exit"] == 1
+    assert result["runs"]["yaml"]["files"] == ["tests/policy/cases.yaml"]
+    assert result["pytest_exit"] == 1
+    assert "the YAML test runner's process exited 1" in result["issues"]
+    by_id = {pin["id"]: pin for pin in result["pins"]}
+    twice = by_id["tests/policy/cases.yaml::Twice"]["cases"]
+    assert [case["outcome"] for case in twice] == ["passed", "failed"]
+    # Every case in a file shares one node id; only the index tells them apart.
+    assert len({case["nodeid"] for case in twice}) == 1 and len({case["index"] for case in twice}) == 2
+
+
+@needs_tools
+def test_a_passing_yaml_commit_passes_and_is_cached(tmp_path, fixtures, monkeypatch):
+    base, commits = fixtures
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-yaml", ("fixture_core.cli", ()))
+    payload = register(*pinned("PolicyEngine/fixture-yaml", commits["yaml"], [
+        "tests/policy/passing.yaml::Only passing", "tests/policy/cases.yaml::A case that passes (2024)",
+    ]))
+    cache = tmp_path / "cache"
+    first = runner.run_register(payload, settings(tmp_path, base, cache_dir=cache))
+    assert outcomes(first) == {"tests/policy/passing.yaml::Only passing": "passed",
+                               "tests/policy/cases.yaml::A case that passes (2024)": "passed"}
+    assert first["issues"] == [] and first["commits"][0]["pytest_exit"] == 0
+    second = runner.run_register(payload, settings(tmp_path, base, cache_dir=cache))
+    assert second["commits"][0]["cached"] is True
+
+
+@needs_tools
+def test_an_install_without_the_yaml_runner_fails_closed(tmp_path, fixtures, monkeypatch):
+    base, commits = fixtures
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-yaml", ("no_such_core.cli", ()))
+    payload = register(*pinned("PolicyEngine/fixture-yaml", commits["yaml"], ["tests/policy/passing.yaml::Only passing"]))
+    report = runner.run_register(payload, settings(tmp_path, base))
+    assert outcomes(report) == {"tests/policy/passing.yaml::Only passing": "install failed"}
+    assert "does not provide no_such_core" in report["issues"][0]
 
 
 @needs_tools

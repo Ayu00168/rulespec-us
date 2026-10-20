@@ -125,7 +125,7 @@ Register-only fields:
 | `adopted_by` | RuleSpec modules in this repository that carry the entry, as `module` (path) and `interpretation` (id) pairs. |
 | `implementations` | Code outside RuleSpec that takes a reading: `repo`, `commit`, `path`, `follows` (what the code does today) and `cites_entry`, which says whether the file contains the global id. A consumer may adopt a reading other than the entry's: `adopts` (default `reading`) names the reading it intends, `basis` says why, and an optional `ruling` (`by`, `date`, public `record`) is the consumer's own ruling. PolicyEngine-US follows the statute where the entry adopts an agency's practice. An implementation lags when `follows` differs from `adopts`. |
 | `proposed` | Changes not yet merged that would implement a reading: `repo`, `pr` (the pull request URL), `path` and `follows`. Verify lists them but never counts them as implementations; move one to `implementations` once it merges, pinned to the commit on the default branch. |
-| `tests` | Tests that pin readings: `path`, `name` and `pins`, a list of reading references. Here, `name` is a test function (or `Class::function`) in a `.py` file, or a case name in a companion `.test.yaml`. A test in another repository adds `repo` and `commit`. It may also be a YAML test file (`.yaml`) whose `name` is the case's name, on one line, such as a PolicyEngine-US policy test. Verify checks that the case still exists at that commit. Another repository's YAML test file must sit under a `tests` directory. A Python test is a whole test function. `check` screens only a pin's syntax; a pin is established once the `pinned-tests` job has run it at its pinned commit and it passed. The runner does not execute YAML cases yet, so a YAML pin fails that job. See [Test references](#test-references). |
+| `tests` | Tests that pin readings: `path`, `name` and `pins`, a list of reading references. Here, `name` is a test function (or `Class::function`) in a `.py` file, or a case name in a companion `.test.yaml`. A test in another repository adds `repo` and `commit`. It may also be a YAML test file (`.yaml`) whose `name` is the case's name, on one line, such as a PolicyEngine-US policy test. Verify checks that the case still exists at that commit. Another repository's YAML test file must sit under a `tests` directory. A Python test is a whole test function. `check` screens only a pin's syntax; a pin is established once the `pinned-tests` job has run it at its pinned commit and it passed. The runner executes a YAML case through its repository's own YAML test runner, so a YAML pin needs a `YAML_RUNNERS` entry (today, PolicyEngine-US's policyengine-core). See [Test references](#test-references). |
 | `money_case` | Optional. An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency`, `period` (once, week, month or year) and `computed_by`, the name of the one test in the entry's `tests` that computes the amount, asserting it or both figures whose difference it is. A public file carries no amount that no pinned test computes: leave the money case out instead. `check` also requires every `$` amount in the entry's own prose to be one the money case states. The prose is `question`, `reading`, `basis`, each alternative's `reading` and `effect`, and the consumer fields (an implementation's `basis`, `years.note`, an unpublished source's `description`). Excerpts are the sources' own words and may state any figure. The prose names a threshold without restating it ("above the section 1341 threshold"), because no test on the words around an amount can tell a quoted threshold from a computed one. So an entry without a money case has no dollar figures in its prose. Money is written one way, `$` and digits with commas between groups of three and optional two-digit cents (`$1,234.56`); other spellings (`USD 200`, `200 dollars`, `$ 200`, `$.50`, `$1.5k`) are issues. |
 
 Source kinds are `statute`, `regulation`, `rulemaking`, `form`,
@@ -311,11 +311,23 @@ Pins the runner cannot execute as stated fail too, with the reason:
 - a pin in a repository outside `TheAxiomFoundation/*` and `PolicyEngine/*`,
   spelled exactly as GitHub does ("the runner won't execute pins in <repo>");
 - a pin in this repository, which has no pinned commit;
-- a YAML test case: a companion `.test.yaml` here, or another repository's
-  YAML tests.
+- a YAML test case in a repository with no `YAML_RUNNERS` entry, including
+  a companion `.test.yaml` here.
 
-So every pin in the register must, for now, be a Python test in an allowed
-repository. Running in-repo and YAML pins is future work.
+**YAML cases.** A YAML pin in a repository that `YAML_RUNNERS` lists runs
+through that repository's own YAML test runner, in a second process beside
+pytest. PolicyEngine-US's runner is policyengine-core:
+`python -m policyengine_core.scripts.policyengine_command test <files> -c policyengine_us`.
+policyengine-core calls `pytest.main` itself with its own plugin, so the
+oracle is loaded through `PYTEST_ADDOPTS`, along with `-p no:cacheprovider`
+and a scratch `--basetemp`. Its YAML items have no name until they run, so
+every case in a file shares the node id `path::`. The oracle therefore keys a
+YAML item by its case's `name` (`item.test["name"]`), and records each report
+against the item `pytest_runtest_protocol` is running, by its position in the
+collection. Two cases with the pinned name both have to pass. The YAML run's
+process exit and session status are checked on their own, like pytest's.
+The install check fails closed if the repository's install does not provide
+the runner's package. Running in-repo companion tests is future work.
 
 A parametrized case (`test_x[case-1]`) cannot be pinned. Pin the whole
 function; every case pytest collects for it must pass.
@@ -388,7 +400,12 @@ fails closed. The fixtures cover:
   commit, a redirect and an exhausted rate limit, each refused before any
   fetch, against a fake GitHub API that answers from git itself;
 - a repository off the allowlist, and a deselection through `addopts = "-m
-  'not slow'"`.
+  'not slow'"`;
+- YAML cases through a stand-in with policyengine-core's shape (it calls
+  `pytest.main` itself, with items that have no name until they run): a case
+  that passes, fails or is skipped, two cases with one name, a missing case, a
+  missing file, a Python pin at the same commit with its own exit, a passing
+  YAML commit that is cached, and an install without the runner's package.
 
 The fixtures also check that no secret in the caller's environment reaches
 the pinned tests. `tests/test_pin_runner_properties.py` checks the classifier

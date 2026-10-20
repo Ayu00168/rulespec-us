@@ -23,12 +23,15 @@ For each (repository, commit) the register pins, it:
    `uv pip install --exclude-newer <the commit's committer date>`, so
    registry packages resolve as they did when the commit was made (Git and
    direct-URL requirements follow the repository's own declarations);
-4. runs pytest from the checkout root on the pinned files, under the
-   repository's own ini, conftest files and addopts, with `-p no:cacheprovider`,
-   a scratch `--basetemp` and the oracle plugin (tools/pin_oracle), which
-   records what pytest collected, deselected and reported, and keeps only
-   the pinned tests;
-5. classifies each pin from that record (`classify`).
+4. runs pytest from the checkout root on the pinned Python test files, under
+   the repository's own ini, conftest files and addopts, with
+   `-p no:cacheprovider`, a scratch `--basetemp` and the oracle plugin
+   (tools/pin_oracle), which records what pytest collected, deselected and
+   reported, and keeps only the pinned tests. Pinned YAML cases run in a
+   second process, through the repository's own YAML test runner
+   (YAML_RUNNERS; PolicyEngine-US's is policyengine-core), with the oracle
+   loaded through PYTEST_ADDOPTS. Each process's exit is checked on its own;
+5. classifies each pin from its run's record (`classify`).
 
 Only the outcome `passed` passes: every collected case of the pinned function
 passed its setup, call and teardown, none was deselected, skipped, xfailed or
@@ -40,7 +43,7 @@ module-level skip, `skipped`, `xfail`, `xpass`, `failed` or `error`, a
 per-commit timeout (DEFAULT_TIMEOUT), and any exception in the runner itself.
 Pins this runner cannot execute fail too: a pin in a repository outside
 ALLOWED_OWNERS (matched exactly), a pin in this repository (no pinned
-commit), and a YAML test case.
+commit), and a YAML test case in a repository with no YAML_RUNNERS entry.
 
 The claim, also stated in tools/README.md: the source-conflicts workflow's
 `pinned-tests` job passing means each pinned test was collected and passed at
@@ -98,6 +101,15 @@ ALLOWED_OWNERS = ("TheAxiomFoundation", "PolicyEngine")
 # a `dev` extra that holds its test dependencies gets an entry here.
 DEFAULT_INSTALL = ("-e", ".[dev]")
 INSTALL_SPECS: dict[str, tuple[str, ...]] = {}
+# A YAML test case runs only through its repository's own YAML test runner:
+# `python -m <module> test <files> <args>` from the checkout root, with the
+# oracle loaded through PYTEST_ADDOPTS (policyengine-core calls pytest.main
+# itself, with its own plugin collecting the YAML files). A YAML pin in a
+# repository with no entry here can't run.
+YAML_RUNNERS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "PolicyEngine/policyengine-us": ("policyengine_core.scripts.policyengine_command", ("-c", "policyengine_us")),
+}
+YAML_SUFFIXES = (".yaml", ".yml")
 # Newest first: the first that `requires-python` allows is used.
 PYTHONS = ("3.14", "3.13", "3.12", "3.11", "3.10", "3.9")
 DEFAULT_TIMEOUT = 15 * 60  # seconds per commit: fetch, environment, install and pytest
@@ -123,11 +135,15 @@ class Pin:
     repo: str
     commit: str
     path: str
-    name: str  # function, or Class::function
+    name: str  # function, or Class::function; or a YAML case's name
 
     @property
     def id(self) -> str:
         return f"{self.path}::{self.name}"
+
+    @property
+    def kind(self) -> str:
+        return "yaml" if self.path.endswith(YAML_SUFFIXES) else "python"
 
 
 class StepError(Exception):
@@ -172,8 +188,16 @@ def _unrunnable(item: Any) -> str | None:
         return "has a malformed commit; run `source_conflicts.py check`"
     if not (isinstance(path, str) and sc._relative_path(path)):
         return "has a malformed path; run `source_conflicts.py check`"
+    if path.endswith(YAML_SUFFIXES):
+        if repo not in YAML_RUNNERS:
+            return f"is a YAML test case in {repo}, which has no YAML test runner here (YAML_RUNNERS)"
+        if not (isinstance(name, str) and name.strip() and "\n" not in name and "\r" not in name):
+            return "has a malformed name; run `source_conflicts.py check`"
+        if not allowed_repo(repo):
+            return f"the runner won't execute pins in {repo} (allowed owners: {', '.join(ALLOWED_OWNERS)})"
+        return None
     if not path.endswith(".py"):
-        return "is a YAML test case; the runner executes only Python tests"
+        return "is neither a Python test nor a YAML test case"
     if not (isinstance(name, str) and sc.TEST_NAME_RE.fullmatch(name)):
         return "has a malformed name; run `source_conflicts.py check`"
     if not sc.python_test_file(path):
@@ -253,12 +277,19 @@ def _for_path(records: Any, path: str) -> list[Mapping[str, Any]]:
 
 
 def classify(
-    oracle: Mapping[str, Any], pins: Iterable[Pin], *, process_exit: int | None, missing_files: Iterable[str] = ()
+    oracle: Mapping[str, Any],
+    pins: Iterable[Pin],
+    *,
+    process_exit: int | None,
+    missing_files: Iterable[str] = (),
+    runner: str = "pytest",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """(one result per pin, commit-level issues) from the oracle's record and
-    pytest's process exit code (None when pytest did not run). The two are
+    the test process's exit code (None when it did not run). The two are
     checked independently: a repository hook can change the session's exit
-    status after the plugin has written its record."""
+    status after the plugin has written its record. Cases are matched by
+    (path, name) and read by their collection index, never by node id, which
+    a YAML runner repeats for every case in a file."""
 
     missing_files = set(missing_files)
     commit_issues: list[str] = []
@@ -284,11 +315,12 @@ def classify(
                 result.update(outcome="not collected", detail=f"pytest skipped {pin.path} at collection")
             else:
                 result.update(outcome="missing", detail=f"{pin.id} is not in pytest's collection")
-        elif any(item.get("nodeid") in deselected for item in items):
+        elif any(item.get("index") in deselected for item in items):
             result.update(outcome="deselected", detail="the repository's own configuration deselects it")
         else:
             cases = [
-                {"nodeid": item.get("nodeid"), "outcome": case_outcome(reports.get(item.get("nodeid")))}
+                {"nodeid": item.get("nodeid"), "index": item.get("index"),
+                 "outcome": case_outcome(reports.get(str(item.get("index"))))}
                 for item in items
             ]
             result["cases"] = cases
@@ -299,12 +331,12 @@ def classify(
                 result["detail"] = f"{len(bad)} of {len(cases)} case(s) did not pass, first {bad[0]}"
         results.append(result)
     if process_exit is None:
-        commit_issues.append("pytest did not run")
+        commit_issues.append(f"{runner} did not run")
     else:
         if process_exit != 0:
-            commit_issues.append(f"pytest's process exited {process_exit}")
+            commit_issues.append(f"{runner}'s process exited {process_exit}")
         if oracle.get("exitstatus") != 0:
-            commit_issues.append(f"pytest's session reported exit status {oracle.get('exitstatus')}")
+            commit_issues.append(f"{runner}'s session reported exit status {oracle.get('exitstatus')}")
     return results, commit_issues
 
 
@@ -536,37 +568,75 @@ def run_commit(repo: str, commit: str, pins: list[Pin], settings: Settings, *, k
             raise StepError("install failed", f"the install ({' '.join(spec)}) does not provide pytest")
         env_record["python"] = out.split()[0]
 
+        if any(pin.kind == "yaml" for pin in pins):
+            package = YAML_RUNNERS[repo][0].split(".")[0]
+            code, out = timed(
+                "yaml-runner-check",
+                [str(python), "-c", "import importlib.util, sys; sys.exit(importlib.util.find_spec(sys.argv[1]) is None)", package],
+                cwd=work,
+                env=base,
+            )
+            if code != 0:
+                result["logs"]["yaml-runner-check"] = out
+                raise StepError("install failed", f"the install ({' '.join(spec)}) does not provide {package}")
+
         missing = sorted({pin.path for pin in pins if not (tree / pin.path).is_file()})
-        files = sorted({pin.path for pin in pins} - set(missing))
-        oracle_out = work / "oracle.json"
-        oracle: Mapping[str, Any] = {"collected": [], "exitstatus": None}
-        if files:
-            pytest_env = {
-                **base,
-                "PATH": f"{venv / 'bin'}{os.pathsep}{base['PATH']}",
-                "VIRTUAL_ENV": str(venv),
-                "PYTHONPATH": str(ORACLE_DIR),
-                "AXIOM_PIN_ORACLE_OUT": str(oracle_out),
-                "AXIOM_PIN_ORACLE_ROOT": str(tree),
-                "AXIOM_PIN_ORACLE_PINS": json.dumps(sorted([pin.path, pin.name] for pin in pins)),
-            }
-            argv = [str(python), "-m", "pytest", "-p", "no:cacheprovider", f"--basetemp={work / 'basetemp'}",
-                    "-p", ORACLE_MODULE, *files]
-            code, tail = timed("pytest", argv, cwd=tree, env=pytest_env)
-            result["pytest_exit"] = code
-            result["logs"]["pytest"] = tail
-            try:
-                oracle = json.loads(oracle_out.read_text(encoding="utf-8"))
-                if not isinstance(oracle, dict):
-                    raise ValueError("not a JSON object")
-            except (OSError, ValueError) as exc:
-                raise StepError("error", f"pytest exited {code} without the oracle's record ({exc})") from None
-            env_record["pytest"] = oracle.get("pytest")
-            env_record["inifile"] = oracle.get("inifile")
-            env_record["addopts"] = oracle.get("addopts")
-        pin_results, commit_issues = classify(oracle, pins, process_exit=result["pytest_exit"], missing_files=missing)
-        result["pins"] = pin_results
-        result["issues"].extend(commit_issues)
+        runs: dict[str, Any] = {}
+        by_pin: dict[tuple[str, str], dict[str, Any]] = {}
+        exits: list[int | None] = []
+        # Python tests run under pytest; YAML cases under their repository's
+        # own YAML runner. Each run has its own oracle record and process exit,
+        # and each exit is checked on its own.
+        for kind in ("python", "yaml"):
+            kind_pins = [pin for pin in pins if pin.kind == kind]
+            if not kind_pins:
+                continue
+            files = sorted({pin.path for pin in kind_pins} - set(missing))
+            label = "pytest" if kind == "python" else "the YAML test runner"
+            oracle_out = work / f"oracle-{kind}.json"
+            oracle: Mapping[str, Any] = {"collected": [], "exitstatus": None}
+            code = None
+            if files:
+                run_env = {
+                    **base,
+                    "PATH": f"{venv / 'bin'}{os.pathsep}{base['PATH']}",
+                    "VIRTUAL_ENV": str(venv),
+                    "PYTHONPATH": str(ORACLE_DIR),
+                    "AXIOM_PIN_ORACLE_OUT": str(oracle_out),
+                    "AXIOM_PIN_ORACLE_ROOT": str(tree),
+                    "AXIOM_PIN_ORACLE_PINS": json.dumps(sorted([pin.path, pin.name] for pin in kind_pins)),
+                }
+                if kind == "python":
+                    step = "pytest"
+                    argv = [str(python), "-m", "pytest", "-p", "no:cacheprovider", f"--basetemp={work / 'basetemp-python'}",
+                            "-p", ORACLE_MODULE, *files]
+                else:
+                    step = "yaml-tests"
+                    module, extra = YAML_RUNNERS[repo]
+                    run_env["PYTEST_ADDOPTS"] = f"-p {ORACLE_MODULE} -p no:cacheprovider --basetemp={work / 'basetemp-yaml'}"
+                    argv = [str(python), "-m", module, "test", *files, *extra]
+                code, tail = timed(step, argv, cwd=tree, env=run_env)
+                result["logs"][step] = tail
+                try:
+                    oracle = json.loads(oracle_out.read_text(encoding="utf-8"))
+                    if not isinstance(oracle, dict):
+                        raise ValueError("not a JSON object")
+                except (OSError, ValueError) as exc:
+                    raise StepError("error", f"{label} exited {code} without the oracle's record ({exc})") from None
+            exits.append(code)
+            runs[kind] = {"exit": code, "files": files, **{key: oracle.get(key) for key in ("pytest", "inifile", "addopts")}}
+            kind_results, kind_issues = classify(oracle, kind_pins, process_exit=code, missing_files=missing, runner=label)
+            for pin, kind_result in zip(kind_pins, kind_results, strict=True):
+                by_pin[(pin.label, pin.id)] = kind_result
+            result["issues"].extend(kind_issues)
+        result["pins"] = [by_pin[(pin.label, pin.id)] for pin in pins]
+        result["runs"] = runs
+        # 0 only when every run exited 0; otherwise the first other exit (None
+        # when a run did not happen).
+        result["pytest_exit"] = 0 if exits and all(code == 0 for code in exits) else next((code for code in exits if code != 0), None)
+        first = runs.get("python") or runs.get("yaml") or {}
+        for key in ("pytest", "inifile", "addopts"):
+            env_record[key] = first.get(key)
     except StepError as exc:
         result["issues"].append(exc.detail)
         result["pins"] = [_failed(pin, exc.outcome, exc.detail) for pin in pins]
@@ -737,7 +807,13 @@ def render(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-_SAFE_ID_RE = re.compile(r"[A-Za-z0-9_./-]+::[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)?")
+# A Python pin id, or a YAML case's (`path.yaml::Case name (2024)`): no
+# backtick, @, angle bracket or line break, so nothing in it can format,
+# mention or link in the alarm issue.
+_SAFE_ID_RE = re.compile(
+    r"[A-Za-z0-9_./-]+::[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)?"
+    r"|[A-Za-z0-9_./-]+\.ya?ml::[A-Za-z0-9][A-Za-z0-9 ,.;:()'%$&+/_#-]*"
+)
 _SAFE_ENTRY_RE = re.compile(r"[a-z0-9-]+:[a-z0-9-]+")
 _SAFE_LABEL_RE = re.compile(r"entries\[[0-9]+\]\.tests\[[0-9]+\]")
 _SUMMARY_LIMIT = 100

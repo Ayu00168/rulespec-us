@@ -2,7 +2,8 @@
 
 Invariants, for every oracle record:
 
-1. Pass iff a reference predicate holds: `classify` passes a pin exactly when
+1. Pass iff a reference predicate holds (Python tests and YAML cases, whose
+   node ids repeat, read by collection index): `classify` passes a pin exactly when
    the runner is not distributed by xdist, the pinned file is in the checkout,
    pytest collected at least one case of the pinned function, none was
    deselected, and every case reported setup, call and teardown as `passed`
@@ -63,7 +64,10 @@ runner = _load("pin_runner", REPO_ROOT / "tools" / "pin_runner.py")
 SETTINGS = settings(max_examples=500, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
 COMMIT = "c" * 40
 PATHS = ["tests/test_a.py", "tests/test_b.py"]
+YAML_PATH = "policyengine_us/tests/cases.yaml"
 NAMES = ["test_x", "test_y", "TestK::test_x"]
+YAML_NAMES = ["A case (2024)", "Another case"]
+PIN_TARGETS = [(path, name) for path in PATHS for name in NAMES] + [(YAML_PATH, name) for name in YAML_NAMES]
 
 outcome_values = st.sampled_from(["passed", "failed", "skipped", "rerun", None])
 phase = st.fixed_dictionaries(
@@ -92,21 +96,24 @@ def records(draw):
     pins = [
         runner.Pin("us:x", f"entries[0].tests[{index}]", "PolicyEngine/a", COMMIT, path, name)
         for index, (path, name) in enumerate(
-            draw(st.lists(st.tuples(st.sampled_from(PATHS), st.sampled_from(NAMES)), min_size=1, max_size=4, unique=True))
+            draw(st.lists(st.sampled_from(PIN_TARGETS), min_size=1, max_size=4, unique=True))
         )
     ]
     items, reports = [], {}
-    for path in PATHS:
-        for name in NAMES:
+    for path in PATHS + [YAML_PATH]:
+        for name in YAML_NAMES if path == YAML_PATH else NAMES:
             for case in range(draw(st.integers(0, 2))):
-                nodeid = f"{path}::{name}[{case}]"
-                items.append({"nodeid": nodeid, "path": path, "name": name})
+                # A YAML runner gives every case in a file the same node id,
+                # so only the collection index tells cases apart.
+                nodeid = f"{path}::" if path == YAML_PATH else f"{path}::{name}[{case}]"
+                index = len(items)
+                items.append({"index": index, "nodeid": nodeid, "path": path, "name": name})
                 if draw(st.booleans()) or draw(st.booleans()):
-                    reports[nodeid] = draw(phase_record)
-    nodeids = [item["nodeid"] for item in items]
+                    reports[str(index)] = draw(phase_record)
+    indexes = [item["index"] for item in items]
     record = {
         "collected": items,
-        "deselected": draw(st.lists(st.sampled_from(nodeids), max_size=2)) if nodeids else [],
+        "deselected": draw(st.lists(st.sampled_from(indexes), max_size=2)) if indexes else [],
         "collect_errors": [{"path": path} for path in draw(st.lists(st.sampled_from(PATHS), max_size=1))],
         "collect_skips": [{"path": path} for path in draw(st.lists(st.sampled_from(PATHS), max_size=1))],
         "reports": reports,
@@ -127,9 +134,9 @@ def reference_passes(record, pin, missing) -> bool:
     if not items:
         return False
     for item in items:
-        if item["nodeid"] in record["deselected"]:
+        if item["index"] in record["deselected"]:
             return False
-        phases = record["reports"].get(item["nodeid"]) or {}
+        phases = record["reports"].get(str(item["index"])) or {}
         for when in ("setup", "call", "teardown"):
             report = phases.get(when)
             if not isinstance(report, dict) or report.get("outcome") != "passed":
@@ -214,6 +221,9 @@ SAFE_SPANS = (
     re.compile(r"[a-z0-9-]+:[a-z0-9-]+"),
     re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+@[0-9a-f]{12}(:[A-Za-z0-9_./-]+::[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)?)?"),
     re.compile(r"pinned-tests"),
+    # A YAML case id: a free-text case name, but no backtick, @, angle
+    # bracket or line break.
+    re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+@[0-9a-f]{12}:[A-Za-z0-9_./-]+\.ya?ml::[A-Za-z0-9][A-Za-z0-9 ,.;:()'%$&+/_#-]*"),
 )
 FIXED_TEXT = re.compile(
     r"- (`[^`]*` entries\[[0-9]+\]\.tests\[[0-9]+\]: (`[^`]*` [a-z ]+|the runner can't execute this pin\.)"
@@ -228,7 +238,8 @@ FIXED_TEXT = re.compile(
 # made the summarizer raise).
 text = st.one_of(
     st.text(max_size=20),
-    st.sampled_from(["us:x", "PolicyEngine/a", COMMIT, "tests/test_a.py::test_x", "skipped", "entries[0].tests[1]"]),
+    st.sampled_from(["us:x", "PolicyEngine/a", COMMIT, "tests/test_a.py::test_x", "skipped", "entries[0].tests[1]",
+                     "policyengine_us/tests/cases.yaml::A case (2024)", "policyengine_us/tests/cases.yaml::x `@team`"]),
     json_values,
 )
 pin_dicts = st.fixed_dictionaries({"entry": text, "label": text, "id": text, "outcome": st.one_of(text, st.sampled_from(sorted(runner.OUTCOMES)))})
