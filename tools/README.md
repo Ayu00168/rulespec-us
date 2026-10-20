@@ -28,43 +28,6 @@ downloaded artifact was built by this workflow from this repo:
 gh attestation verify manifest.json --repo TheAxiomFoundation/rulespec-us
 ```
 
-## Test references
-
-A test pins a reading only if it runs. The check reads the test file alone, so
-it accepts one narrow shape and refuses everything else:
-
-- a `test_*.py` file, and a `test_*` function at module level or in a `Test*`
-  class at module level. These are the names every common pytest
-  configuration collects; the repository's `python_files`, `python_functions`
-  and `python_classes` settings are not read;
-- a plain `def`: not `async` (it fails without a plugin) and not a generator;
-- the final binding of its name: nothing later in the file rebinds, deletes,
-  or sets attributes on the function or its class;
-- decorators only from pytest marks other than `skip`, `skipif` and `xfail`,
-  Hypothesis (`given`, `settings`, `example`, `seed`) and
-  `unittest.mock.patch`. A fixture, `property`, `staticmethod`, `dataclass` or
-  any other wrapper is refused, because it can stop pytest collecting the
-  function. A `parametrize` whose case list is empty, or whose every case
-  carries marks, is refused;
-- a class with no bases other than `object`, no metaclass, no `__init__`,
-  `__new__` or `__test__`, and only pytest marks as decorators;
-- a module with no `__test__`, no `pytestmark` other than a list of marks
-  that run, no `pytest.skip`/`importorskip`/`xfail`/`fail`/`exit` call or
-  `raise` outside `if __name__ == "__main__":`, and no generator test anywhere
-  (pytest 9 rejects the whole module).
-
-A parametrized case (`test_x[case-1]`) cannot be pinned. pytest builds case
-ids from more than the file shows (fixture `params`, `pytestmark`,
-`pytest_generate_tests`, base classes, conftest hooks) and its escaping rules
-change between versions. Pin the whole function; it runs every case.
-
-What the file cannot show is not checked: import errors, conftest hooks,
-plugins, ini options, and other tests in the module that fail to collect. Each
-of these makes the owning repository's own test run fail loudly, while every
-shape above would let a pinned test stop running silently.
-`test_resolver_accepts_exactly_what_pytest_runs` checks these rules in both
-directions against pytest runs of generated modules.
-
 Run locally:
 
 ```bash
@@ -208,3 +171,40 @@ AXIOM_CORPUS_RELEASE_PUBLIC_KEY=... python tools/source_conflicts.py verify \
   --corpus-path ../axiom-corpus          # needs axiom-encode importable
 python tools/source_conflicts.py aggregate --markdown /tmp/conflicts.md
 ```
+
+## Test references
+
+A test pins a reading only if it runs. The check reads the test file alone, so
+it accepts one narrow shape and refuses everything else:
+
+- a `test_*.py` file, and a `test_*` function at module level or in a `Test*`
+  class at module level. These are the names every common pytest
+  configuration collects; the repository's `python_files`, `python_functions`
+  and `python_classes` settings are not read;
+- a plain `def`: not `async` (it fails without a plugin) and not a generator;
+- the final binding of its name: nothing later in the file rebinds, deletes,
+  or sets attributes on the function or its class;
+- decorators only from pytest marks other than `skip`, `skipif` and `xfail`,
+  Hypothesis (`given`, `settings`, `example`, `seed`) and
+  `unittest.mock.patch`. A fixture, `property`, `staticmethod`, `dataclass` or
+  any other wrapper is refused, because it can stop pytest collecting the
+  function. A `parametrize` whose case list is empty, or whose every case
+  carries marks, is refused;
+- a class with no bases other than `object`, no metaclass, no `__init__`,
+  `__new__` or `__test__`, and only pytest marks as decorators;
+- a module with no `__test__`, no `pytestmark` other than a list of marks
+  that run, no `pytest.skip`/`importorskip`/`xfail`/`fail`/`exit` call or
+  `raise` outside `if __name__ == "__main__":`, and no generator test anywhere
+  (pytest 9 rejects the whole module).
+
+A parametrized case (`test_x[case-1]`) cannot be pinned. pytest builds case
+ids from more than the file shows (fixture `params`, `pytestmark`,
+`pytest_generate_tests`, base classes, conftest hooks) and its escaping rules
+change between versions. Pin the whole function; it runs every case.
+
+What the file cannot show is not checked: import errors, conftest hooks,
+plugins, ini options, and other tests in the module that fail to collect. Each
+of these makes the owning repository's own test run fail loudly, while every
+shape above would let a pinned test stop running silently.
+`test_resolver_accepts_exactly_what_pytest_runs` checks these rules in both
+directions against pytest runs of generated modules.
