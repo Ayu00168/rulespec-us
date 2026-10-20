@@ -491,6 +491,24 @@ def test_summarize_never_raises(tmp_path, monkeypatch, capsys):
     assert capsys.readouterr().out == runner.MALFORMED_ARTIFACT + "\n"
 
 
+def test_summarize_prints_yaml_case_ids_but_nothing_that_formats(tmp_path):
+    # A YAML case name is free text, so only names without a backtick, @,
+    # angle bracket or line break are printed; anything else is malformed.
+    pins = [
+        {"entry": "us-md:x", "label": "entries[0].tests[0]", "id": "policyengine_us/tests/a.yaml::A farm loss (2024), $3,000", "outcome": "failed"},
+        {"entry": "us-md:x", "label": "entries[0].tests[1]", "id": "policyengine_us/tests/a.yaml::x `@team`", "outcome": "failed"},
+        {"entry": "us-md:x", "label": "entries[0].tests[2]", "id": "policyengine_us/tests/a.yaml::<img src=x>", "outcome": "failed"},
+        {"entry": "us-md:x", "label": "entries[0].tests[3]", "id": "policyengine_us/tests/a.yaml::@everyone", "outcome": "failed"},
+    ]
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({"commits": [{"repo": "PolicyEngine/policyengine-us", "commit": COMMIT, "issues": [], "pins": pins}],
+                                "unrun": [], "issues": []}))
+    assert runner.summarize(path) == [
+        "- `us-md:x` entries[0].tests[0]: `PolicyEngine/policyengine-us@cccccccccccc:policyengine_us/tests/a.yaml::A farm loss (2024), $3,000` failed",
+        "- pinned-tests artifact malformed (3 item(s)); the `pinned-tests` job's log has the details.",
+    ]
+
+
 def test_summarize_without_a_report(tmp_path):
     assert runner.summarize(tmp_path / "absent.json") == [runner.MISSING_ARTIFACT]
     (tmp_path / "list.json").write_text("[]")
