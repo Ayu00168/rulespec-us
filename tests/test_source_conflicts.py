@@ -488,21 +488,29 @@ HYPOTHESIS = "from hypothesis import given, settings\nimport hypothesis.strategi
         (MODULE + "@pytest.fixture\ndef test_client():\n    return 1\ndef test_uses(test_client):\n    pass\n", "test_client", False),
         (MODULE + "@pytest.fixture()\ndef test_client():\n    return 1\n", "test_client", False),
         ("from pytest import fixture\n@fixture\ndef test_client():\n    return 1\n", "test_client", False),
-        # Skipped or expected to fail: a test that does not run pins nothing.
-        (MODULE + "@pytest.mark.skip\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "@pytest.mark.skip(reason='later')\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "@pytest.mark.skipif(True, reason='r')\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "@pytest.mark.xfail\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "@pytest.mark.parametrize('x', [])\ndef test_x(x):\n    pass\n", "test_x", False),
-        (MODULE + "@pytest.mark.parametrize('x', [pytest.param(1, marks=pytest.mark.skip)])\ndef test_x(x):\n    pass\n", "test_x", False),
-        (MODULE + "pytestmark = pytest.mark.skip\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "pytestmark = [pytest.mark.slow, pytest.mark.skipif(True, reason='r')]\ndef test_x():\n    pass\n", "test_x", False),
+        # Skips and xfails leave the test collected: accepted, with a warning
+        # (test_python_test_warnings).
+        (MODULE + "@pytest.mark.skip\ndef test_x():\n    pass\n", "test_x", True),
+        (MODULE + "@pytest.mark.parametrize('x', [])\ndef test_x(x):\n    pass\n", "test_x", True),
+        (MODULE + "pytestmark = pytest.mark.skip\ndef test_x():\n    pass\n", "test_x", True),
+        (MODULE + "@pytest.mark.skip\nclass TestK:\n    def test_x(self):\n        pass\n", "TestK::test_x", True),
+        (MODULE + "def test_x():\n    pass\npytest.mark.skip(test_x)\n", "test_x", True),
+        # A pytestmark that is not plainly marks, or a module that stops collecting.
         (MODULE + "SKIP = pytest.mark.skip\npytestmark = SKIP\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "class TestK:\n    pytestmark = [pytest.mark.skip]\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
-        (MODULE + "@pytest.mark.skip\nclass TestK:\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
         (MODULE + "pytest.skip('later', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", False),
         (MODULE + "numpy = pytest.importorskip('numpy')\ndef test_x():\n    pass\n", "test_x", False),
         ("raise ImportError('no')\ndef test_x():\n    pass\n", "test_x", False),
+        # Round-3 review, finding 3: rebinding at import time.
+        ("def test_x():\n    pass\nexec('test_x = None')\n", "test_x", False),
+        ("def test_y():\n    pass\nglobals()['test_y'] = None\n", "test_y", False),
+        ("import sys\ndef test_x():\n    pass\nsetattr(sys.modules[__name__], '__test__', False)\n", "test_x", False),
+        ("def test_x():\n    pass\ntest_x.__dict__['__test__'] = False\n", "test_x", False),
+        (MODULE + "def test_y():\n    pass\nvars(test_y).update(pytestmark=[pytest.mark.skip])\n", "test_y", False),
+        ("def test_x():\n    pass\nregister(test_x)\n", "test_x", False),
+        (MODULE + "pytest.mark.slow = pytest.mark.skip\n@pytest.mark.slow\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "def setup_module():\n    pytest.mark.slow = pytest.mark.skip\n@pytest.mark.slow\ndef test_x():\n    pass\n", "test_x", False),
+        ("import hypothesis\nhypothesis.__dict__['given'] = None\n@hypothesis.given(1)\ndef test_x(h):\n    pass\n", "test_x", False),
+        (MODULE + "def swap():\n    global pytest\n    pytest = None\n@pytest.mark.slow\ndef test_x():\n    pass\n", "test_x", False),
         ("async def test_x():\n    pass\n", "test_x", False),  # fails without an async plugin
         # Round-2 review, finding 4: shapes pytest does not collect under that name.
         ("__test__ = False\ndef test_x():\n    pass\n", "test_x", False),
@@ -574,6 +582,70 @@ def test_check_is_total_on_every_field(tmp_path):
             target[path[-1]] = new
             issues = check(ctx, value, copy.deepcopy(value), scan=False)
             assert isinstance(issues, list) and all(isinstance(issue, str) for issue in issues), (path, new)
+
+
+@pytest.mark.parametrize(
+    ("source", "name", "reasons"),
+    [
+        (MODULE + "def test_x():\n    pass\n", "test_x", []),
+        (MODULE + "@pytest.mark.slow\n@pytest.mark.parametrize('x', [1])\ndef test_x(x):\n    pass\n", "test_x", []),
+        # Marks, however applied.
+        (MODULE + "@pytest.mark.skip\ndef test_x():\n    pass\n", "test_x", ["a pytest.mark.skip mark"]),
+        (MODULE + "@pytest.mark.skipif(True, reason='r')\ndef test_x():\n    pass\n", "test_x", ["a pytest.mark.skipif mark"]),
+        (MODULE + "@pytest.mark.xfail\ndef test_x():\n    pass\n", "test_x", ["a pytest.mark.xfail mark"]),
+        (MODULE + "pytestmark = [pytest.mark.slow, pytest.mark.skip]\ndef test_x():\n    pass\n", "test_x", ["a pytest.mark.skip mark"]),
+        (MODULE + "class TestK:\n    pytestmark = [pytest.mark.xfail]\n    def test_x(self):\n        pass\n", "TestK::test_x", ["a pytest.mark.xfail mark"]),
+        (MODULE + "@pytest.mark.skip\nclass TestK:\n    def test_x(self):\n        pass\n", "TestK::test_x", ["a pytest.mark.skip mark"]),
+        (MODULE + "def test_x():\n    pass\npytest.mark.skip(test_x)\n", "test_x", ["a pytest.mark.skip mark"]),
+        (MODULE + "class TestA:\n    def test_x(self):\n        pass\npytest.mark.xfail(TestA)\n", "TestA::test_x", ["a pytest.mark.xfail mark"]),
+        # Parameter sets.
+        (MODULE + "@pytest.mark.parametrize('x', [])\ndef test_x(x):\n    pass\n", "test_x", ["an empty parameter set"]),
+        (MODULE + "CASES = []\n@pytest.mark.parametrize('x', CASES)\ndef test_x(x):\n    pass\n", "test_x", ["an empty parameter set"]),
+        (MODULE + "@pytest.mark.parametrize('x', range(0))\ndef test_x(x):\n    pass\n", "test_x", ["an empty parameter set"]),
+        (MODULE + "@pytest.mark.parametrize('x', [c for c in ()])\ndef test_x(x):\n    pass\n", "test_x", ["an empty parameter set"]),
+        (MODULE + "CASES = [pytest.param(1, marks=pytest.mark.skip)]\n@pytest.mark.parametrize('x', CASES)\ndef test_x(x):\n    pass\n", "test_x", ["a skip or xfail mark on every case"]),
+        (MODULE + "from hypothesis import Phase, given, settings, strategies as st\n@settings(phases=[Phase.explicit])\n@given(st.integers())\ndef test_x(h):\n    pass\n", "test_x", ["Hypothesis settings that set phases"]),
+        (MODULE + "@pytest.mark.parametrize('x', [pytest.param(1, marks=pytest.mark.skip)])\ndef test_x(x):\n    pass\n", "test_x", ["a skip or xfail mark on every case"]),
+        # Round-3 review, finding 1: skips the file shows outside the marks.
+        (MODULE + "def test_x():\n    pytest.skip('no data')\n", "test_x", ["pytest.skip in its body"]),
+        (MODULE + "import os\ndef test_x():\n    if not os.environ.get('DATA'):\n        pytest.skip('no data')\n", "test_x", ["pytest.skip in its body"]),
+        (MODULE + "def test_x():\n    pytest.importorskip('no_such_module_xyz')\n", "test_x", ["pytest.importorskip in its body"]),
+        (MODULE + "@pytest.fixture\ndef skipper():\n    pytest.skip('no data')\ndef test_x(skipper):\n    pass\n", "test_x", ["pytest.skip in fixture skipper"]),
+        (MODULE + "@pytest.fixture\ndef skipper():\n    pytest.skip('no data')\n@pytest.fixture\ndef data(skipper):\n    return 1\ndef test_x(data):\n    pass\n", "test_x", ["pytest.skip in fixture skipper"]),
+        (MODULE + "@pytest.fixture(name='staged')\ndef _staged():\n    pytest.skip('no data')\ndef test_x(staged):\n    pass\n", "test_x", ["pytest.skip in fixture staged"]),
+        (MODULE + "@pytest.fixture\ndef skipper():\n    pytest.skip('no data')\n@pytest.mark.usefixtures('skipper')\ndef test_x():\n    pass\n", "test_x", ["pytest.skip in fixture skipper"]),
+        (MODULE + "@pytest.fixture(autouse=True)\ndef skipper():\n    pytest.skip('no data')\ndef test_x():\n    pass\n", "test_x", ["pytest.skip in fixture skipper"]),
+        (MODULE + "def setup_module():\n    pytest.skip('no data')\ndef test_x():\n    pass\n", "test_x", ["pytest.skip in setup_module"]),
+        (MODULE + "def _published_case():\n    return _load()\ndef _load():\n    pytest.skip('evidence absent')\ndef test_x():\n    _published_case()\n", "test_x", ["pytest.skip in _load, which it calls"]),
+        (MODULE + "def _helper():\n    return 1\ndef test_x():\n    assert _helper() == 1\n", "test_x", []),
+        (MODULE + "class TestK:\n    def setup_method(self):\n        pytest.xfail('later')\n    def test_x(self):\n        pass\n", "TestK::test_x", ["pytest.xfail in setup_method"]),
+        (MODULE + "from hypothesis import given, settings, strategies as st\n@settings(phases=())\n@given(st.integers())\ndef test_x(h):\n    pass\n", "test_x", ["Hypothesis settings that set phases"]),
+        (MODULE + "from hypothesis import settings\nsettings.register_profile('none', max_examples=0)\nsettings.load_profile('none')\ndef test_x():\n    pass\n", "test_x", ["a Hypothesis profile loaded at import"]),
+        # A refused reference has no warnings: it fails instead.
+        (MODULE + "def helper():\n    pytest.skip('x')\n", "helper", []),
+    ],
+)
+def test_python_test_warnings(source, name, reasons):
+    assert sc.python_test_warnings(source, name) == reasons
+    if reasons:
+        assert sc.python_test_exists(source, name)
+
+
+def test_check_warns_on_pins_that_may_not_run(tmp_path, capsys):
+    ctx = make_repo(tmp_path)
+    (ctx.root / "tests" / "test_staged.py").write_text("import pytest\ndef test_needs_data():\n    pytest.skip('no data')\n")
+    value = entry()
+    del value["implementations"]
+    value["tests"] = [{"path": "tests/test_staged.py", "name": "test_needs_data", "pins": ["reading"]}]
+    payload = {"version": 1, "entries": [value]}
+    assert sc.check_register(payload, ctx, scan_modules=False) == []  # a warning, not an issue
+    assert sc.test_pin_warnings(payload, ctx.root) == [
+        "entries[0].tests[0] tests/test_staged.py::test_needs_data may not run: pytest.skip in its body."
+    ]
+    (ctx.root / sc.REGISTER_FILENAME).write_text(yaml.safe_dump(payload, sort_keys=False))
+    capsys.readouterr()
+    assert sc.main(["check", "--root", str(ctx.root)]) == 0
+    assert "warning: entries[0].tests[0] tests/test_staged.py::test_needs_data may not run" in capsys.readouterr().out
 
 
 def test_python_test_file_conventions():
@@ -862,7 +934,7 @@ def test_verify_findings():
     assert any("not verbatim at us/statute/42/403/a/5" in issue for issue in issues)
     assert any("not verbatim in tests/data/poms_rs_00630_400.html" in issue for issue in issues)
     assert any("cites_entry is true but the file does not contain" in issue for issue in issues)
-    assert any("test_missing is not a test pytest collects and runs" in issue for issue in issues)
+    assert any("test_missing is not a test pytest collects from" in issue for issue in issues)
 
 
 def test_verify_reads_a_test_file_by_its_coding_cookie():
@@ -878,6 +950,23 @@ def test_verify_reads_a_test_file_by_its_coding_cookie():
     issues, report = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get)
     assert issues == []
     assert report[0].endswith("2 tests")
+
+
+def test_verify_lists_external_tests_that_may_not_run():
+    payload, net, corpus = verified_inputs()
+    net.files[("PolicyEngine/microcosm-dynamics", COMMIT, "tests/test_g.py")] = (
+        b"import pytest\n"
+        b"def test__given_operational__then_pays():\n    pytest.importorskip('engine')\n"
+        b"class TestLiteral:\n"
+        b"    def test_refuses(self):\n        pass\n"
+    )
+    issues, report = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get)
+    assert issues == []
+    assert [line for line in report if line.startswith("may not run:")] == [
+        "may not run: us:family-maximum-saving-clause (entries[0]).tests[0] PolicyEngine/microcosm-dynamics@"
+        + COMMIT[:12]
+        + ":tests/test_g.py::test__given_operational__then_pays: pytest.importorskip in its body"
+    ]
 
 
 def test_verify_sha_mismatch_unresolved_and_no_corpus():
