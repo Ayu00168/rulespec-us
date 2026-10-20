@@ -28,6 +28,43 @@ downloaded artifact was built by this workflow from this repo:
 gh attestation verify manifest.json --repo TheAxiomFoundation/rulespec-us
 ```
 
+## Test references
+
+A test pins a reading only if it runs. The check reads the test file alone, so
+it accepts one narrow shape and refuses everything else:
+
+- a `test_*.py` file, and a `test_*` function at module level or in a `Test*`
+  class at module level. These are the names every common pytest
+  configuration collects; the repository's `python_files`, `python_functions`
+  and `python_classes` settings are not read;
+- a plain `def`: not `async` (it fails without a plugin) and not a generator;
+- the final binding of its name: nothing later in the file rebinds, deletes,
+  or sets attributes on the function or its class;
+- decorators only from pytest marks other than `skip`, `skipif` and `xfail`,
+  Hypothesis (`given`, `settings`, `example`, `seed`) and
+  `unittest.mock.patch`. A fixture, `property`, `staticmethod`, `dataclass` or
+  any other wrapper is refused, because it can stop pytest collecting the
+  function. A `parametrize` whose case list is empty, or whose every case
+  carries marks, is refused;
+- a class with no bases other than `object`, no metaclass, no `__init__`,
+  `__new__` or `__test__`, and only pytest marks as decorators;
+- a module with no `__test__`, no `pytestmark` other than a list of marks
+  that run, no `pytest.skip`/`importorskip`/`xfail`/`fail`/`exit` call or
+  `raise` outside `if __name__ == "__main__":`, and no generator test anywhere
+  (pytest 9 rejects the whole module).
+
+A parametrized case (`test_x[case-1]`) cannot be pinned. pytest builds case
+ids from more than the file shows (fixture `params`, `pytestmark`,
+`pytest_generate_tests`, base classes, conftest hooks) and its escaping rules
+change between versions. Pin the whole function; it runs every case.
+
+What the file cannot show is not checked: import errors, conftest hooks,
+plugins, ini options, and other tests in the module that fail to collect. Each
+of these makes the owning repository's own test run fail loudly, while every
+shape above would let a pinned test stop running silently.
+`test_resolver_accepts_exactly_what_pytest_runs` checks these rules in both
+directions against pytest runs of generated modules.
+
 Run locally:
 
 ```bash
@@ -125,7 +162,7 @@ Register-only fields:
 | `adopted_by` | RuleSpec modules in this repository that carry the entry, as `module` (path) and `interpretation` (id) pairs. |
 | `implementations` | Code outside RuleSpec that takes a reading: `repo`, `commit`, `path`, `follows` (what the code does today) and `cites_entry`, which says whether the file contains the global id. A consumer may adopt a reading other than the entry's: `adopts` (default `reading`) names the reading it intends, `basis` says why, and an optional `ruling` (`by`, `date`, public `record`) is the consumer's own ruling. PolicyEngine-US follows the statute where the entry adopts an agency's practice. An implementation lags when `follows` differs from `adopts`. |
 | `proposed` | Changes not yet merged that would implement a reading: `repo`, `pr` (the pull request URL), `path` and `follows`. Verify lists them but never counts them as implementations; move one to `implementations` once it merges, pinned to the commit on the default branch. |
-| `tests` | Tests that pin readings: `path`, `name` and `pins`, a list of reading references. Here, `name` is a function (or `Class::function`, optionally with `[param]`) in a `.py` file, or a case name in a companion `.test.yaml`. A test in another repository adds `repo` and `commit`. It may also be a YAML test file (`.yaml`) whose `name` is the case's name, on one line, such as a PolicyEngine-US policy test. Verify checks that the case still exists at that commit. A Python test must be something pytest collects: a `test_*.py` or `*_test.py` file, a module-level `test*` function or a method of a `Test*` class without `__init__`; a `[param]` must be one of the ids its `@pytest.mark.parametrize` decorators produce, read from the decorators themselves (ids pytest would decide at run time are refused). Another repository's YAML test file must sit under a `tests` directory. |
+| `tests` | Tests that pin readings: `path`, `name` and `pins`, a list of reading references. Here, `name` is a test function (or `Class::function`) in a `.py` file, or a case name in a companion `.test.yaml`. A test in another repository adds `repo` and `commit`. It may also be a YAML test file (`.yaml`) whose `name` is the case's name, on one line, such as a PolicyEngine-US policy test. Verify checks that the case still exists at that commit. A Python test must be a whole test function that pytest collects and runs; see [Test references](#test-references). Another repository's YAML test file must sit under a `tests` directory. |
 | `money_case` | An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency` and `period` (once, week, month or year). |
 
 Source kinds are `statute`, `regulation`, `rulemaking`, `form`,
@@ -168,7 +205,8 @@ of these:
 - a hygiene hit;
 - an adopting module that is missing, or that does not carry the entry's
   interpretation core unchanged, or whose `affects` name no rule in the module;
-- an in-repo test that does not exist, or names something pytest would not collect (production code cannot pin a reading);
+- an in-repo test that does not exist, or is not a test pytest collects and runs
+  (see [Test references](#test-references));
 - a followed reading that no test pins, or a module adopter whose `reading`
   no test pins;
 - a ruled, confirmed or contradicted module interpretation whose texts cite
@@ -187,7 +225,7 @@ to main, daily and on dispatch. It checks:
   from `.axiom/toolchain.toml`;
 - every `pending_texts` excerpt is verbatim in its snapshot, whose sha256 must
   match;
-- external implementations, tests and snapshots are pinned to commits reachable from their repository's default branch (a squash-merged pull request's own commits are not), and they exist there;
+- external implementations, tests and snapshots are pinned to commits reachable from their repository's default branch (a squash-merged pull request's own commits are not), and they exist there; an external Python test must be a test pytest collects and runs there, by the same rules;
 - each `cites_entry` claim matches its file.
 
 Both excerpt checks use axiom-encode's own resolver and proof-atom matcher at
@@ -199,9 +237,10 @@ Both excerpt checks use axiom-encode's own resolver and proof-atom matcher at
 The workflow is not a required check; a red scheduled or main run opens an
 alarm issue. `tests/test_source_conflicts_properties.py` (Hypothesis) states
 the tool's invariants, including a differential test against axiom-encode's
-`_validate_module_interpretations`. That test runs once the pinned encoder
+`_validate_module_interpretations`, which runs once the pinned encoder
 accepts module interpretations with alternative ids (encode#1835,
-engine#247).
+engine#247), and a two-way differential of the test-reference rules against
+what pytest actually runs.
 
 Run locally:
 
