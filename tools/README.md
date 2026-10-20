@@ -125,7 +125,7 @@ Register-only fields:
 | `adopted_by` | RuleSpec modules in this repository that carry the entry, as `module` (path) and `interpretation` (id) pairs. |
 | `implementations` | Code outside RuleSpec that takes a reading: `repo`, `commit`, `path`, `follows` (what the code does today) and `cites_entry`, which says whether the file contains the global id. A consumer may adopt a reading other than the entry's: `adopts` (default `reading`) names the reading it intends, `basis` says why, and an optional `ruling` (`by`, `date`, public `record`) is the consumer's own ruling. PolicyEngine-US follows the statute where the entry adopts an agency's practice. An implementation lags when `follows` differs from `adopts`. |
 | `proposed` | Changes not yet merged that would implement a reading: `repo`, `pr` (the pull request URL), `path` and `follows`. Verify lists them but never counts them as implementations; move one to `implementations` once it merges, pinned to the commit on the default branch. |
-| `tests` | Tests that pin readings: `path`, `name` and `pins`, a list of reading references. Here, `name` is a test function (or `Class::function`) in a `.py` file, or a case name in a companion `.test.yaml`. A test in another repository adds `repo` and `commit`. It may also be a YAML test file (`.yaml`) whose `name` is the case's name, on one line, such as a PolicyEngine-US policy test. Verify checks that the case still exists at that commit. A Python test must be a whole test function that pytest collects and runs; see [Test references](#test-references). Another repository's YAML test file must sit under a `tests` directory. |
+| `tests` | Tests that pin readings: `path`, `name` and `pins`, a list of reading references. Here, `name` is a test function (or `Class::function`) in a `.py` file, or a case name in a companion `.test.yaml`. A test in another repository adds `repo` and `commit`. It may also be a YAML test file (`.yaml`) whose `name` is the case's name, on one line, such as a PolicyEngine-US policy test. Verify checks that the case still exists at that commit. A Python test must be a whole test function that pytest's default collection picks up from the file; whether it runs is the owning repository's CI's business. See [Test references](#test-references). Another repository's YAML test file must sit under a `tests` directory. |
 | `money_case` | An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency` and `period` (once, week, month or year). |
 
 Source kinds are `statute`, `regulation`, `rulemaking`, `form`,
@@ -168,8 +168,10 @@ of these:
 - a hygiene hit;
 - an adopting module that is missing, or that does not carry the entry's
   interpretation core unchanged, or whose `affects` name no rule in the module;
-- an in-repo test that does not exist, or is not a test pytest collects and runs
-  (see [Test references](#test-references));
+- an in-repo test that does not exist, or is not a test pytest collects
+  (see [Test references](#test-references)). A pinned test that the file
+  shows may not run (a skip, xfail, empty parameter set or Hypothesis phases)
+  is a warning, not a failure;
 - a followed reading that no test pins, or a module adopter whose `reading`
   no test pins;
 - a ruled, confirmed or contradicted module interpretation whose texts cite
@@ -188,14 +190,15 @@ to main, daily and on dispatch. It checks:
   from `.axiom/toolchain.toml`;
 - every `pending_texts` excerpt is verbatim in its snapshot, whose sha256 must
   match;
-- external implementations, tests and snapshots are pinned to commits reachable from their repository's default branch (a squash-merged pull request's own commits are not), and they exist there; an external Python test must be a test pytest collects and runs there, by the same rules;
+- external implementations, tests and snapshots are pinned to commits reachable from their repository's default branch (a squash-merged pull request's own commits are not), and they exist there; an external Python test must be a test pytest collects there, by the same rules, and the report lists external tests the file shows may not run;
 - each `cites_entry` claim matches its file.
 
 Both excerpt checks use axiom-encode's own resolver and proof-atom matcher at
 `axiom_encode_ref`. The verify report lists:
 - implementations that do not cite their entry yet;
 - implementations that lag (they follow a reading other than the one they adopt);
-- unpublished sources, which it cannot check.
+- unpublished sources, which it cannot check;
+- external tests the file shows may not run.
 
 The workflow is not a required check; a red scheduled or main run opens an
 alarm issue. `tests/test_source_conflicts_properties.py` (Hypothesis) states
@@ -203,7 +206,10 @@ the tool's invariants, including a differential test against axiom-encode's
 `_validate_module_interpretations`, which runs once the pinned encoder
 accepts module interpretations with alternative ids (encode#1835,
 engine#247), and a two-way differential of the test-reference rules against
-what pytest actually runs.
+what pytest collects. The `source-conflicts` workflow is the gate for these
+properties: it installs Hypothesis and the pinned pytest. Repository Checks'
+shared workflow runs the suite without Hypothesis, so the properties skip
+there.
 
 Run locally:
 
@@ -216,37 +222,60 @@ python tools/source_conflicts.py aggregate --markdown /tmp/conflicts.md
 
 ## Test references
 
-A test pins a reading only if it runs. The check reads the test file alone, so
-it accepts one narrow shape and refuses everything else:
+The check proves one thing about a pinned Python test: pytest's default
+collection picks it up from the test file alone, at the pinned commit. Whether
+the test then runs and passes belongs to the owning repository's CI. The check
+reads only that file, so it accepts one narrow shape and refuses everything
+else:
 
 - a `test_*.py` file, and a `test_*` function at module level or in a `Test*`
   class at module level. These are the names every common pytest
   configuration collects; the repository's `python_files`, `python_functions`
   and `python_classes` settings are not read;
 - a plain `def`: not `async` (it fails without a plugin) and not a generator;
-- the final binding of its name: nothing later in the file rebinds, deletes,
-  or sets attributes on the function or its class;
-- decorators only from pytest marks other than `skip`, `skipif` and `xfail`,
-  Hypothesis (`given`, `settings`, `example`, `seed`) and
-  `unittest.mock.patch`. A fixture, `property`, `staticmethod`, `dataclass` or
-  any other wrapper is refused, because it can stop pytest collecting the
-  function. A `parametrize` whose case list is empty, or whose every case
-  carries marks, is refused;
+- the final binding of its name: nothing later in the file rebinds, deletes
+  or sets attributes on the function or its class, or passes it to a call
+  other than a pytest mark;
+- decorators only from pytest marks, Hypothesis (`given`, `settings`,
+  `example`, `seed`) and `unittest.mock.patch`, through imports bound nowhere
+  else (no `global`, no store under the name such as `pytest.mark.slow =
+  ...`). A fixture, `property`, `staticmethod`, `dataclass` or any other
+  wrapper is refused, because it can stop pytest collecting the function;
 - a class with no bases other than `object`, no metaclass, no `__init__`,
   `__new__` or `__test__`, and only pytest marks as decorators;
-- a module with no `__test__`, no `pytestmark` other than a list of marks
-  that run, no `pytest.skip`/`importorskip`/`xfail`/`fail`/`exit` call or
-  `raise` outside `if __name__ == "__main__":`, and no generator test anywhere
-  (pytest 9 rejects the whole module).
+- a module with no `__test__`, no `pytestmark` other than marks, no
+  `pytest.skip`/`importorskip`/`xfail`/`fail`/`exit` call, `raise`, `exec`,
+  `eval`, `globals()`, `vars()` or `sys.modules` at module level outside
+  `if __name__ == "__main__":`, and no generator test anywhere (pytest 9
+  rejects the whole module).
 
 A parametrized case (`test_x[case-1]`) cannot be pinned. pytest builds case
 ids from more than the file shows (fixture `params`, `pytestmark`,
 `pytest_generate_tests`, base classes, conftest hooks) and its escaping rules
-change between versions. Pin the whole function; it runs every case.
+change between versions. Pin the whole function.
 
-What the file cannot show is not checked: import errors, conftest hooks,
-plugins, ini options, and other tests in the module that fail to collect. Each
-of these makes the owning repository's own test run fail loudly, while every
-shape above would let a pinned test stop running silently.
-`test_resolver_accepts_exactly_what_pytest_runs` checks these rules in both
-directions against pytest runs of generated modules.
+**A collected test can still not run, and nothing fails.** `check` (for tests
+here) and `verify` (for tests elsewhere) warn when the file shows one of
+these: a `pytest.skip`, `importorskip` or `xfail` call in the test, in a
+same-file fixture it reaches (by argument, `usefixtures` or `autouse`), in
+`setup_module`, `setup_function`, `setup_class` or `setup_method`, or in a
+same-file module-level function any of those call; a `skip`,
+`skipif` or `xfail` mark, however applied; an empty parameter set, or one
+whose every case carries such a mark; Hypothesis `settings` that set `phases`
+or `max_examples=0`, or a profile loaded at import. These are warnings, not
+failures: a data-gated test that skips locally can run in its repository's
+CI.
+
+The register does not check, and cannot see:
+- conftest fixtures and hooks (`pytest_collection_modifyitems`,
+  `pytest_runtest_setup`, `collect_ignore`, `pytest_ignore_collect`);
+- plugins;
+- ini or `addopts` selection (`-m`, `-k`, `--deselect`, `--ignore`,
+  `testpaths`, `norecursedirs`, `empty_parameter_set_mark`);
+- runtime rebinding the file doesn't show plainly.
+
+Any of these can stop a pinned test running while every run exits 0. Import
+errors and modules that fail to collect do fail loudly.
+`test_resolver_accepts_exactly_what_pytest_collects` checks the rules in both
+directions against pytest on generated modules, and checks that an accepted
+test that is collected but doesn't run always carries a warning.
