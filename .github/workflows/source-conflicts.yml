@@ -133,7 +133,8 @@ jobs:
       - name: Install axiom-encode
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pyyaml hypothesis
+          # The test-reference rules and the property tests are checked against these.
+          python -m pip install pytest==9.1.1 pyyaml==6.0.3 hypothesis==6.170.5
           python -m pip install -e axiom-encode
 
       - name: Place provisions that live outside git

@@ -116,7 +116,7 @@ def entry(**overrides):
                 "repo": "PolicyEngine/microcosm-dynamics",
                 "commit": COMMIT,
                 "path": "tests/test_g.py",
-                "name": "TestLiteral::test_refuses[child-ages-out]",
+                "name": "TestLiteral::test_refuses",
                 "pins": ["alternatives[0]"],
             },
         ],
@@ -399,7 +399,7 @@ def test_in_repo_tests_must_exist(tmp_path):
     bad["tests"][0]["name"] = "missing_case"
     bad["tests"][1]["path"] = "tests/test_absent.py"
     issues = check(ctx, bad)
-    assert any("missing_case is not a test pytest collects" in issue for issue in issues)
+    assert any("missing_case is not a test case in us/statutes/42/403/a/5.test.yaml" in issue for issue in issues)
     assert any("tests/test_absent.py does not exist" in issue for issue in issues)
     local_commit = copy.deepcopy(good)
     local_commit["tests"][0]["commit"] = COMMIT
@@ -415,92 +415,178 @@ def test_production_code_cannot_pin_a_reading(tmp_path):
     del value["implementations"]
     value["tests"] = [{"path": "tools/source_conflicts.py", "name": "global_id", "pins": ["reading"]}]
     issues = check(ctx, value)
-    assert any("is not a test file pytest collects" in issue for issue in issues), issues
+    assert any("is not a test file (test_*.py)" in issue for issue in issues), issues
     # A helper inside a test file is not a test either.
     (ctx.root / "tests" / "test_helpers.py").write_text("def global_id(entry):\n    return entry\n")
     value["tests"] = [{"path": "tests/test_helpers.py", "name": "global_id", "pins": ["reading"]}]
     assert any("global_id is not a test pytest collects" in issue for issue in check(ctx, value))
 
 
-def test_a_parameter_id_must_come_from_parametrize(tmp_path):
-    # Review of #1710: an id that appeared only in a comment satisfied the gate.
+def test_a_parametrized_case_cannot_be_pinned(tmp_path):
+    # Reviews of #1710: ids from a comment, unescaped explicit ids, pytest.param
+    # precedence and empty ids in a stack all satisfied the gate. pytest builds
+    # case ids from more than the file shows, so a pin names the whole test.
     ctx = make_repo(tmp_path)
     (ctx.root / "tests" / "test_params.py").write_text(
         "import pytest\n"
-        "# ids: invented-case\n"
-        "@pytest.mark.parametrize('case', ['real-case'])\n"
+        "@pytest.mark.parametrize('case', ['real-case', 'café'])\n"
         "def test_case(case):\n    pass\n"
-        "def test_plain():\n    pass  # [also-invented]\n"
     )
     value = entry()
     del value["implementations"]
-    for name, ok in (
-        ("test_case[real-case]", True),
-        ("test_case", True),
-        ("test_case[invented-case]", False),
-        ("test_plain[also-invented]", False),
-    ):
+    for name, ok in (("test_case", True), ("test_case[real-case]", False), ("test_case[caf\\xe9]", False)):
         value["tests"] = [{"path": "tests/test_params.py", "name": name, "pins": ["reading"]}]
-        assert (check(ctx, value) == []) == ok, name
+        issues = check(ctx, value)
+        assert (issues == []) == ok, (name, issues)
+        if not ok:
+            assert any("names a parametrized case; pin the whole test function" in issue for issue in issues)
+
+
+def test_a_non_utf8_test_file_is_read_by_its_coding_cookie(tmp_path):
+    # Review of #1710 round 2: a latin-1 test file made check raise.
+    ctx = make_repo(tmp_path)
+    (ctx.root / "tests" / "test_latin.py").write_bytes(
+        b"# -*- coding: latin-1 -*-\nimport pytest\n@pytest.mark.parametrize('x', ['\xe9'])\ndef test_l1(x):\n    pass\n"
+    )
+    (ctx.root / "us" / "statutes" / "42" / "403" / "a" / "5.test.yaml").write_bytes(b"- name: caf\xe9\n")
+    value = entry()
+    del value["implementations"]
+    value["tests"] = [{"path": "tests/test_latin.py", "name": "test_l1", "pins": ["reading"]}]
+    assert check(ctx, value) == []
+    value["tests"] = [{"path": "us/statutes/42/403/a/5.test.yaml", "name": "case", "pins": ["reading"]}]
+    assert any("case is not a test case in" in issue for issue in check(ctx, value))
+
+
+MODULE = "import pytest\n"
+HYPOTHESIS = "from hypothesis import given, settings\nimport hypothesis.strategies as st\n"
 
 
 @pytest.mark.parametrize(
     ("source", "name", "expected"),
     [
+        # Accepted: plain tests, Test* methods, and decorators that keep the test collected and run.
         ("def test_a():\n    pass\n", "test_a", True),
-        ("def helper():\n    pass\n", "helper", False),
         ("class TestC:\n    def test_d(self):\n        pass\n", "TestC::test_d", True),
+        ("class TestC(object):\n    def test_d(self):\n        pass\n", "TestC::test_d", True),
+        (MODULE + "@pytest.mark.parametrize('x', [1, 2])\ndef test_x(x):\n    pass\n", "test_x", True),
+        (MODULE + "CASES = [1]\n@pytest.mark.parametrize('x', CASES)\ndef test_x(x):\n    pass\n", "test_x", True),
+        (MODULE + "@pytest.mark.slow\n@pytest.mark.usefixtures('tmp_path')\ndef test_x():\n    pass\n", "test_x", True),
+        (MODULE + "pytestmark = [pytest.mark.slow]\nclass TestK:\n    pytestmark = pytest.mark.slow\n    def test_x(self):\n        pass\n", "TestK::test_x", True),
+        ("import pytest as pt\n@pt.mark.parametrize('x', [1])\ndef test_x(x):\n    pass\n", "test_x", True),
+        (HYPOTHESIS + "@given(st.integers())\n@settings(max_examples=5)\ndef test_h(x):\n    pass\n", "test_h", True),
+        ("from unittest import mock\n@mock.patch('os.getcwd')\ndef test_m(m):\n    pass\n", "test_m", True),
+        # pytest collects a test whose cases come from a fixture's params, pytestmark or a hook.
+        (MODULE + "@pytest.fixture(params=[10, 20])\ndef level(request):\n    return request.param\ndef test_fx(level):\n    pass\n", "test_fx", True),
+        (MODULE + "def pytest_generate_tests(metafunc):\n    metafunc.parametrize('g', ['u'])\ndef test_gt(g):\n    pass\n", "test_gt", True),
+        (MODULE + "def test_a():\n    pass\nif __name__ == '__main__':\n    raise SystemExit(pytest.main([__file__]))\n", "test_a", True),
+        # Not tests: helpers, Test* names pytest skips, and fixtures.
+        ("def helper():\n    pass\n", "helper", False),
+        ("def testfoo():\n    pass\n", "testfoo", False),  # some configs collect only test_*
         ("class Helper:\n    def test_d(self):\n        pass\n", "Helper::test_d", False),
-        ("class TestC:\n    def __init__(self):\n        pass\n    def test_d(self):\n        pass\n", "TestC::test_d", False),
-        ("import pytest\n@pytest.mark.parametrize('x', [1, -2, 2.5, True, None, 'a b'])\ndef test_x(x):\n    pass\n", "test_x[-2]", True),
-        ("import pytest\n@pytest.mark.parametrize('x', [1, -2, 2.5, True, None, 'a b'])\ndef test_x(x):\n    pass\n", "test_x[2.5]", True),
-        ("import pytest\n@pytest.mark.parametrize('x', [1, -2, 2.5, True, None, 'a b'])\ndef test_x(x):\n    pass\n", "test_x[None]", True),
-        ("import pytest\n@pytest.mark.parametrize('x', [1, -2, 2.5, True, None, 'a b'])\ndef test_x(x):\n    pass\n", "test_x[a b]", True),
-        ("import pytest\n@pytest.mark.parametrize('x,y', [(1, 'p'), (2, 'q')])\ndef test_xy(x, y):\n    pass\n", "test_xy[2-q]", True),
-        ("import pytest\n@pytest.mark.parametrize(('x', 'y'), [[1, {}]])\ndef test_xy(x, y):\n    pass\n", "test_xy[1-y0]", True),
-        ("import pytest\n@pytest.mark.parametrize('x', [1, 2], ids=['one', 'two'])\ndef test_x(x):\n    pass\n", "test_x[two]", True),
-        ("import pytest\n@pytest.mark.parametrize('x', [1, 2], ids=['one', 'two'])\ndef test_x(x):\n    pass\n", "test_x[1]", False),
-        ("import pytest\n@pytest.mark.parametrize('x', [pytest.param(1, id='solo'), pytest.param(2)])\ndef test_x(x):\n    pass\n", "test_x[solo]", True),
-        ("import pytest\n@pytest.mark.parametrize('x', [pytest.param(1, id='solo'), pytest.param(2)])\ndef test_x(x):\n    pass\n", "test_x[2]", True),
-        # Stacked: the decorator nearest the function leads the id.
-        ("import pytest\n@pytest.mark.parametrize('x', [0, 1])\n@pytest.mark.parametrize('y', [2, 3])\ndef test_xy(x, y):\n    pass\n", "test_xy[2-0]", True),
-        ("import pytest\n@pytest.mark.parametrize('x', [0, 1])\n@pytest.mark.parametrize('y', [2, 3])\ndef test_xy(x, y):\n    pass\n", "test_xy[0-2]", False),
-        # Ids pytest decides at run time, or would rename, are refused.
-        ("import pytest\nCASES = [1, 2]\n@pytest.mark.parametrize('x', CASES)\ndef test_x(x):\n    pass\n", "test_x[1]", False),
-        ("import pytest\n@pytest.mark.parametrize('x', [1, 2], ids=str)\ndef test_x(x):\n    pass\n", "test_x[1]", False),
-        ("import pytest\n@pytest.mark.parametrize('x', [1, 1])\ndef test_x(x):\n    pass\n", "test_x[1]", False),
-        ("import pytest\n@pytest.mark.parametrize('x', [1])\nclass TestK:\n    def test_x(self, x):\n        pass\n", "TestK::test_x[1]", False),
-        # Checked against pytest 9.1.1 --collect-only: bytes and str escaping.
-        ("import pytest\n@pytest.mark.parametrize('x', [b'ab', 'a\\nb', 'é'])\ndef test_x(x):\n    pass\n", "test_x[ab]", True),
-        ("import pytest\n@pytest.mark.parametrize('x', [b'ab', 'a\\nb', 'é'])\ndef test_x(x):\n    pass\n", "test_x[a\\nb]", True),
-        ("import pytest\n@pytest.mark.parametrize('x', [b'ab', 'a\\nb', 'é'])\ndef test_x(x):\n    pass\n", "test_x[\\xe9]", True),
-        ("import pytest\n@pytest.mark.parametrize('x', [b'ab'])\ndef test_x(x):\n    pass\n", "test_x[x0]", False),
-        # A name or call: pytest's id depends on the runtime value (Color.RED, helper, int), so refuse.
-        ("import pytest\nimport enum\nclass Color(enum.Enum):\n    RED = 1\n@pytest.mark.parametrize('x', [Color.RED])\ndef test_x(x):\n    pass\n", "test_x[x0]", False),
-        ("import pytest\nimport enum\nclass Color(enum.Enum):\n    RED = 1\n@pytest.mark.parametrize('x', [Color.RED])\ndef test_x(x):\n    pass\n", "test_x[Color.RED]", False),
-        ("import pytest\n@pytest.mark.parametrize('x', [int])\ndef test_x(x):\n    pass\n", "test_x[int]", False),
-        # One name in a tuple, or with a trailing comma, unpacks each value.
-        ("import pytest\n@pytest.mark.parametrize(('x',), [(5,), (6,)])\ndef test_x(x):\n    pass\n", "test_x[5]", True),
-        ("import pytest\n@pytest.mark.parametrize('x,', [(5,), (6,)])\ndef test_x(x):\n    pass\n", "test_x[6]", True),
-        ("import pytest\n@pytest.mark.parametrize('x', [(5,), (6,)])\ndef test_x(x):\n    pass\n", "test_x[x1]", True),
-        ("import pytest\n@pytest.mark.parametrize('x', [])\ndef test_x(x):\n    pass\n", "test_x[NOTSET]", False),
+        ("class TestC:\n    def test_d(self):\n        pass\n", "test_d", False),
+        ("class TestC:\n    def test_d(self):\n        pass\n", "TestC::test_e", False),
+        (MODULE + "@pytest.fixture\ndef test_client():\n    return 1\ndef test_uses(test_client):\n    pass\n", "test_client", False),
+        (MODULE + "@pytest.fixture()\ndef test_client():\n    return 1\n", "test_client", False),
+        ("from pytest import fixture\n@fixture\ndef test_client():\n    return 1\n", "test_client", False),
+        # Skipped or expected to fail: a test that does not run pins nothing.
+        (MODULE + "@pytest.mark.skip\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "@pytest.mark.skip(reason='later')\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "@pytest.mark.skipif(True, reason='r')\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "@pytest.mark.xfail\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "@pytest.mark.parametrize('x', [])\ndef test_x(x):\n    pass\n", "test_x", False),
+        (MODULE + "@pytest.mark.parametrize('x', [pytest.param(1, marks=pytest.mark.skip)])\ndef test_x(x):\n    pass\n", "test_x", False),
+        (MODULE + "pytestmark = pytest.mark.skip\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "pytestmark = [pytest.mark.slow, pytest.mark.skipif(True, reason='r')]\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "SKIP = pytest.mark.skip\npytestmark = SKIP\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "class TestK:\n    pytestmark = [pytest.mark.skip]\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
+        (MODULE + "@pytest.mark.skip\nclass TestK:\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
+        (MODULE + "pytest.skip('later', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", False),
+        (MODULE + "numpy = pytest.importorskip('numpy')\ndef test_x():\n    pass\n", "test_x", False),
+        ("raise ImportError('no')\ndef test_x():\n    pass\n", "test_x", False),
+        ("async def test_x():\n    pass\n", "test_x", False),  # fails without an async plugin
+        # Round-2 review, finding 4: shapes pytest does not collect under that name.
+        ("__test__ = False\ndef test_x():\n    pass\n", "test_x", False),
+        ("class TestK:\n    __test__ = False\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
+        ("def test_x():\n    pass\ntest_x.__test__ = False\n", "test_x", False),
+        ("class TestK:\n    def test_x(self):\n        pass\nTestK.__test__ = False\n", "TestK::test_x", False),
+        ("def test_x():\n    pass\nsetattr(test_x, '__test__', False)\n", "test_x", False),
+        ("def test_x():\n    pass\ndel test_x\n", "test_x", False),
+        ("def test_x():\n    pass\ntest_x = None\n", "test_x", False),
+        ("def test_x():\n    pass\nif True:\n    test_x = None\n", "test_x", False),
+        ("def test_x():\n    pass\ndef rebind():\n    global test_x\n    test_x = None\nrebind()\n", "test_x", False),
+        ("def test_x():\n    pass\nfrom os import getcwd as test_x\n", "test_x", False),
+        ("class TestK:\n    def __new__(cls):\n        return object.__new__(cls)\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
+        ("class TestK:\n    def __init__(self):\n        pass\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
+        ("class TestK:\n    __init__ = lambda self: None\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
+        ("class Base:\n    def __init__(self):\n        pass\nclass TestK(Base):\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
+        ("import dataclasses\n@dataclasses.dataclass\nclass TestK:\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
+        ("import abc\nclass TestK(abc.ABC):\n    @abc.abstractmethod\n    def helper(self):\n        pass\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
+        ("import abc\nclass TestK(metaclass=abc.ABCMeta):\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
+        ("import unittest\nclass TestU(unittest.TestCase):\n    def test_u(self):\n        pass\n", "TestU::test_u", False),
+        ("class TestK:\n    @property\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
+        ("class TestK:\n    @staticmethod\n    def test_x():\n        pass\n", "TestK::test_x", False),
+        ("def parametrize(*a, **k):\n    return lambda f: None\n@parametrize('x', [1])\ndef test_x(x=0):\n    pass\n", "test_x", False),
+        ("def noop(f):\n    return None\n@noop\ndef test_x():\n    pass\n", "test_x", False),
+        ("def test_x():\n    pass\ndef test_gen():\n    yield 1\n", "test_x", False),  # pytest 9 fails the module
+        ("def test_x():\n    yield 1\n", "test_x", False),
+        ("if True:\n    def test_x():\n        pass\n", "test_x", False),
+        ("class TestOuter:\n    class TestInner:\n        def test_x(self):\n            pass\n", "TestInner::test_x", False),
+        ("def broken(:\n", "broken", False),
+        # A decorator counts only when its root name is an import bound nowhere else.
+        ("class pytest:\n    class mark:\n        slow = staticmethod(lambda f: None)\n@pytest.mark.slow\ndef test_x():\n    pass\n", "test_x", False),
+        ("import pytest\npytest = None\n@pytest.mark.slow\ndef test_x():\n    pass\n", "test_x", False),
+        ("@given(1)\ndef test_x():\n    pass\n", "test_x", False),
+        ("def test_x():\n    pass\n", "test_x[1]", False),
     ],
 )
 def test_python_test_resolution(source, name, expected):
     assert sc.python_test_exists(source, name) == expected
+    assert sc.python_test_exists(source.encode(), name) == expected
+
+
+def _field_paths(value, prefix=()):
+    if isinstance(value, dict):
+        items = value.items()
+    elif isinstance(value, list):
+        items = enumerate(value)
+    else:
+        return
+    for key, child in items:
+        yield prefix + (key,)
+        yield from _field_paths(child, prefix + (key,))
+
+
+def test_check_is_total_on_every_field(tmp_path):
+    # Review of #1710 round 2: the Hypothesis totality property draws any one
+    # field only a few times a run, so a crash on one field was caught in half
+    # the seeds. This replaces every field of a well-formed entry, at every
+    # depth, with each malformed shape, on every run.
+    ctx = make_repo(tmp_path)
+    base = entry()
+    paths = list(_field_paths(base))
+    assert ("jurisdiction",) in paths and ("tests", 1, "name") in paths
+    for path in paths:
+        for new in ([], {}, None, 7, -1.5, True, "", "x", [[]], {"a": []}):
+            value = copy.deepcopy(base)
+            target = value
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = new
+            issues = check(ctx, value, copy.deepcopy(value), scan=False)
+            assert isinstance(issues, list) and all(isinstance(issue, str) for issue in issues), (path, new)
 
 
 def test_python_test_file_conventions():
     for path, ok in (
         ("tests/test_a.py", True),
-        ("tests/sub/a_test.py", True),
         ("test_a.py", True),
+        ("tests/sub/a_test.py", False),  # not in every repo's python_files
         ("tools/source_conflicts.py", False),
         ("tests/helpers.py", False),
         ("tests/conftest.py", False),
     ):
         assert sc.python_test_file(path) == ok, path
-        assert sc.test_exists(path, "test_a", "def test_a():\n    pass\n") == ok, path
+        assert sc.test_exists(path, "test_a", b"def test_a():\n    pass\n") == ok, path
 
 
 def test_test_path_and_name_shapes(tmp_path):
@@ -685,13 +771,12 @@ def test_python_test_exists():
         "def test_e(x):\n    pass\n"
     )
     assert sc.python_test_exists(source, "test_a")
-    assert sc.python_test_exists(source, "test_b")
+    assert not sc.python_test_exists(source, "test_b")  # async: fails without a plugin
     assert sc.python_test_exists(source, "TestC::test_d")
-    assert sc.python_test_exists(source, "test_e[one]")
     assert sc.python_test_exists(source, "test_e")
+    assert not sc.python_test_exists(source, "test_e[one]")  # case ids are never pinned
     assert not sc.python_test_exists(source, "test_d")  # method, not module level
     assert not sc.python_test_exists(source, "TestC::test_a")
-    assert not sc.python_test_exists(source, "test_e[two]")
     assert not sc.python_test_exists("def broken(:\n", "broken")
 
 
@@ -777,7 +862,22 @@ def test_verify_findings():
     assert any("not verbatim at us/statute/42/403/a/5" in issue for issue in issues)
     assert any("not verbatim in tests/data/poms_rs_00630_400.html" in issue for issue in issues)
     assert any("cites_entry is true but the file does not contain" in issue for issue in issues)
-    assert any("test_missing is not defined" in issue for issue in issues)
+    assert any("test_missing is not a test pytest collects and runs" in issue for issue in issues)
+
+
+def test_verify_reads_a_test_file_by_its_coding_cookie():
+    # Review of #1710 round 2: a non-UTF-8 test file made the tool raise.
+    payload, net, corpus = verified_inputs()
+    net.files[("PolicyEngine/microcosm-dynamics", COMMIT, "tests/test_g.py")] = (
+        b"# -*- coding: latin-1 -*-\n"
+        b"import pytest\n"
+        b"def test__given_operational__then_pays():\n    assert '\xe9'\n"
+        b"class TestLiteral:\n"
+        b"    def test_refuses(self):\n        pass\n"
+    )
+    issues, report = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get)
+    assert issues == []
+    assert report[0].endswith("2 tests")
 
 
 def test_verify_sha_mismatch_unresolved_and_no_corpus():

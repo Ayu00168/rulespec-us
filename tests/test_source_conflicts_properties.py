@@ -31,9 +31,12 @@ Invariants, for every input:
 10. Matcher consistency (when axiom-encode is importable): every run of whole
     words taken from a snapshot's text matches it under axiom-encode's
     proof-atom matcher.
-11. Differential: for generated @pytest.mark.parametrize decorators, the
-    test-reference resolver's case ids equal the ids pytest itself collects,
-    wherever the resolver answers; it refuses (fails closed) otherwise.
+11. Differential, both directions: for generated test modules (fixtures,
+    marks, parametrize, Hypothesis, classes with and without bases or
+    constructors, `__test__`, pytestmark, module-level skips, generator and
+    async tests, rebinding), the test-reference resolver accepts a name only
+    if pytest runs a test of that name and it passes, and it accepts every
+    such name except the deliberately refused shapes in `REFUSED_BUT_RUN`.
 
 Hypothesis is not installed in the shared validate workflow's pytest leg, so
 these skip there; the source-conflicts workflow installs it and runs them.
@@ -43,7 +46,10 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
+import os
 import string
+import subprocess
 import sys
 from pathlib import Path
 
@@ -420,78 +426,166 @@ def test_word_runs_match_under_encoder_matcher(words, data):
     assert matches(text, " ".join(tokens[start:end]))
 
 
-# 11. Differential: the test-reference resolver against pytest's own collection.
-# Generated @pytest.mark.parametrize decorators (one or two stacked, names as a
-# string or a tuple, literal values of every kind pytest names) are written to
-# a file and collected by pytest in-process. Wherever the resolver answers, its
-# ids must equal pytest's exactly; where it cannot tell, it refuses.
-id_literals = st.one_of(
-    st.integers(-5, 5),
-    st.floats(allow_nan=False, allow_infinity=False, width=32),
-    st.booleans(),
-    st.none(),
-    st.text(alphabet=string.ascii_letters + " .-_\n\té", min_size=1, max_size=4),
-    st.binary(min_size=1, max_size=3),
-    st.tuples(st.integers(0, 3)),
+# 11. Differential, both directions: the test-reference resolver against
+# pytest itself. Each example writes one to three generated test modules and
+# runs pytest on them in a subprocess (Hypothesis tests inside a Hypothesis
+# test do not run in-process). A plugin records every test whose call phase
+# passed, so "pytest runs it" means collected, not skipped, not xfail and not
+# an unawaited coroutine. The resolver must accept exactly those names, apart
+# from shapes it refuses on purpose because the file alone cannot show they
+# are safe. A module that fails to collect (an error pytest reports, which
+# fails the owning repository's run) is exempt from the first direction.
+REFUSED_BUT_RUN = {
+    "testc": "collected by pytest's default python_functions, but not by repositories that set test_*",
+    "@identity": "a decorator outside the allowed list could replace the function",
+    "@pytest.mark.skipif(False, reason='r')": "skipif is refused outright: its condition is runtime",
+    "@pytest.mark.parametrize('{arg}', [pytest.param(1, marks=pytest.mark.slow)])": "marks on every case could skip them all",
+    "@staticmethod": "a decorator outside the allowed list",
+    "(Base)": "a base class can add __init__, __test__ or marks the file does not show",
+    "(unittest.TestCase)": "unittest collection follows other rules",
+    "__test__ = True": "any __test__ binding is refused",
+    "pytestmark = pytest.mark.skipif(False, reason='r')": "skipif is refused outright",
+}
+# (source, can carry other decorators). {arg} is the function's own argument name.
+FUNCTION_DECORATORS = [
+    ("@pytest.mark.slow", True),
+    ("@pytest.mark.parametrize('{arg}', [1, 2])", True),
+    ("@pytest.mark.parametrize('{arg}', [])", True),
+    ("@pytest.mark.parametrize('{arg}', [pytest.param(1, marks=pytest.mark.skip)])", True),
+    ("@pytest.mark.parametrize('{arg}', [pytest.param(1, marks=pytest.mark.slow)])", True),
+    ("@given({arg}=st.integers())", True),
+    ("@pytest.mark.skip", True),
+    ("@pytest.mark.skip(reason='r')", True),
+    ("@pytest.mark.skipif(True, reason='r')", True),
+    ("@pytest.mark.skipif(False, reason='r')", True),
+    ("@pytest.mark.xfail", True),
+    ("@identity", True),
+    ("@noop", True),
+    ("@pytest.fixture", False),  # marks on a fixture are a loud collection error
+    ("@pytest.fixture(params=[1])", False),
+]
+METHOD_ONLY = [("@staticmethod", False), ("@property", False)]
+CLASS_DECORATORS = ["", "@pytest.mark.slow", "@pytest.mark.skip", "@pytest.mark.skipif(False, reason='r')", "@dataclasses.dataclass"]
+CLASS_BASES = ["", "(object)", "(Base)", "(unittest.TestCase)"]
+SCOPE_LINES = [
+    "", "__test__ = False", "__test__ = True", "pytestmark = pytest.mark.skip", "pytestmark = [pytest.mark.slow]",
+    "pytestmark = pytest.mark.skipif(False, reason='r')",
+]
+CLASS_LINES = SCOPE_LINES + ["def __init__(self):\n        pass", "def __new__(cls):\n        return object.__new__(cls)"]
+MODULE_LINES = SCOPE_LINES + ["pytest.skip('later', allow_module_level=True)"]
+HEADER = (
+    "import dataclasses\nimport unittest\nimport pytest\nfrom hypothesis import given\nimport hypothesis.strategies as st\n\n"
+    "def identity(f):\n    return f\n\ndef noop(f):\n    return None\n\nclass Base:\n    pass\n"
 )
 
 
 @st.composite
-def parametrize_decorators(draw, argname):
-    values = draw(st.lists(id_literals, min_size=1, max_size=4))
-    explicit = draw(st.booleans())
-    ids = ""
-    if explicit:
-        labels = draw(st.lists(st.one_of(st.none(), st.from_regex(r"[a-z]{1,5}", fullmatch=True)), min_size=len(values), max_size=len(values)))
-        ids = f", ids={labels!r}"
-    shape = draw(st.sampled_from(["name", "tuple", "trailing-comma"]))
-    if shape == "tuple":
-        return f"@pytest.mark.parametrize(({argname!r},), {[ (v,) for v in values ]!r}{ids})"
-    if shape == "trailing-comma":
-        return f"@pytest.mark.parametrize({argname + ','!r}, {[ (v,) for v in values ]!r}{ids})"
-    return f"@pytest.mark.parametrize({argname!r}, {values!r}{ids})"
+def generated_defs(draw, name, method, top_level):
+    """One def and the features it uses that the resolver refuses on purpose."""
+
+    pool = FUNCTION_DECORATORS + (METHOD_ONLY if method else [])
+    chosen = draw(st.lists(st.sampled_from(range(len(pool))), max_size=2, unique=True))
+    decorators = [pool[i] for i in chosen]
+    if any(not combines for _, combines in decorators):
+        decorators = [next(d for d in decorators if not d[1])]
+    texts = [text.replace("{arg}", f"a{i}") for i, (text, _) in enumerate(decorators)]
+    texts.sort(key=lambda text: text not in {"@staticmethod", "@property"})  # outermost
+    args = [f"a{i}" for i, (text, _) in enumerate(decorators) if "{arg}" in text]
+    if method and "@staticmethod" not in texts:
+        args.insert(0, "self")
+    flavour = "plain"
+    if top_level and not texts:
+        flavour = draw(st.sampled_from(["plain", "plain", "generator", "async"]))
+    body = "    yield 1" if flavour == "generator" else "    pass"
+    prefix = "async def" if flavour == "async" else "def"
+    source = "".join(f"{text}\n" for text in texts) + f"{prefix} {name}({', '.join(args)}):\n{body}\n"
+    refused = {text for text, _ in decorators if text in REFUSED_BUT_RUN} | ({name} & REFUSED_BUT_RUN.keys())
+    return source, refused
 
 
-_COUNTER = __import__("itertools").count()
+@st.composite
+def generated_modules(draw):
+    """(source, {candidate name: refused-on-purpose features})."""
+
+    module_line = draw(st.sampled_from(MODULE_LINES))
+    parts = [HEADER, module_line + "\n" if module_line else ""]
+    candidates: dict[str, set[str]] = {}
+    module_refused = {module_line} & REFUSED_BUT_RUN.keys()
+    for name in draw(st.lists(st.sampled_from(["test_a", "test_b", "testc", "helper"]), min_size=1, max_size=3, unique=True)):
+        source, refused = draw(generated_defs(name, method=False, top_level=True))
+        parts.append(source)
+        candidates[name] = refused | module_refused
+    for cls in draw(st.lists(st.sampled_from(["TestK", "Helper"]), max_size=2, unique=True)):
+        decorator, base, line = (draw(st.sampled_from(CLASS_DECORATORS)), draw(st.sampled_from(CLASS_BASES)), draw(st.sampled_from(CLASS_LINES)))
+        class_refused = ({decorator, base, line} & REFUSED_BUT_RUN.keys()) | module_refused
+        lines = [decorator] if decorator else []
+        lines.append(f"class {cls}{base}:")
+        if line:
+            lines.append(f"    {line}")
+        for name in draw(st.lists(st.sampled_from(["test_a", "test_b", "testc", "helper"]), min_size=1, max_size=2, unique=True)):
+            source, refused = draw(generated_defs(name, method=True, top_level=False))
+            lines.extend(f"    {row}" for row in source.splitlines())
+            candidates[f"{cls}::{name}"] = refused | class_refused
+        parts.append("\n".join(lines) + "\n")
+    names = [name for name in candidates if "::" not in name] + sorted({name.split("::")[0] for name in candidates if "::" in name})
+    tail = draw(st.sampled_from(["", "{} = None", "del {}", "{}.__test__ = False"]))
+    if tail:
+        parts.append(tail.format(draw(st.sampled_from(names))) + "\n")
+    for decoy in ("test_missing", "TestK::test_missing"):
+        candidates.setdefault(decoy, set())
+    return "\n".join(parts), candidates
 
 
-def _pytest_ids(path: Path) -> list[str]:
-    collected: list[str] = []
+ORACLE_PLUGIN = """
+import json, os
+ITEMS, PASSED, BROKEN = {}, set(), set()
+def pytest_collectreport(report):
+    if report.failed:
+        BROKEN.add(report.nodeid.split("::")[0])
+def pytest_collection_modifyitems(items):
+    for item in items:
+        cls = getattr(item, "cls", None)
+        ITEMS[item.nodeid] = [item.path.name, cls.__name__ if cls else None, getattr(item, "originalname", item.name)]
+def pytest_runtest_logreport(report):
+    if report.when == "call" and report.outcome == "passed" and not hasattr(report, "wasxfail"):
+        PASSED.add(report.nodeid)
+def pytest_sessionfinish(session):
+    with open(os.environ["ORACLE_OUT"], "w") as f:
+        json.dump({"ran": [ITEMS[n] for n in sorted(PASSED) if n in ITEMS], "broken": sorted(BROKEN)}, f)
+"""
 
-    class Collector:
-        def pytest_collection_modifyitems(self, items):
-            collected.extend(item.name for item in items)
 
-    # importlib mode, and a fresh file name per example, keep the nested
-    # collections from reusing one another's modules.
-    pytest.main(
-        ["--collect-only", "-q", "-p", "no:cacheprovider", "-W", "ignore", "--import-mode=importlib", "--rootdir", str(path.parent), str(path)],
-        plugins=[Collector()],
+def _pytest_ran(folder: Path, files: list[str]) -> tuple[set[tuple[str, str]], set[str]]:
+    """(file, test) pairs whose call passed, and files that failed to collect."""
+
+    (folder / "_oracle.py").write_text(ORACLE_PLUGIN)
+    (folder / "pytest.ini").write_text("[pytest]\n")
+    out = folder / "oracle.json"
+    env = {**os.environ, "PYTHONPATH": str(folder), "ORACLE_OUT": str(out), "PYTHONDONTWRITEBYTECODE": "1"}
+    subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "_oracle", "-W", "ignore",
+         "--continue-on-collection-errors", "--import-mode=importlib", "-c", "pytest.ini", "--rootdir", ".", *files],
+        cwd=folder, env=env, capture_output=True, check=False, timeout=300,
     )
-    return [name.split("[", 1)[1][:-1] for name in collected if "[" in name]
+    result = json.loads(out.read_text())
+    ran = {(path, f"{cls}::{name}" if cls else name) for path, cls, name in result["ran"]}
+    return ran, set(result["broken"])
 
 
-@settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
-@given(first=parametrize_decorators("a"), second=st.one_of(st.none(), parametrize_decorators("b")))
-def test_resolver_agrees_with_pytest_collection(tmp_path_factory, first, second, capsys):
-    decorators = [first] + ([second] if second else [])
-    params = ", ".join(["a"] + (["b"] if second else []))
-    source = "import pytest\n" + "\n".join(decorators) + f"\ndef test_case({params}):\n    pass\n"
-    path = tmp_path_factory.mktemp("collect") / f"test_generated_{next(_COUNTER)}.py"
-    path.write_text(source)
-    theirs = _pytest_ids(path)
-    capsys.readouterr()
-    tree = __import__("ast").parse(source)
-    function = tree.body[-1]
-    combined = [""]
-    for decorator in reversed(function.decorator_list):
-        ids = sc.parametrize_ids(decorator)
-        if ids is None:
-            combined = None
-            break
-        combined = [f"{left}-{right}" if left else right for left in combined for right in ids]
-    if combined is not None:
-        assert sorted(combined) == sorted(theirs), (source, combined, theirs)
-        for case_id in combined:
-            if "]" not in case_id and "\n" not in case_id and case_id:
-                assert sc.python_test_exists(source, f"test_case[{case_id}]")
+@settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow, HealthCheck.data_too_large])
+@given(modules=st.lists(generated_modules(), min_size=1, max_size=3))
+def test_resolver_accepts_exactly_what_pytest_runs(tmp_path_factory, modules):
+    folder = tmp_path_factory.mktemp("collect")
+    files = []
+    for index, (source, _) in enumerate(modules):
+        files.append(f"test_m{index}.py")
+        (folder / files[-1]).write_text(source)
+    ran, broken = _pytest_ran(folder, files)
+    for path, (source, candidates) in zip(files, modules):
+        for name, refused in candidates.items():
+            accepted = sc.test_exists(path, name, source.encode())
+            runs = (path, name) in ran
+            # A module that fails to collect fails the owning repository's own
+            # run loudly; the rules guard against tests that stop running silently.
+            assert runs or not accepted or path in broken, f"accepted {name}, which pytest did not run:\n{source}"
+            assert accepted or not runs or refused, f"refused {name}, which pytest ran:\n{source}"
