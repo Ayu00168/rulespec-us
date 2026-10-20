@@ -391,9 +391,11 @@ def yaml_test_case_names(text: str) -> set[str]:
 
 
 # A Python test reference names a whole test function that pytest's default
-# collection picks up from the file alone. That is all a check that reads one
-# file can prove, so it accepts a deliberately narrow shape and refuses
-# everything else (fail closed):
+# collection picks up from the file alone. The rules below are a screen for
+# the ways an honest test file stops a test being collected, not a proof
+# against deliberately obfuscated import-time code (see tools/README.md, Test
+# references). They accept a deliberately narrow shape and refuse everything
+# else (fail closed):
 # - names every common pytest configuration collects: files test_*.py,
 #   functions test_*, classes Test* (python_files, python_functions and
 #   python_classes are not read);
@@ -404,12 +406,15 @@ def yaml_test_case_names(text: str) -> set[str]:
 #   resolved through imports bound nowhere else: anything else (a fixture,
 #   property, dataclass or a home-made wrapper) can stop pytest collecting it;
 # - nothing visible that rebinds the function, its class or an imported name:
-#   a later store, del or attribute set, a call that takes the function other
-#   than a pytest mark, `global`, or module-level exec, eval, globals(), vars()
-#   or sys.modules;
-# - no __test__, a pytestmark of marks only, no module-level
-#   pytest.skip/importorskip/xfail/fail/exit or raise, and no generator test
-#   anywhere in the module (pytest 9 refuses the whole module for one).
+#   a later store, del or attribute set (in a class body too), a call that
+#   takes the function other than a pytest mark, `global`, or exec, eval,
+#   globals(), vars() or sys.modules in code that runs at import;
+# - no __test__ or store to __test__ in any form, no module __getattr__, a
+#   pytestmark of marks only, no shadowed `object` behind a class base, no
+#   pytest.skip/importorskip/xfail/fail/exit or raise in code that runs at
+#   import, and no generator test anywhere (pytest 9 refuses the whole module).
+# "Code that runs at import" is module-level statements, a main guard's else
+# branch (not its body), class bodies, and annotations (eager before 3.14).
 # A parametrized case id ([...]) is refused: pytest builds ids from sources the
 # file does not show.
 #
@@ -458,6 +463,13 @@ def _scope_walk(body: list[ast.stmt]) -> Iterator[ast.AST]:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 outer.extend(node.args.defaults)
                 outer.extend(d for d in node.args.kw_defaults if d is not None)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Annotations run in this scope (eagerly before Python 3.14).
+                arguments = node.args
+                every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg]
+                outer.extend(arg.annotation for arg in every if arg is not None and arg.annotation is not None)
+                if node.returns is not None:
+                    outer.append(node.returns)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 outer.extend(node.decorator_list)
             if isinstance(node, ast.ClassDef):
@@ -521,9 +533,20 @@ def _final_definition(body: list[ast.stmt], name: str, imports: dict[str, str]) 
     if found is None:
         return None
     later = list(_scope_walk(body[found + 1 :]))
+    # Class bodies run at import too; there a plain name binds a class
+    # attribute, but a store under the name or a call taking it reaches it.
+    in_classes = [
+        node
+        for statement in body
+        for cls in _scope_walk([statement])
+        if isinstance(cls, ast.ClassDef)
+        for node in _import_time(cls.body)
+    ]
     if any(_binds(node, name) for node in later):
         return None
-    if any(_passes(node, name) and not _is_mark(node, imports, applied=True) for node in later):
+    if any(isinstance(node, (ast.Attribute, ast.Subscript)) and _binds(node, name) for node in in_classes):
+        return None
+    if any(_passes(node, name) and not _is_mark(node, imports, applied=True) for node in later + in_classes):
         return None
     if any(_binds(node, name) for node in _scope_walk([body[found]]) if node is not body[found]):
         return None  # e.g. the decorator rebinds it with a walrus
@@ -561,6 +584,36 @@ def _imports(tree: ast.Module) -> dict[str, str]:
         if len(targets) == 1 and not rebound:
             names[local] = next(iter(targets))
     return names
+
+
+def _every_import(tree: ast.Module) -> dict[str, set[str]]:
+    """Local name -> every dotted name any import anywhere binds it to,
+    trusted or not. Refusals and warnings resolve through this, so a name
+    made untrusted (`pytest.foo = 1`) cannot hide a `pytest.skip`."""
+
+    found: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local = alias.asname or alias.name.split(".")[0]
+                found.setdefault(local, set()).add(alias.name if alias.asname else local)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                found.setdefault(alias.asname or alias.name, set()).add(f"{node.module}.{alias.name}")
+    return found
+
+
+def _possible(node: ast.expr, every: dict[str, set[str]]) -> set[str]:
+    """Every dotted name `node` (or the function a call names) could be."""
+
+    target = node.func if isinstance(node, ast.Call) else node
+    parts: list[str] = []
+    while isinstance(target, ast.Attribute):
+        parts.append(target.attr)
+        target = target.value
+    if not isinstance(target, ast.Name):
+        return set()
+    return {".".join([base, *reversed(parts)]) for base in every.get(target.id, ())}
 
 
 def _qualified(node: ast.expr, imports: dict[str, str]) -> str | None:
@@ -652,20 +705,53 @@ def _main_guard(node: ast.stmt) -> bool:
     ) and any(isinstance(side, ast.Constant) and side.value == "__main__" for side in sides)
 
 
+def _import_time(body: list[ast.stmt]) -> Iterator[ast.AST]:
+    """Code that runs when the module is imported: module-level statements
+    (including a main guard's else branch, though not its body), class bodies
+    and annotations; not function bodies."""
+
+    statements: list[ast.stmt] = []
+    for node in body:
+        statements.extend(node.orelse if _main_guard(node) else [node])
+    for node in _scope_walk(statements):
+        yield node
+        if isinstance(node, ast.ClassDef):
+            yield from _import_time(node.body)
+
+
+def _stores_test_flag(node: ast.AST) -> bool:
+    """A store to `__test__` through an attribute, a subscript or setattr,
+    whatever the target (`[test_x][0].__test__ = False`)."""
+
+    if isinstance(node, ast.Attribute):
+        return node.attr == "__test__" and isinstance(node.ctx, (ast.Store, ast.Del))
+    if isinstance(node, ast.Subscript):
+        key = node.slice
+        return isinstance(node.ctx, (ast.Store, ast.Del)) and isinstance(key, ast.Constant) and key.value == "__test__"
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"setattr", "delattr"}:
+        return len(node.args) > 1 and isinstance(node.args[1], ast.Constant) and node.args[1].value == "__test__"
+    return False
+
+
 def _module_collects(tree: ast.Module, imports: dict[str, str]) -> bool:
     """Nothing in the module visibly stops pytest collecting it, or rebinds
     names behind the check's back."""
 
     if not _scope_collects(tree.body, imports):
         return False
-    for node in _scope_walk([statement for statement in tree.body if not _main_guard(statement)]):
+    if any(_binds(node, "__getattr__") for node in _scope_walk(tree.body)):
+        return False  # a module __getattr__ can answer pytest's __test__ lookup
+    if any(_stores_test_flag(node) for node in ast.walk(tree)):
+        return False
+    every = _every_import(tree)
+    for node in _import_time(tree.body):
         if isinstance(node, ast.Raise):
             return False
-        if isinstance(node, ast.Call) and _qualified(node, imports) in _MODULE_STOPS:
+        if isinstance(node, ast.Call) and _possible(node, every) & _MODULE_STOPS:
             return False
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _REBINDING_BUILTINS:
             return False
-        if isinstance(node, ast.Attribute) and node.attr == "modules" and _qualified(node, imports) == "sys.modules":
+        if isinstance(node, (ast.Attribute, ast.Name)) and "sys.modules" in _possible(node, every):
             return False
     for node in ast.walk(tree):
         if (
@@ -676,6 +762,15 @@ def _module_collects(tree: ast.Module, imports: dict[str, str]) -> bool:
         ):
             return False  # pytest 9 fails the module: "'yield' keyword is allowed in fixtures, but not in tests"
     return True
+
+
+def _object_rebound(tree: ast.Module) -> bool:
+    """Is the builtin `object`, the one base a test class may name, shadowed
+    (`class object: __test__ = False`) or declared global anywhere?"""
+
+    return any(_binds(node, "object") for node in _scope_walk(tree.body)) or any(
+        isinstance(node, (ast.Global, ast.Nonlocal)) and "object" in node.names for node in ast.walk(tree)
+    )
 
 
 def _collected_test(node: ast.stmt | None, imports: dict[str, str]) -> ast.FunctionDef | None:
@@ -714,6 +809,7 @@ def _resolve(source: str | bytes, name: str):
         isinstance(cls, ast.ClassDef)
         and cls.name.startswith("Test")
         and all(isinstance(base, ast.Name) and base.id == "object" for base in cls.bases)
+        and not (cls.bases and _object_rebound(tree))
         and not cls.keywords
         and all(_is_mark(decorator, imports) for decorator in cls.decorator_list)
         and _scope_collects(cls.body, imports)
@@ -790,13 +886,9 @@ def _mark_skips(node: ast.expr, imports: dict[str, str], module: list[ast.stmt])
     return None
 
 
-def _skip_calls(function: ast.AST, imports: dict[str, str]) -> list[str]:
+def _skip_calls(function: ast.AST, every: dict[str, set[str]]) -> list[str]:
     return sorted(
-        {
-            _qualified(node, imports)
-            for node in ast.walk(function)
-            if isinstance(node, ast.Call) and _qualified(node, imports) in _SKIP_CALLS
-        }
+        {name for node in ast.walk(function) if isinstance(node, ast.Call) for name in _possible(node, every) & _SKIP_CALLS}
     )
 
 
@@ -886,8 +978,9 @@ def python_test_warnings(source: str | bytes, name: str) -> list[str]:
                     called.add(call.func.id)
                     places.append((f"{call.func.id}, which it calls", helpers[call.func.id]))
                     queue.append(helpers[call.func.id])
+    every = _every_import(tree)
     for where, node in places:
-        reasons.extend(f"{call} in {where}" for call in _skip_calls(node, imports))
+        reasons.extend(f"{call} in {where}" for call in _skip_calls(node, every))
 
     for decorator in function.decorator_list:
         if _qualified(decorator, imports) == "hypothesis.settings" and isinstance(decorator, ast.Call):
@@ -1152,8 +1245,15 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
     if "money_case" in entry:
         money = entry["money_case"]
         m_label = f"{label}.money_case"
-        if _mapping(money, label=m_label, allowed={"description", "amount", "currency", "period"}, issues=issues):
+        if _mapping(money, label=m_label, allowed={"description", "amount", "currency", "period", "computed_by"}, issues=issues):
             _string(money.get("description"), label=f"{m_label}.description", issues=issues)
+            # A public amount needs a pinned test that computes it.
+            names = [item.get("name") for item in tests or [] if isinstance(item, dict)]
+            if money.get("computed_by") not in names or names.count(money.get("computed_by")) != 1:
+                issues.append(
+                    f"{m_label}.computed_by must name the one test in this entry's `tests` that computes the "
+                    "amount; record no amount that no pinned test computes."
+                )
             amount = money.get("amount")
             if not (isinstance(amount, str) and DECIMAL_RE.fullmatch(amount)):
                 issues.append(f"{m_label}.amount must be a non-negative decimal string such as \"21.00\".")
@@ -1205,13 +1305,18 @@ def check_module_interpretation(item: Any, *, rule_names: set[str], label: str) 
     return issues
 
 
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def registered_pairs(payload: Any) -> set[tuple[str, str]]:
     pairs: set[tuple[str, str]] = set()
     entries = payload.get("entries") if isinstance(payload, dict) else None
     for entry in entries if isinstance(entries, list) else []:
         if not isinstance(entry, dict):
             continue
-        for item in entry.get("adopted_by") or []:
+        adopted = entry.get("adopted_by")
+        for item in adopted if isinstance(adopted, list) else []:
             if isinstance(item, dict) and isinstance(item.get("module"), str) and isinstance(item.get("interpretation"), str):
                 pairs.add((item["module"], item["interpretation"]))
     return pairs
@@ -1541,7 +1646,9 @@ def aggregate(registers: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[
                     "status": entry.get("status"),
                     "outcome": entry.get("outcome"),
                     "reading": entry.get("reading"),
-                    "alternatives": [alt.get("reading") for alt in entry.get("alternatives") or [] if isinstance(alt, dict)],
+                    "alternatives": [
+                        alt.get("reading") for alt in _as_list(entry.get("alternatives")) if isinstance(alt, dict)
+                    ],
                     "sources": list(
                         dict.fromkeys(
                             [citation_label(text.get("corpus_citation_path")) for text in texts if isinstance(text, dict)]
@@ -1552,7 +1659,7 @@ def aggregate(registers: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[
                     "adopted_by": entry.get("adopted_by") or [],
                     "implementations": [
                         {key: item.get(key) for key in ("repo", "path", "follows")}
-                        for item in entry.get("implementations") or []
+                        for item in _as_list(entry.get("implementations"))
                         if isinstance(item, dict)
                     ],
                     "tests": len(entry.get("tests") or []),
@@ -1634,7 +1741,11 @@ def main(argv: list[str] | None = None) -> int:
     check = sub.add_parser("check", help="offline schema and in-repo reference checks")
     check.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     check.add_argument("--repo", default=f"{ORGANISATION}/rulespec-us")
-    check.add_argument("--warnings-file", type=Path, help="also write unregistered open interpretations here, one per line")
+    check.add_argument(
+        "--warnings-file",
+        type=Path,
+        help="also write the warnings here, one per line: unregistered open interpretations and pinned tests that may not run",
+    )
     verify = sub.add_parser("verify", help="network checks: excerpts, snapshots, external refs")
     verify.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     verify.add_argument("--corpus-path", type=Path, help="axiom-corpus checkout holding the pinned release")
@@ -1654,18 +1765,18 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         issues = check_register(payload, RepoContext(root=args.root, repo=args.repo))
         warnings = unregistered_tensions(args.root, payload)[1] if isinstance(payload, dict) else []
+        pin_warnings = test_pin_warnings(payload, args.root)
         for issue in issues:
             print(f"- {issue}", file=sys.stderr)
-        for warning in warnings:
-            print(f"warning: {warning}")
-        for warning in test_pin_warnings(payload, args.root):
+        for warning in warnings + pin_warnings:
             print(f"warning: {warning}")
         if args.warnings_file is not None:
-            args.warnings_file.write_text("".join(f"{warning}\n" for warning in warnings))
-        count = len((payload or {}).get("entries") or []) if isinstance(payload, dict) else 0
+            args.warnings_file.write_text("".join(f"{warning}\n" for warning in warnings + pin_warnings))
+        entries = payload.get("entries") if isinstance(payload, dict) else None
+        count = len(entries) if isinstance(entries, list) else 0
         print(
             f"{REGISTER_FILENAME}: {count} entr{'y' if count == 1 else 'ies'}, {len(issues)} issue(s), "
-            f"{len(warnings)} unregistered open interpretation(s)."
+            f"{len(warnings)} unregistered open interpretation(s), {len(pin_warnings)} pinned test(s) that may not run."
         )
         return 1 if issues else 0
 

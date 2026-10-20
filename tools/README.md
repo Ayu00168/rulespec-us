@@ -113,11 +113,16 @@ Register-only fields:
 | `adopted_by` | RuleSpec modules in this repository that carry the entry, as `module` (path) and `interpretation` (id) pairs. |
 | `implementations` | Code outside RuleSpec that adopts a reading: `repo`, `commit`, `path`, `follows` (`reading` or `alternatives[N]`, meaning what the code does today) and `cites_entry`, which says whether the file contains the global id. |
 | `tests` | Tests that pin readings: `path`, `name` (a test function, `Class::function`, or a companion-test case name) and `pins`, a list of `reading` or `alternatives[N]`. Add `repo` and `commit` for a test in another repository. A Python test must be a whole test function that pytest's default collection picks up from the file; whether it runs is the owning repository's CI's business. See [Test references](#test-references). |
-| `money_case` | An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency` and `period` (once, week, month or year). |
+| `money_case` | Optional. An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency`, `period` (once, week, month or year) and `computed_by`, the name of the one test in the entry's `tests` that computes the amount, asserting it or both figures whose difference it is. A public file carries no amount that no pinned test computes: leave the money case out instead. |
 
-The register is public. It carries no people's names, decision-queue ids,
-session ids, local paths or email addresses. `ruling.by` and `confirmation.by`
-name organisations, and `ruling.record` is a public PR, issue or comment.
+The register is public. These publication rules are reviewed by hand: it
+carries no people's names; `ruling.by` and `confirmation.by` name
+organisations; `ruling.record` is a public PR, issue or comment; and nothing
+private is quoted. `check` automates only part of that: `by` must be
+non-blank and `record` an https URL, and every string must be free of four
+token patterns (decision-queue ids such as `d1234`, session ids, local paths
+and email addresses). It cannot tell a person's name from an organisation's,
+or a private page from a public one.
 
 ## Checks
 
@@ -126,7 +131,7 @@ runs it inside the required Repository Checks pytest leg, and it fails on any
 of these:
 
 - a malformed entry, an unknown key or a broken status rule;
-- a hygiene hit;
+- a hygiene hit (one of the four token patterns below);
 - an adopting module that is missing, or that does not carry the entry's
   interpretation core unchanged, or whose `affects` name no rule in the module;
 - an in-repo test that does not exist, or is not a test pytest collects
@@ -180,11 +185,15 @@ python tools/source_conflicts.py aggregate --markdown /tmp/conflicts.md
 
 ## Test references
 
-The check proves one thing about a pinned Python test: pytest's default
+The check screens a pinned Python test for one thing: that pytest's default
 collection picks it up from the test file alone, at the pinned commit. Whether
-the test then runs and passes belongs to the owning repository's CI. The check
-reads only that file, so it accepts one narrow shape and refuses everything
-else:
+the test then runs and passes belongs to the owning repository's CI. The
+screen catches the ways an honest test file stops a test being collected. It
+is not a proof against deliberately obfuscated import-time code (a helper
+that rebinds names through `globals()`, `exec` or `importlib` when called at
+import, and the like); that is out of scope, and such findings go in the
+limits below rather than into new rules. It reads only that file, so it
+accepts one narrow shape and refuses everything else:
 
 - a `test_*.py` file, and a `test_*` function at module level or in a `Test*`
   class at module level. These are the names every common pytest
@@ -201,11 +210,15 @@ else:
   wrapper is refused, because it can stop pytest collecting the function;
 - a class with no bases other than `object`, no metaclass, no `__init__`,
   `__new__` or `__test__`, and only pytest marks as decorators;
-- a module with no `__test__`, no `pytestmark` other than marks, no
-  `pytest.skip`/`importorskip`/`xfail`/`fail`/`exit` call, `raise`, `exec`,
-  `eval`, `globals()`, `vars()` or `sys.modules` at module level outside
-  `if __name__ == "__main__":`, and no generator test anywhere (pytest 9
-  rejects the whole module).
+- a module with no `__test__` (and no store to `__test__` in any form, such
+  as `[test_x][0].__test__ = False`), no module `__getattr__`, no
+  `pytestmark` other than marks, no shadowed `object` when a class names it as
+  a base, and no generator test anywhere (pytest 9 rejects the whole module);
+- no `pytest.skip`/`importorskip`/`xfail`/`fail`/`exit` call, `raise`,
+  `exec`, `eval`, `globals()`, `vars()` or `sys.modules` in code that runs at
+  import: module-level statements, the `else` branch of an
+  `if __name__ == "__main__":` guard (not its body), class bodies, and
+  annotations, which run at import before Python 3.14.
 
 A parametrized case (`test_x[case-1]`) cannot be pinned. pytest builds case
 ids from more than the file shows (fixture `params`, `pytestmark`,
@@ -224,16 +237,27 @@ or `max_examples=0`, or a profile loaded at import. These are warnings, not
 failures: a data-gated test that skips locally can run in its repository's
 CI.
 
-The register does not check, and cannot see:
+Known limits. The register does not check, and cannot see:
 - conftest fixtures and hooks (`pytest_collection_modifyitems`,
   `pytest_runtest_setup`, `collect_ignore`, `pytest_ignore_collect`);
 - plugins;
 - ini or `addopts` selection (`-m`, `-k`, `--deselect`, `--ignore`,
   `testpaths`, `norecursedirs`, `empty_parameter_set_mark`);
-- runtime rebinding the file doesn't show plainly.
+- deliberately obfuscated import-time code: rebinding through a helper called
+  at import (`globals()`, `exec`, `importlib.import_module(__name__)` inside a
+  function), and similar.
 
-Any of these can stop a pinned test running while every run exits 0. Import
-errors and modules that fail to collect do fail loudly.
-`test_resolver_accepts_exactly_what_pytest_collects` checks the rules in both
-directions against pytest on generated modules, and checks that an accepted
-test that is collected but doesn't run always carries a warning.
+Any of these can stop a pinned test being collected or run while every run
+exits 0. Import errors and modules that fail to collect do fail loudly.
+
+The evidence for the screen is `test_resolver_accepts_exactly_what_pytest_collects`
+(property 11). It runs pytest on generated modules and checks four things:
+- accepted ⇒ collected;
+- collected ⇒ accepted, except the deliberate refusals listed in
+  `REFUSED_BUT_COLLECTED`;
+- a test that is collected but doesn't run always carries a warning;
+- warnings appear exactly when the file shows a skip.
+
+The generator plants every shape that the reviews of this tool found in
+honest-looking files. The unit tests in `test_python_test_resolution` and
+`test_python_test_warnings` pin each of those shapes.

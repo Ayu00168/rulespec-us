@@ -120,7 +120,13 @@ def entry(**overrides):
                 "pins": ["alternatives[0]"],
             },
         ],
-        "money_case": {"description": "A survivor family after a child ages out.", "amount": "21.00", "currency": "USD", "period": "month"},
+        "money_case": {
+            "description": "A survivor family after a child ages out.",
+            "amount": "21.00",
+            "currency": "USD",
+            "period": "month",
+            "computed_by": "test__given_operational__then_pays",
+        },
     }
     base.update(overrides)
     return base
@@ -343,6 +349,7 @@ def test_every_followed_reading_is_pinned(tmp_path):
     both["tests"] = [{**both["tests"][0], "pins": ["reading", "alternatives[0]"]}]
     assert check(ctx, both) == []
     no_adopter = entry(tests=[entry()["tests"][1]])
+    no_adopter["money_case"]["computed_by"] = "TestLiteral::test_refuses"
     del no_adopter["implementations"]
     assert check(ctx, no_adopter) == []
 
@@ -390,6 +397,7 @@ def test_in_repo_tests_must_exist(tmp_path):
     )
     (ctx.root / "tests" / "test_local.py").write_text("class TestX:\n    def test_y(self):\n        pass\n")
     good = entry()
+    good.pop("money_case")  # its tests are replaced below
     good["tests"] = [
         {"path": "us/statutes/42/403/a/5.test.yaml", "name": "saving_clause_case", "pins": ["reading"]},
         {"path": "tests/test_local.py", "name": "TestX::test_y", "pins": ["alternatives[0]"]},
@@ -433,6 +441,7 @@ def test_a_parametrized_case_cannot_be_pinned(tmp_path):
         "def test_case(case):\n    pass\n"
     )
     value = entry()
+    value.pop("money_case")  # its tests are replaced below
     del value["implementations"]
     for name, ok in (("test_case", True), ("test_case[real-case]", False), ("test_case[caf\\xe9]", False)):
         value["tests"] = [{"path": "tests/test_params.py", "name": name, "pins": ["reading"]}]
@@ -450,6 +459,7 @@ def test_a_non_utf8_test_file_is_read_by_its_coding_cookie(tmp_path):
     )
     (ctx.root / "us" / "statutes" / "42" / "403" / "a" / "5.test.yaml").write_bytes(b"- name: caf\xe9\n")
     value = entry()
+    value.pop("money_case")  # its tests are replaced below
     del value["implementations"]
     value["tests"] = [{"path": "tests/test_latin.py", "name": "test_l1", "pins": ["reading"]}]
     assert check(ctx, value) == []
@@ -504,6 +514,11 @@ HYPOTHESIS = "from hypothesis import given, settings\nimport hypothesis.strategi
         ("def test_x():\n    pass\nexec('test_x = None')\n", "test_x", False),
         ("def test_y():\n    pass\nglobals()['test_y'] = None\n", "test_y", False),
         ("import sys\ndef test_x():\n    pass\nsetattr(sys.modules[__name__], '__test__', False)\n", "test_x", False),
+        ("import sys\ndef test_x():\n    pass\nsys.modules[__name__].test_x = None\n", "test_x", False),
+        ("import sys as s\ndef test_x():\n    pass\ns.modules[__name__].test_x = None\n", "test_x", False),
+        ("from sys import modules\ndef test_x():\n    pass\nmodules[__name__].test_x = None\n", "test_x", False),
+        # A store that makes `pytest` untrusted must not hide its module-level skip.
+        (MODULE + "pytest.foo = 1\npytest.skip('x', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", False),
         ("def test_x():\n    pass\ntest_x.__dict__['__test__'] = False\n", "test_x", False),
         (MODULE + "def test_y():\n    pass\nvars(test_y).update(pytestmark=[pytest.mark.skip])\n", "test_y", False),
         ("def test_x():\n    pass\nregister(test_x)\n", "test_x", False),
@@ -511,6 +526,18 @@ HYPOTHESIS = "from hypothesis import given, settings\nimport hypothesis.strategi
         (MODULE + "def setup_module():\n    pytest.mark.slow = pytest.mark.skip\n@pytest.mark.slow\ndef test_x():\n    pass\n", "test_x", False),
         ("import hypothesis\nhypothesis.__dict__['given'] = None\n@hypothesis.given(1)\ndef test_x(h):\n    pass\n", "test_x", False),
         (MODULE + "def swap():\n    global pytest\n    pytest = None\n@pytest.mark.slow\ndef test_x():\n    pass\n", "test_x", False),
+        # Round-4 review: shapes in files that show everything.
+        (MODULE + "if __name__ == '__main__':\n    pass\nelse:\n    pytest.skip('module', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", False),
+        ("class object:\n    __test__ = False\nclass TestA(object):\n    def test_x(self):\n        pass\n", "TestA::test_x", False),
+        ("class object:\n    __test__ = False\nclass TestA:\n    def test_x(self):\n        pass\n", "TestA::test_x", True),
+        ("def _helper(a: globals().__setitem__('test_x', None)):\n    pass\ndef test_x():\n    pass\n", "test_x", False),
+        ("def test_x():\n    pass\nclass Helper:\n    note: exec('test_x = None')\n", "test_x", False),
+        ("def test_x():\n    pass\nclass Helper:\n    test_x.__dict__['flag'] = 1\n", "test_x", False),
+        ("def __getattr__(name):\n    if name == '__test__':\n        return False\n    raise AttributeError(name)\ndef test_x():\n    pass\n", "test_x", False),
+        ("def test_x():\n    pass\n[test_x][0].__test__ = False\n", "test_x", False),
+        ("def test_x():\n    pass\nsetattr([test_x][0], '__test__', False)\n", "test_x", False),
+        # A helper class's own __test__ = False is the usual way to keep it uncollected.
+        ("class TestData:\n    __test__ = False\ndef test_x():\n    pass\n", "test_x", True),
         ("async def test_x():\n    pass\n", "test_x", False),  # fails without an async plugin
         # Round-2 review, finding 4: shapes pytest does not collect under that name.
         ("__test__ = False\ndef test_x():\n    pass\n", "test_x", False),
@@ -564,6 +591,16 @@ def _field_paths(value, prefix=()):
         yield from _field_paths(child, prefix + (key,))
 
 
+def test_check_is_total_with_module_scanning_on_a_malformed_adopted_by(tmp_path):
+    # Round-4 review: registered_pairs iterated an unchecked adopted_by, so
+    # the default check (module scanning on) raised TypeError.
+    ctx = make_repo(tmp_path)
+    for bad in (7, "x", {"module": "a"}, [7], None):
+        value = entry(adopted_by=bad)
+        issues = check(ctx, value, scan=True)
+        assert any("adopted_by" in issue for issue in issues), (bad, issues)
+
+
 def test_check_is_total_on_every_field(tmp_path):
     # Review of #1710 round 2: the Hypothesis totality property draws any one
     # field only a few times a run, so a crash on one field was caught in half
@@ -580,7 +617,7 @@ def test_check_is_total_on_every_field(tmp_path):
             for key in path[:-1]:
                 target = target[key]
             target[path[-1]] = new
-            issues = check(ctx, value, copy.deepcopy(value), scan=False)
+            issues = check(ctx, value, copy.deepcopy(value), scan=True)
             assert isinstance(issues, list) and all(isinstance(issue, str) for issue in issues), (path, new)
 
 
@@ -621,6 +658,7 @@ def test_check_is_total_on_every_field(tmp_path):
         (MODULE + "class TestK:\n    def setup_method(self):\n        pytest.xfail('later')\n    def test_x(self):\n        pass\n", "TestK::test_x", ["pytest.xfail in setup_method"]),
         (MODULE + "from hypothesis import given, settings, strategies as st\n@settings(phases=())\n@given(st.integers())\ndef test_x(h):\n    pass\n", "test_x", ["Hypothesis settings that set phases"]),
         (MODULE + "from hypothesis import settings\nsettings.register_profile('none', max_examples=0)\nsettings.load_profile('none')\ndef test_x():\n    pass\n", "test_x", ["a Hypothesis profile loaded at import"]),
+        (MODULE + "pytest.foo = 1\ndef test_x():\n    pytest.skip('x')\n", "test_x", ["pytest.skip in its body"]),
         # A refused reference has no warnings: it fails instead.
         (MODULE + "def helper():\n    pytest.skip('x')\n", "helper", []),
     ],
@@ -635,6 +673,7 @@ def test_check_warns_on_pins_that_may_not_run(tmp_path, capsys):
     ctx = make_repo(tmp_path)
     (ctx.root / "tests" / "test_staged.py").write_text("import pytest\ndef test_needs_data():\n    pytest.skip('no data')\n")
     value = entry()
+    value.pop("money_case")  # its tests are replaced below
     del value["implementations"]
     value["tests"] = [{"path": "tests/test_staged.py", "name": "test_needs_data", "pins": ["reading"]}]
     payload = {"version": 1, "entries": [value]}
@@ -644,8 +683,14 @@ def test_check_warns_on_pins_that_may_not_run(tmp_path, capsys):
     ]
     (ctx.root / sc.REGISTER_FILENAME).write_text(yaml.safe_dump(payload, sort_keys=False))
     capsys.readouterr()
-    assert sc.main(["check", "--root", str(ctx.root)]) == 0
-    assert "warning: entries[0].tests[0] tests/test_staged.py::test_needs_data may not run" in capsys.readouterr().out
+    warnings_file = tmp_path / "warnings.txt"
+    assert sc.main(["check", "--root", str(ctx.root), "--warnings-file", str(warnings_file)]) == 0
+    out = capsys.readouterr().out
+    assert "warning: entries[0].tests[0] tests/test_staged.py::test_needs_data may not run" in out
+    assert "0 issue(s), 0 unregistered open interpretation(s), 1 pinned test(s) that may not run." in out
+    assert warnings_file.read_text() == (
+        "entries[0].tests[0] tests/test_staged.py::test_needs_data may not run: pytest.skip in its body.\n"
+    )
 
 
 def test_python_test_file_conventions():
@@ -690,6 +735,25 @@ def test_money_case(tmp_path, field, value, fragment):
     bad = entry()
     bad["money_case"][field] = value
     assert any(fragment in issue for issue in check(make_repo(tmp_path), bad))
+
+
+def test_a_money_case_names_the_pinned_test_that_computes_it(tmp_path):
+    # Round-4 review: a public amount needs a pinned test that computes it.
+    ctx = make_repo(tmp_path)
+    assert check(ctx, entry()) == []
+    for computed_by in (None, "test_not_pinned", "TestLiteral::test_refuses[1]"):
+        bad = entry()
+        if computed_by is None:
+            del bad["money_case"]["computed_by"]
+        else:
+            bad["money_case"]["computed_by"] = computed_by
+        assert any("money_case.computed_by must name the one test" in issue for issue in check(ctx, bad)), computed_by
+    ambiguous = entry()
+    ambiguous["tests"].append(dict(ambiguous["tests"][0], path="tests/test_h.py"))
+    assert any("money_case.computed_by must name the one test" in issue for issue in check(ctx, ambiguous))
+    no_amount = entry()
+    del no_amount["money_case"]
+    assert check(ctx, no_amount) == []
 
 
 # ---------------------------------------------------------------------------

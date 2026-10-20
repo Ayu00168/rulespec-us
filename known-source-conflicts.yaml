@@ -90,6 +90,7 @@ entries:
     amount: '1.00'
     currency: USD
     period: year
+    computed_by: test_negative_nese_reading_changes_final_deduction_by_one_dollar
 - id: oasdi-ret-grace-simultaneous-rib-dib
   jurisdiction: us
   program: social-security
@@ -173,6 +174,7 @@ entries:
     amount: '4200.00'
     currency: USD
     period: year
+    computed_by: test_simultaneous_dib_rib_source_readings_change_4200_dollars
 - id: oasdi-ret-own-work-age-exemptions
   jurisdiction: us
   program: social-security
@@ -244,6 +246,7 @@ entries:
     amount: '600.00'
     currency: USD
     period: year
+    computed_by: test_optional_act_age_exemptions_are_an_explicit_600_dollar_reading
 - id: oasdi-ret-deemed-entitlement-basis
   jurisdiction: us
   program: social-security
@@ -309,13 +312,6 @@ entries:
     name: test_deemed_ordinary_child_requires_explicit_adult_age_facts
     pins:
     - reading
-  money_case:
-    description: 'Number holder at $400 with a $600 excess and a $200 deemed recipient: the married disabled-child
-      benchmark charges the recipient''s full $200 January benefit; the broader readings would charge
-      the same $200 to a recipient the Act and CFR leave untouched.'
-    amount: '200.00'
-    currency: USD
-    period: month
 - id: oasdi-survivor-fra-1911-births
   jurisdiction: us
   program: social-security
@@ -376,11 +372,12 @@ entries:
     - reading
     - alternatives[0]
   money_case:
-    description: 'A widow born January 2, 1911 claiming in January 1973 on a $1,000 PIA: $829 under FRA
-      65, $1,000 under FRA 62.'
+    description: 'A widow born January 2, 1911 claiming in January 1973 on a $1,000 PIA, 36 of 60 reduction
+      months: $829 under FRA 65, $1,000 (unreduced) under FRA 62.'
     amount: '171.00'
     currency: USD
     period: month
+    computed_by: test_historic_survivor_fra_conflict_is_refused
 - id: oasdi-arf-widow-child-in-care-credits
   jurisdiction: us
   program: social-security
@@ -441,10 +438,11 @@ entries:
     - alternatives[1]
   money_case:
     description: 'Widow at 64, FRA 67, $1,000 PIA, six child-in-care months never raised to the mother''s
-      rate: $898.20 crediting them, $877.80 not.'
+      rate: $898.20 crediting them (30 reduction months of 84), $877.80 not (36).'
     amount: '20.40'
     currency: USD
     period: month
+    computed_by: test_widow_nonbinding_child_care_readings_are_explicit
 - id: oasdi-arf-spouse-reentitlement-credits
   jurisdiction: us
   program: social-security
@@ -505,6 +503,7 @@ entries:
     amount: '2.70'
     currency: USD
     period: month
+    computed_by: test_spouse_reentitlement_counterfactual_readings_keep_named_refusal
 - id: oasdi-dual-entitlement-zero-after-age-reduction
   jurisdiction: us
   program: social-security
@@ -577,6 +576,7 @@ entries:
     amount: '21.00'
     currency: USD
     period: month
+    computed_by: test_method_b_zero_only_after_age_is_refused_and_kept_in_denominator
 - id: oasdi-parent-entitlement-count-interval
   jurisdiction: us
   program: social-security
@@ -640,12 +640,6 @@ entries:
     name: test_two_potential_parents_refuse_the_own_rib_entitlement_cycle
     pins:
     - reading
-  money_case:
-    description: 'PIA $1,000, maximum $1,750, two potential parents, one with an own RIB of $780: the
-      other parent gets $825 or $750.'
-    amount: '75.00'
-    currency: USD
-    period: month
 - id: oasdi-family-maximum-saving-clause
   jurisdiction: us
   program: social-security
@@ -726,3 +720,4 @@ entries:
     amount: '22.40'
     currency: USD
     period: month
+    computed_by: test_savings_clause_protects_every_later_month_not_just_the_next
