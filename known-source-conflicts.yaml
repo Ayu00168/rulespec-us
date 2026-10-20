@@ -612,8 +612,8 @@ entries:
     url: https://files.hawaii.gov/tax/forms/2025/n11ins.pdf#page=19
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: 73da6d2fac6da9a3632204dd15577f7db158fe99
-      path: policyengine_us/tests/code_health/source_conflicts/sources/us-hi/n11-instructions-2025-p19.txt
+      commit: ce9377ee80157a17eb730fa1b8550b4d433c696c
+      path: source_conflicts/sources/us-hi/n11-instructions-2025-p19.txt
       sha256: 9e806165b035da92b1a533b12ee8a1899deae007e404f62067b39fba04501296
     excerpt: Deduction for repayment of amounts under a claim of right over $3,000. See Repayments in the 2017 federal
       Publication 525
@@ -622,8 +622,8 @@ entries:
     url: https://files.hawaii.gov/tax/forms/2025/n11ins.pdf#page=19
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: 73da6d2fac6da9a3632204dd15577f7db158fe99
-      path: policyengine_us/tests/code_health/source_conflicts/sources/us-hi/n11-instructions-2025-p19.txt
+      commit: ce9377ee80157a17eb730fa1b8550b4d433c696c
+      path: source_conflicts/sources/us-hi/n11-instructions-2025-p19.txt
       sha256: 9e806165b035da92b1a533b12ee8a1899deae007e404f62067b39fba04501296
     excerpt: Deduction for repayment of amounts under a claim of right of $3,000 or less.
   - citation: 2022 Form N-11 instructions, p. 19
@@ -631,8 +631,8 @@ entries:
     url: https://files.hawaii.gov/tax/forms/2022/n11ins.pdf#page=19
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: 73da6d2fac6da9a3632204dd15577f7db158fe99
-      path: policyengine_us/tests/code_health/source_conflicts/sources/us-hi/n11-instructions-2022-p19.txt
+      commit: ce9377ee80157a17eb730fa1b8550b4d433c696c
+      path: source_conflicts/sources/us-hi/n11-instructions-2022-p19.txt
       sha256: d49a31bc696484a3c756360b129c94f9b34a5463cc2821937c5cacace9ddc6e1
     excerpt: Deduction for repayment of amounts under a claim of right over $3,000. See Repayments in the 2017 federal
       Publication 525
@@ -671,8 +671,8 @@ entries:
     url: https://codes.ohio.gov/ohio-revised-code/section-5747.01
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: 73da6d2fac6da9a3632204dd15577f7db158fe99
-      path: policyengine_us/tests/code_health/source_conflicts/sources/us-oh/rc-5747.01.html
+      commit: ce9377ee80157a17eb730fa1b8550b4d433c696c
+      path: source_conflicts/sources/us-oh/rc-5747.01.html
       sha256: 9981a8f73a9c4a1301620fe6cd3df4ecee4de11bacf120caf545a6814ffef276
     excerpt: 'Deduct any portion of the deduction described in section 1341(a)(2) of the Internal Revenue Code,
       for repaying previously reported income received under a claim of right, that meets both of the following
@@ -682,8 +682,8 @@ entries:
     url: https://codes.ohio.gov/ohio-revised-code/section-5747.01
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: 73da6d2fac6da9a3632204dd15577f7db158fe99
-      path: policyengine_us/tests/code_health/source_conflicts/sources/us-oh/rc-5747.01.html
+      commit: ce9377ee80157a17eb730fa1b8550b4d433c696c
+      path: source_conflicts/sources/us-oh/rc-5747.01.html
       sha256: 9981a8f73a9c4a1301620fe6cd3df4ecee4de11bacf120caf545a6814ffef276
     excerpt: It is allowable for repayment of an item that was included in the taxpayer's adjusted gross income
       for a prior taxable year
@@ -692,8 +692,8 @@ entries:
     url: https://dam.assets.ohio.gov/image/upload/tax.ohio.gov/forms/ohio_individual/individual/2025/it1040-booklet.pdf#page=23
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: 73da6d2fac6da9a3632204dd15577f7db158fe99
-      path: policyengine_us/tests/code_health/source_conflicts/sources/us-oh/it1040-instructions-2025-p23.txt
+      commit: ce9377ee80157a17eb730fa1b8550b4d433c696c
+      path: source_conflicts/sources/us-oh/it1040-instructions-2025-p23.txt
       sha256: 6d058019308712a1c0c20809ac21ed9a32009e546ee042242f0113ab894811a2
     excerpt: In the current tax year, you claimed either (i) an itemized deduction on your federal Schedule A for
       the amount repaid OR (ii) a tax credit on your federal 1040 based upon the amount repaid.
@@ -729,8 +729,8 @@ entries:
     url: https://www.arkleg.state.ar.us/Acts/FTPDocument?path=%2FACTS%2F2013R%2FPublic%2F&file=1284.pdf&ddBienniumSession=2013%2F2013R
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: 73da6d2fac6da9a3632204dd15577f7db158fe99
-      path: policyengine_us/tests/code_health/source_conflicts/sources/us-ar/act-1284-2013.txt
+      commit: ce9377ee80157a17eb730fa1b8550b4d433c696c
+      path: source_conflicts/sources/us-ar/act-1284-2013.txt
       sha256: 204ebea7f4b244c1c24975da0c00747fd6e7d7f7f56171f85a3ea9c064a702d4
     excerpt: Title 26 U.S.C. § 1341(a)(1)-(3) and (b)(2), as they existed on January 1, 2013, regarding the computation
       of income tax when a taxpayer restores a substantial amount held under a claim of right, is adopted for purposes
@@ -740,8 +740,8 @@ entries:
     url: https://www.arkleg.state.ar.us/Acts/FTPDocument?path=%2FACTS%2F1987R%2FPublic%2F&file=382.pdf&ddBienniumSession=1987%2F1987R#page=9
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: 73da6d2fac6da9a3632204dd15577f7db158fe99
-      path: policyengine_us/tests/code_health/source_conflicts/sources/us-ar/act-382-1987-p9.txt
+      commit: ce9377ee80157a17eb730fa1b8550b4d433c696c
+      path: source_conflicts/sources/us-ar/act-382-1987-p9.txt
       sha256: 87cf3f82736130bbfe305d7664f690b5ac90a412888a9d6c3b7bec64cdcfe12e
     excerpt: the miscellaneous itemized deductions for any taxable year shall be allowed only to the extent that
       the aggregate of such deductions exceeds two percent (2%) of adjusted gross income.
@@ -750,8 +750,8 @@ entries:
     url: https://www.dfa.arkansas.gov/wp-content/uploads/AR3_2014_RE.pdf#page=1
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: 73da6d2fac6da9a3632204dd15577f7db158fe99
-      path: policyengine_us/tests/code_health/source_conflicts/sources/us-ar/ar3-2014.txt
+      commit: ce9377ee80157a17eb730fa1b8550b4d433c696c
+      path: source_conflicts/sources/us-ar/ar3-2014.txt
       sha256: 411d4b1a366f9e6b0f35a119482af4fd161833f5a5defdd961e5a4d208e2fc41
     excerpt: 'TOTAL MISCELLANEOUS DEDUCTIONS NOT SUBJECT TO THE 2% AGI LIMITATION: (Add lines 26 and 27)'
   reading: Count the claim of right deduction among miscellaneous itemized deductions, so only the part above 2%
@@ -830,8 +830,8 @@ entries:
     url: https://www.marylandcomptroller.gov/content/dam/mdcomp/tax/instructions/2025/resident-booklet.pdf#page=23
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: ee2e0b910fb622212e05436ffbe692e9e7616824
-      path: policyengine_us/tests/code_health/source_conflicts/sources/us-md/resident-booklet-2025-p23.txt
+      commit: ce9377ee80157a17eb730fa1b8550b4d433c696c
+      path: source_conflicts/sources/us-md/resident-booklet-2025-p23.txt
       sha256: ff06a1a0c4043fc7a7d44fe9b93b76410ff60cb14f9595e99bb490a25b958a21
     excerpt: Enter the total of your salary, wages, tips and other employee compensation and net profit from self-employment
       here, and on Line 1b of Form 502, if Line 1b is currently blank. (Do not include a farm or business loss.)
