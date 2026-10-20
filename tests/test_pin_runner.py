@@ -455,8 +455,10 @@ def test_summarize_without_a_report(tmp_path):
     assert runner.summarize(tmp_path / "absent.json") == [runner.MISSING_ARTIFACT]
     (tmp_path / "list.json").write_text("[]")
     assert runner.summarize(tmp_path / "list.json") == [runner.MALFORMED_ARTIFACT]
+    # Whether a 100,000-deep list parses depends on the Python build (3.13
+    # raises RecursionError, 3.14 on CI parses it); either way it is an alarm.
     (tmp_path / "deep.json").write_text("[" * 100000 + "]" * 100000)
-    assert runner.summarize(tmp_path / "deep.json") == [runner.MISSING_ARTIFACT]
+    assert runner.summarize(tmp_path / "deep.json") in ([runner.MISSING_ARTIFACT], [runner.MALFORMED_ARTIFACT])
     (tmp_path / "clean.json").write_text(json.dumps({"commits": [], "unrun": [], "issues": []}))
     assert runner.summarize(tmp_path / "clean.json") == ["No pinned test failed."]
     (tmp_path / "error.json").write_text(json.dumps({"commits": [], "unrun": [], "issues": ["runner error: x"]}))
