@@ -33,13 +33,16 @@ Invariants, for every input:
     proof-atom matcher.
 11. Differential, both directions: for generated test modules (fixtures,
     marks, parametrize, Hypothesis, classes with and without bases or
-    constructors, `__test__`, pytestmark, module-level skips, generator and
-    async tests, rebinding, and skips in bodies, fixtures, setup functions,
-    marks, parameter sets and Hypothesis phases), the test-reference resolver
-    accepts a name only if pytest collects it, accepts every collected name
-    except the deliberate refusals in `REFUSED_BUT_COLLECTED`, and warns on an
-    accepted test exactly when the file shows a skip; so an accepted test that
-    pytest collects but does not run is always warned.
+    constructors, `__test__` in any form, pytestmark, module-level skips, a
+    main guard's else branch, a shadowed `object`, a module `__getattr__`,
+    annotations, generator and async tests, rebinding, and skips in bodies,
+    fixtures, setup functions, marks, parameter sets and Hypothesis phases),
+    the test-reference screen accepts a name only if pytest collects it,
+    accepts every collected name except the deliberate refusals in
+    `REFUSED_BUT_COLLECTED`, and warns on an accepted test exactly when the
+    file shows a skip; so an accepted test that pytest collects but does not
+    run is always warned. This is evidence for a screen over the shapes
+    generated, not a proof over all Python.
 12. References by id: a `follows`, `adopts` or `pins` value that is neither
     `reading` nor an alternative id of the entry is always reported, and
     reordering an entry's alternatives never changes whether it passes or
@@ -213,12 +216,13 @@ def entries(draw, jurisdiction="us"):
             {"repo": "PolicyEngine/microcosm-dynamics", "commit": commit, "path": "tests/test_x.py", "name": f"test_alt_{i}", "pins": [alternative_id]}
             for i, alternative_id in enumerate(ids)
         ]
-    if draw(st.booleans()):
+    if value.get("tests") and draw(st.booleans()):
         value["money_case"] = {
             "description": draw(prose),
             "amount": draw(st.from_regex(r"(0|[1-9][0-9]{0,4})(\.[0-9]{2})?", fullmatch=True)),
             "currency": "USD",
             "period": draw(st.sampled_from(sc.PERIODS)),
+            "computed_by": draw(st.sampled_from([test["name"] for test in value["tests"]])),
         }
     return value
 
@@ -267,7 +271,7 @@ yaml_values = st.recursive(
 @SETTINGS
 @given(payload=st.one_of(yaml_values, st.fixed_dictionaries({"version": st.just(1), "entries": st.lists(yaml_values, max_size=3)})))
 def test_check_is_total(tmp_path, payload):
-    issues = sc.check_register(payload, repo(tmp_path), scan_modules=False)
+    issues = sc.check_register(payload, repo(tmp_path), scan_modules=True)
     assert isinstance(issues, list) and all(isinstance(issue, str) for issue in issues)
 
 
@@ -286,6 +290,7 @@ FIELD_PATHS = [
     ("implementations", 0, "follows"), ("implementations", 0, "cites_entry"),
     ("tests", 0, "repo"), ("tests", 0, "commit"), ("tests", 0, "path"), ("tests", 0, "name"), ("tests", 0, "pins"),
     ("money_case", "amount"), ("money_case", "currency"), ("money_case", "period"), ("money_case", "description"),
+    ("money_case", "computed_by"),
 ]
 
 
@@ -309,7 +314,7 @@ def _set_path(value, path, new):
 def test_check_is_total_on_malformed_known_fields(tmp_path, value, path, new):
     value = copy.deepcopy(value)
     assume(_set_path(value, path, new))
-    issues = sc.check_register({"version": 1, "entries": [value, copy.deepcopy(value)]}, repo(tmp_path), scan_modules=False)
+    issues = sc.check_register({"version": 1, "entries": [value, copy.deepcopy(value)]}, repo(tmp_path), scan_modules=True)
     assert isinstance(issues, list) and all(isinstance(issue, str) for issue in issues)
 
 
@@ -327,6 +332,8 @@ def test_round_trip_and_drift(tmp_path, value, field):
     # alternative would need its own pinning test.
     value.pop("implementations", None)
     value["tests"] = [{"path": "us/statutes/42/403.test.yaml", "name": "case", "pins": ["reading"]}]
+    if "money_case" in value:
+        value["money_case"]["computed_by"] = "case"
     carried = sc.to_module_interpretation(value, interpretation_id=value["id"], affects=["rule_a"])
     assert sc.interpretation_core(carried) == sc.interpretation_core(value)
     path = ctx.root / module
@@ -366,6 +373,8 @@ def test_confirmation_drift(tmp_path, value, confirmation, field, other):
     value["adopted_by"] = [{"module": module, "interpretation": value["id"]}]
     value.pop("implementations", None)
     value["tests"] = [{"path": "us/statutes/42/403.test.yaml", "name": "case", "pins": ["reading"]}]
+    if "money_case" in value:
+        value["money_case"]["computed_by"] = "case"
     carried = sc.to_module_interpretation(value, interpretation_id=value["id"], affects=["rule_a"])
     drifted = copy.deepcopy(carried)
     replacement = {"date": "2031-01-02", "record": "https://example.org/other"}.get(field, other)
@@ -518,6 +527,10 @@ REFUSED_BUT_COLLECTED = {
     "(unittest.TestCase)": "unittest collection follows other rules",
     "__test__ = True": "any __test__ binding is refused",
     "async": "an async test fails without a plugin; refused rather than modelled",
+    "__test__ store": "any store to __test__ (attribute, subscript, setattr) refuses the whole module",
+    "def _annotated(a: globals().__setitem__('__test__', False)):\n    pass": (
+        "annotations run at import before Python 3.14 (here they turn collection off); from 3.14 they are lazy"
+    ),
 }
 # Features that can stop a collected test running, all visible in the file.
 VISIBLE_SKIPS = {
@@ -571,6 +584,11 @@ CLASS_LINES = SCOPE_LINES + [
 MODULE_LINES = SCOPE_LINES + [
     "pytest.skip('later', allow_module_level=True)", "def setup_module():\n    pytest.skip('no data')",
     "@pytest.fixture(autouse=True)\ndef auto_skip():\n    pytest.skip('no data')",
+    # Round-4 review: shapes that turn collection off in a file that shows everything.
+    "if __name__ == '__main__':\n    pass\nelse:\n    pytest.skip('module', allow_module_level=True)",
+    "class object:\n    __test__ = False",
+    "def __getattr__(name):\n    if name == '__test__':\n        return False\n    raise AttributeError(name)",
+    "def _annotated(a: globals().__setitem__('__test__', False)):\n    pass",
 ]
 HEADER = (
     "import dataclasses\nimport unittest\nimport pytest\nfrom hypothesis import given, settings\n"
@@ -644,7 +662,7 @@ def generated_modules(draw):
             )
         parts.append("\n".join(lines) + "\n")
     names = [name for name in candidates if "::" not in name] + sorted({name.split("::")[0] for name in candidates if "::" in name})
-    tail = draw(st.sampled_from(["", "", "", "{} = None", "del {}", "{}.__test__ = False", "pytest.mark.skip({})"]))
+    tail = draw(st.sampled_from(["", "", "", "{} = None", "del {}", "{}.__test__ = False", "[{}][0].__test__ = False", "pytest.mark.skip({})"]))
     if tail:
         target = draw(st.sampled_from(names))
         parts.append(tail.format(target) + "\n")
@@ -652,6 +670,9 @@ def generated_modules(draw):
             for name, (refused, skips) in candidates.items():
                 if name == target or name.startswith(f"{target}::"):
                     skips.add(tail)
+        if "__test__" in tail:
+            for refused, _ in candidates.values():
+                refused.add("__test__ store")
     for decoy in ("test_missing", "TestK::test_missing"):
         candidates.setdefault(decoy, (set(), set()))
     return "\n".join(parts), candidates
