@@ -280,10 +280,9 @@ entries:
   alternatives:
   - reading: 'POMS RS 02501.140: deem an unmarried spouse or child receiving benefits on another record
       entitled.'
-    effect: The number holder's excess would also be charged against that recipient's benefit ($200 in
-      the invented case).
+    effect: The number holder's excess would also be charged against that recipient's benefit.
   - reading: 'Act 203(b)(1): deem a married ordinary adult child entitled, not only a disabled one.'
-    effect: The same $200 would be charged in the married ordinary-child version of the case.
+    effect: The excess would also be charged against a married ordinary deemed child's benefit.
   basis: The Act and the CFR both require marriage to the number holder; POMS's wording is broader, and
     the CFR's child basis is disability. No amount is computed for a case only the broader wording would
     reach.
@@ -572,7 +571,8 @@ entries:
     - alternatives[2]
   money_case:
     description: 'Method-B spouse, PIA $500, maximum $750, own RIB $64, 36 reduction months, two children:
-      record totals $750, $729 or $730.60 depending on the reading.'
+      children $125, $114.50 or $115.30 each and record totals $750, $729 or $730.60 depending on the reading
+      (the test takes the $20.90 age-reduction term and the $19.30 before-age amount as inputs).'
     amount: '21.00'
     currency: USD
     period: month
@@ -615,10 +615,10 @@ entries:
   alternatives:
   - reading: 'Count two parents first: the first parent''s own benefit exceeds the two-parent rate, so
       only the other is entitled, at the one-parent rate.'
-    effect: The other parent is paid $825 in the invented case.
+    effect: The other parent is paid at the one-parent rate.
   - reading: 'Test eligibility at the one-parent rate first: both count, and the other is paid at the
       two-parent rate.'
-    effect: The other parent is paid $750 in the invented case.
+    effect: The other parent is paid at the two-parent rate.
   basis: The entitlement test depends on the parent count and the count depends on entitlement; the sources
     fix no order.
   status: ruled

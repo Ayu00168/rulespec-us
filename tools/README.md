@@ -113,7 +113,7 @@ Register-only fields:
 | `adopted_by` | RuleSpec modules in this repository that carry the entry, as `module` (path) and `interpretation` (id) pairs. |
 | `implementations` | Code outside RuleSpec that adopts a reading: `repo`, `commit`, `path`, `follows` (`reading` or `alternatives[N]`, meaning what the code does today) and `cites_entry`, which says whether the file contains the global id. |
 | `tests` | Tests that pin readings: `path`, `name` (a test function, `Class::function`, or a companion-test case name) and `pins`, a list of `reading` or `alternatives[N]`. Add `repo` and `commit` for a test in another repository. A Python test must be a whole test function that pytest's default collection picks up from the file; whether it runs is the owning repository's CI's business. See [Test references](#test-references). |
-| `money_case` | Optional. An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency`, `period` (once, week, month or year) and `computed_by`, the name of the one test in the entry's `tests` that computes the amount, asserting it or both figures whose difference it is. A public file carries no amount that no pinned test computes: leave the money case out instead. |
+| `money_case` | Optional. An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency`, `period` (once, week, month or year) and `computed_by`, the name of the one test in the entry's `tests` that computes the amount, asserting it or both figures whose difference it is. A public file carries no amount that no pinned test computes: leave the money case out instead. `check` also requires every `$` amount in the entry's own prose (`question`, `reading`, `basis`, each alternative's `reading` and `effect`) to be one the money case states, so an entry without one has no dollar figures. |
 
 The register is public. These publication rules are reviewed by hand: it
 carries no people's names; `ruling.by` and `confirmation.by` name
@@ -122,7 +122,8 @@ private is quoted. `check` automates only part of that: `by` must be
 non-blank and `record` an https URL, and every string must be free of four
 token patterns (decision-queue ids such as `d1234`, session ids, local paths
 and email addresses). It cannot tell a person's name from an organisation's,
-or a private page from a public one.
+or a private page from a public one. The file may not use YAML anchors or
+aliases; `load_register` refuses them, so no entry can contain itself.
 
 ## Checks
 
@@ -189,9 +190,9 @@ The check screens a pinned Python test for one thing: that pytest's default
 collection picks it up from the test file alone, at the pinned commit. Whether
 the test then runs and passes belongs to the owning repository's CI. The
 screen catches the ways an honest test file stops a test being collected. It
-is not a proof against deliberately obfuscated import-time code (a helper
-that rebinds names through `globals()`, `exec` or `importlib` when called at
-import, and the like); that is out of scope, and such findings go in the
+is not a proof against deliberately obfuscated import-time code (another
+module's helper that rebinds this one's names, `setattr` with a computed
+name, and the like); that is out of scope, and such findings go in the
 limits below rather than into new rules. It reads only that file, so it
 accepts one narrow shape and refuses everything else:
 
@@ -214,11 +215,17 @@ accepts one narrow shape and refuses everything else:
   as `[test_x][0].__test__ = False`), no module `__getattr__`, no
   `pytestmark` other than marks, no shadowed `object` when a class names it as
   a base, and no generator test anywhere (pytest 9 rejects the whole module);
-- no `pytest.skip`/`importorskip`/`xfail`/`fail`/`exit` call, `raise`,
-  `exec`, `eval`, `globals()`, `vars()` or `sys.modules` in code that runs at
-  import: module-level statements, the `else` branch of an
-  `if __name__ == "__main__":` guard (not its body), class bodies, and
-  annotations, which run at import before Python 3.14.
+- no `pytest.skip`/`importorskip`/`xfail`/`fail`/`exit` call, `exec`,
+  `eval`, `globals()`, `vars()`, `sys.modules` or
+  `importlib.import_module(__name__)` in code that runs at import, and no
+  `raise` in it directly. Code that runs at import means module-level
+  statements, the `else` branch of an `if __name__ == "__main__":` guard (not
+  its body), class bodies, annotations (which run at import before Python
+  3.14), and the same-file functions any of that calls or uses as a
+  decorator, followed transitively, so an optional-data helper that skips
+  the module is refused. A same-file helper may raise an ordinary error,
+  which fails loudly, but not a skip exception. Simple aliases such as
+  `skip = pytest.skip` resolve to what they name.
 
 A parametrized case (`test_x[case-1]`) cannot be pinned. pytest builds case
 ids from more than the file shows (fixture `params`, `pytestmark`,
@@ -243,9 +250,9 @@ Known limits. The register does not check, and cannot see:
 - plugins;
 - ini or `addopts` selection (`-m`, `-k`, `--deselect`, `--ignore`,
   `testpaths`, `norecursedirs`, `empty_parameter_set_mark`);
-- deliberately obfuscated import-time code: rebinding through a helper called
-  at import (`globals()`, `exec`, `importlib.import_module(__name__)` inside a
-  function), and similar.
+- deliberately obfuscated import-time code: rebinding through another
+  module's helper, `getattr`/`setattr` with computed names, `eval` of built
+  strings reached indirectly, homoglyph names, and similar.
 
 Any of these can stop a pinned test being collected or run while every run
 exits 0. Import errors and modules that fail to collect do fail loudly.

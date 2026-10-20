@@ -59,6 +59,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -152,13 +153,43 @@ class RegisterError(ValueError):
 # Loading
 
 
+class _NoAliasLoader(yaml.SafeLoader):
+    """The register has no use for anchors or aliases, and an alias can make
+    a recursive structure, so loading refuses them."""
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        if self.check_event(yaml.AliasEvent):
+            event = self.peek_event()
+            raise yaml.YAMLError(f"anchors and aliases are not allowed (alias *{event.anchor} {event.start_mark})")
+        if self.check_event(yaml.ScalarEvent, yaml.SequenceStartEvent, yaml.MappingStartEvent):
+            event = self.peek_event()
+            if event.anchor is not None:
+                raise yaml.YAMLError(f"anchors and aliases are not allowed (anchor &{event.anchor} {event.start_mark})")
+        return super().compose_node(parent, index)
+
+
 def load_register(path: Path) -> Any:
     if not path.is_file() or path.is_symlink():
         raise RegisterError(f"{path} must be a regular file")
     try:
-        return yaml.safe_load(path.read_text(encoding="utf-8"))
+        return yaml.load(path.read_text(encoding="utf-8"), Loader=_NoAliasLoader)  # noqa: S506 - a SafeLoader
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
-        raise RegisterError(f"{path} is not valid UTF-8 YAML: {exc}") from exc
+        raise RegisterError(f"{path} is not valid UTF-8 YAML without anchors: {exc}") from exc
+
+
+def _recursive(value: Any) -> bool:
+    """Does this parsed value contain itself (a YAML alias cycle)?"""
+
+    stack: list[tuple[Any, frozenset[int]]] = [(value, frozenset())]
+    while stack:
+        item, path = stack.pop()
+        if not isinstance(item, (dict, list)):
+            continue
+        if id(item) in path:
+            return True
+        children = item.values() if isinstance(item, dict) else item
+        stack.extend((child, path | {id(item)}) for child in children)
+    return False
 
 
 def global_id(entry: Mapping[str, Any]) -> str:
@@ -243,6 +274,37 @@ def _check_record(record: Any, *, label: str, confirmation: bool, issues: list[s
         issues.append(f"{label}.date must be a real YYYY-MM-DD date.")
     if (not confirmation or "record" in record) and not _https_url(record.get("record")):
         issues.append(f"{label}.record must be an https URL.")
+
+
+DOLLAR_RE = re.compile(r"\$\s?([0-9][0-9,]*(?:\.[0-9]+)?)")
+
+
+def _dollar_values(text: str) -> set[str]:
+    """Dollar amounts in text, normalised: "$4,200.00" and "$4,200" -> "4200"."""
+
+    found = set()
+    for match in DOLLAR_RE.finditer(text):
+        digits = match.group(1).replace(",", "").rstrip(".")
+        try:
+            found.add(format(Decimal(digits).normalize(), "f"))
+        except InvalidOperation:
+            continue
+    return found
+
+
+def _prose_fields(entry: Mapping[str, Any], label: str) -> Iterator[tuple[str, str]]:
+    """The entry's own prose: question, reading, basis and each alternative's
+    reading and effect. Source excerpts, citations and records quote others."""
+
+    for key in ("question", "reading", "basis"):
+        if isinstance(entry.get(key), str):
+            yield f"{label}.{key}", entry[key]
+    alternatives = entry.get("alternatives")
+    for index, alternative in enumerate(alternatives if isinstance(alternatives, list) else []):
+        if isinstance(alternative, dict):
+            for key in ("reading", "effect"):
+                if isinstance(alternative.get(key), str):
+                    yield f"{label}.alternatives[{index}].{key}", alternative[key]
 
 
 def check_interpretation_core(entry: Mapping[str, Any], *, label: str, require_texts: bool) -> list[str]:
@@ -414,7 +476,9 @@ def yaml_test_case_names(text: str) -> set[str]:
 #   pytest.skip/importorskip/xfail/fail/exit or raise in code that runs at
 #   import, and no generator test anywhere (pytest 9 refuses the whole module).
 # "Code that runs at import" is module-level statements, a main guard's else
-# branch (not its body), class bodies, and annotations (eager before 3.14).
+# branch (not its body), class bodies, annotations (eager before 3.14), and
+# the same-file functions any of those call or use as a decorator,
+# transitively; simple aliases (`skip = pytest.skip`) resolve to what they name.
 # A parametrized case id ([...]) is refused: pytest builds ids from sources the
 # file does not show.
 #
@@ -440,6 +504,7 @@ _TEST_DECORATORS = frozenset(
 _SKIP_MARKS = frozenset({"skip", "skipif", "xfail"})
 _SKIP_CALLS = frozenset({"pytest.importorskip", "pytest.skip", "pytest.xfail"})
 _MODULE_STOPS = _SKIP_CALLS | {"pytest.exit", "pytest.fail"}
+_SKIP_EXCEPTIONS = frozenset({"pytest.skip.Exception", "unittest.SkipTest", "_pytest.outcomes.Skipped"})
 _REBINDING_BUILTINS = frozenset({"eval", "exec", "globals", "vars"})
 _SETUPS = {"module": ("setup_module", "setup_function"), "class": ("setup_class", "setup_method")}
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
@@ -600,6 +665,23 @@ def _every_import(tree: ast.Module) -> dict[str, set[str]]:
         elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
             for alias in node.names:
                 found.setdefault(alias.asname or alias.name, set()).add(f"{node.module}.{alias.name}")
+    # Simple aliases, in any scope: `skip = pytest.skip`, `m = sys.modules`.
+    aliases = [
+        (node.targets[0].id, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, (ast.Name, ast.Attribute))
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for name, value in aliases:
+            more = _possible(value, found) - found.get(name, set())
+            if more:
+                found.setdefault(name, set()).update(more)
+                changed = True
     return found
 
 
@@ -744,8 +826,13 @@ def _module_collects(tree: ast.Module, imports: dict[str, str]) -> bool:
     if any(_stores_test_flag(node) for node in ast.walk(tree)):
         return False
     every = _every_import(tree)
-    for node in _import_time(tree.body):
-        if isinstance(node, ast.Raise):
+    import_time = list(_import_time(tree.body))
+    if any(isinstance(node, ast.Raise) for node in import_time):
+        return False
+    # Same-file functions called at import run then too, transitively (the
+    # optional-data helper `_require_data()` that skips the module).
+    for node in import_time + [node for helper in _called_at_import(tree, import_time) for node in ast.walk(helper)]:
+        if isinstance(node, ast.Raise) and node.exc is not None and _possible(node.exc, every) & _SKIP_EXCEPTIONS:
             return False
         if isinstance(node, ast.Call) and _possible(node, every) & _MODULE_STOPS:
             return False
@@ -753,6 +840,12 @@ def _module_collects(tree: ast.Module, imports: dict[str, str]) -> bool:
             return False
         if isinstance(node, (ast.Attribute, ast.Name)) and "sys.modules" in _possible(node, every):
             return False
+        if (
+            isinstance(node, ast.Call)
+            and "importlib.import_module" in _possible(node, every)
+            and any(isinstance(arg, ast.Name) and arg.id == "__name__" for arg in node.args)
+        ):
+            return False  # the module itself, to rebind its names
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.FunctionDef)
@@ -762,6 +855,34 @@ def _module_collects(tree: ast.Module, imports: dict[str, str]) -> bool:
         ):
             return False  # pytest 9 fails the module: "'yield' keyword is allowed in fixtures, but not in tests"
     return True
+
+
+def _called_at_import(tree: ast.Module, import_time: list[ast.AST]) -> list[ast.AST]:
+    """Module-level functions that import-time code calls, by name or as a
+    decorator, and the ones those call in turn."""
+
+    functions = {
+        node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    def callees(nodes: Iterable[ast.AST]) -> set[str]:
+        names = set()
+        for node in nodes:
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
+                names.add(node.func.id)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for decorator in node.decorator_list:
+                    target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                    if isinstance(target, ast.Name) and target.id in functions:
+                        names.add(target.id)
+        return names
+
+    pending, seen = callees(import_time), set()
+    while pending - seen:
+        name = min(pending - seen)
+        seen.add(name)
+        pending |= callees(ast.walk(functions[name]))
+    return [functions[name] for name in sorted(seen)]
 
 
 def _object_rebound(tree: ast.Module) -> bool:
@@ -1242,6 +1363,17 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
         if isinstance(follows, str) and READING_REF_RE.fullmatch(follows) and follows not in pinned:
             issues.append(f"{label}.implementations[{i_index}] follows {follows}, which no test pins.")
 
+    # A public dollar figure needs a pinned test: every $ amount in the entry's
+    # own prose must be one its money case (computed by a named test) states.
+    money = entry.get("money_case") if isinstance(entry.get("money_case"), dict) else {}
+    covered = _dollar_values(str(money.get("description", ""))) | _dollar_values(f"${money.get('amount', '')}")
+    for field_label, text in _prose_fields(entry, label):
+        for amount in sorted(_dollar_values(text) - covered):
+            issues.append(
+                f"{field_label} states ${amount}, which no money case backs: name it in the money case "
+                "(whose computed_by test computes it) or describe the effect without the amount."
+            )
+
     if "money_case" in entry:
         money = entry["money_case"]
         m_label = f"{label}.money_case"
@@ -1386,6 +1518,8 @@ def check_register(payload: Any, ctx: RepoContext, *, scan_modules: bool = True)
     issues: list[str] = []
     if not isinstance(payload, dict):
         return [f"{REGISTER_FILENAME} must be a mapping with `version` and `entries`."]
+    if _recursive(payload):
+        return [f"{REGISTER_FILENAME} contains itself through an alias; anchors and aliases are not allowed."]
     for key in payload:
         if key not in {"version", "entries"}:
             issues.append(f"{REGISTER_FILENAME} has unknown top-level key `{key}`.")
