@@ -484,10 +484,14 @@ def test_production_code_cannot_pin_a_reading(tmp_path):
     value["tests"] = [{"path": "tools/source_conflicts.py", "name": "global_id", "pins": ["reading"]}]
     issues = check(ctx, value)
     assert any("is not a test file (test_*.py)" in issue for issue in issues), issues
-    # A helper inside a test file is not a test either.
+    # A helper inside a test file passes the syntactic screen; pytest does
+    # not collect it, so tools/pin_runner.py reports it `missing`.
     (ctx.root / "tests" / "test_helpers.py").write_text("def global_id(entry):\n    return entry\n")
     value["tests"] = [{"path": "tests/test_helpers.py", "name": "global_id", "pins": ["reading"]}]
-    assert any("global_id is not a test pytest collects" in issue for issue in check(ctx, value))
+    value["money_case"]["computed_by"] = "global_id"
+    assert check(ctx, value) == []
+    value["tests"] = [{"path": "tests/test_helpers.py", "name": "absent", "pins": ["reading"]}]
+    assert any("absent is not a test function defined in tests/test_helpers.py" in issue for issue in check(ctx, value))
 
 
 def test_a_parametrized_case_cannot_be_pinned(tmp_path):
@@ -527,135 +531,41 @@ def test_a_non_utf8_test_file_is_read_by_its_coding_cookie(tmp_path):
     assert any("case is not a test case in" in issue for issue in check(ctx, value))
 
 
-MODULE = "import pytest\n"
-HYPOTHESIS = "from hypothesis import given, settings\nimport hypothesis.strategies as st\n"
-
-
 @pytest.mark.parametrize(
     ("source", "name", "expected"),
     [
-        # Accepted: plain tests, Test* methods, and decorators that keep the test collected and run.
+        # The screen is syntax only: a def at module level, or in a module-level class.
         ("def test_a():\n    pass\n", "test_a", True),
+        ("async def test_a():\n    pass\n", "test_a", True),
         ("class TestC:\n    def test_d(self):\n        pass\n", "TestC::test_d", True),
-        ("class TestC(object):\n    def test_d(self):\n        pass\n", "TestC::test_d", True),
-        (MODULE + "@pytest.mark.parametrize('x', [1, 2])\ndef test_x(x):\n    pass\n", "test_x", True),
-        (MODULE + "CASES = [1]\n@pytest.mark.parametrize('x', CASES)\ndef test_x(x):\n    pass\n", "test_x", True),
-        (MODULE + "@pytest.mark.slow\n@pytest.mark.usefixtures('tmp_path')\ndef test_x():\n    pass\n", "test_x", True),
-        (MODULE + "pytestmark = [pytest.mark.slow]\nclass TestK:\n    pytestmark = pytest.mark.slow\n    def test_x(self):\n        pass\n", "TestK::test_x", True),
-        ("import pytest as pt\n@pt.mark.parametrize('x', [1])\ndef test_x(x):\n    pass\n", "test_x", True),
-        (HYPOTHESIS + "@given(st.integers())\n@settings(max_examples=5)\ndef test_h(x):\n    pass\n", "test_h", True),
-        ("from unittest import mock\n@mock.patch('os.getcwd')\ndef test_m(m):\n    pass\n", "test_m", True),
-        # pytest collects a test whose cases come from a fixture's params, pytestmark or a hook.
-        (MODULE + "@pytest.fixture(params=[10, 20])\ndef level(request):\n    return request.param\ndef test_fx(level):\n    pass\n", "test_fx", True),
-        (MODULE + "def pytest_generate_tests(metafunc):\n    metafunc.parametrize('g', ['u'])\ndef test_gt(g):\n    pass\n", "test_gt", True),
-        (MODULE + "def test_a():\n    pass\nif __name__ == '__main__':\n    raise SystemExit(pytest.main([__file__]))\n", "test_a", True),
-        # Not tests: helpers, Test* names pytest skips, and fixtures.
-        ("def helper():\n    pass\n", "helper", False),
-        ("def testfoo():\n    pass\n", "testfoo", False),  # some configs collect only test_*
-        ("class Helper:\n    def test_d(self):\n        pass\n", "Helper::test_d", False),
+        ("class TestC(Base):\n    async def test_d(self):\n        pass\n", "TestC::test_d", True),
+        # Compound statements at module level still define at module level.
+        ("if X:\n    def test_a():\n        pass\nelse:\n    pass\n", "test_a", True),
+        ("try:\n    import x\nexcept ImportError:\n    def test_a():\n        pass\n", "test_a", True),
+        ("try:\n    pass\nfinally:\n    def test_a():\n        pass\n", "test_a", True),
+        ("with open('x') as f:\n    class TestC:\n        def test_d(self):\n            pass\n", "TestC::test_d", True),
+        ("for i in []:\n    pass\nelse:\n    def test_a():\n        pass\n", "test_a", True),
+        ("while False:\n    def test_a():\n        pass\n", "test_a", True),
+        ("match x:\n    case 1:\n        def test_a():\n            pass\n", "test_a", True),
+        ("class TestC:\n    if X:\n        def test_d(self):\n            pass\n", "TestC::test_d", True),
+        # Decorators and import-time code are not judged: pytest decides at run time.
+        ("import pytest\n@pytest.mark.skip\ndef test_a():\n    pass\n", "test_a", True),
+        ("import pytest\npytest.skip('x', allow_module_level=True)\ndef test_a():\n    pass\n", "test_a", True),
+        # Not defined where the name says.
+        ("def test_a():\n    pass\n", "test_b", False),
+        ("def outer():\n    def test_a():\n        pass\n", "test_a", False),
         ("class TestC:\n    def test_d(self):\n        pass\n", "test_d", False),
-        ("class TestC:\n    def test_d(self):\n        pass\n", "TestC::test_e", False),
-        (MODULE + "@pytest.fixture\ndef test_client():\n    return 1\ndef test_uses(test_client):\n    pass\n", "test_client", False),
-        (MODULE + "@pytest.fixture()\ndef test_client():\n    return 1\n", "test_client", False),
-        ("from pytest import fixture\n@fixture\ndef test_client():\n    return 1\n", "test_client", False),
-        # Skips and xfails leave the test collected: accepted, with a warning
-        # (test_python_test_warnings).
-        (MODULE + "@pytest.mark.skip\ndef test_x():\n    pass\n", "test_x", True),
-        (MODULE + "@pytest.mark.parametrize('x', [])\ndef test_x(x):\n    pass\n", "test_x", True),
-        (MODULE + "pytestmark = pytest.mark.skip\ndef test_x():\n    pass\n", "test_x", True),
-        (MODULE + "@pytest.mark.skip\nclass TestK:\n    def test_x(self):\n        pass\n", "TestK::test_x", True),
-        (MODULE + "def test_x():\n    pass\npytest.mark.skip(test_x)\n", "test_x", True),
-        # A pytestmark that is not plainly marks, or a module that stops collecting.
-        (MODULE + "SKIP = pytest.mark.skip\npytestmark = SKIP\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "pytest.skip('later', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "numpy = pytest.importorskip('numpy')\ndef test_x():\n    pass\n", "test_x", False),
-        ("raise ImportError('no')\ndef test_x():\n    pass\n", "test_x", False),
-        # Round-3 review, finding 3: rebinding at import time.
-        ("def test_x():\n    pass\nexec('test_x = None')\n", "test_x", False),
-        ("def test_y():\n    pass\nglobals()['test_y'] = None\n", "test_y", False),
-        ("import sys\ndef test_x():\n    pass\nsetattr(sys.modules[__name__], '__test__', False)\n", "test_x", False),
-        ("import sys\ndef test_x():\n    pass\nsys.modules[__name__].test_x = None\n", "test_x", False),
-        ("import sys as s\ndef test_x():\n    pass\ns.modules[__name__].test_x = None\n", "test_x", False),
-        ("from sys import modules\ndef test_x():\n    pass\nmodules[__name__].test_x = None\n", "test_x", False),
-        # A store that makes `pytest` untrusted must not hide its module-level skip.
-        (MODULE + "pytest.foo = 1\npytest.skip('x', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", False),
-        ("def test_x():\n    pass\ntest_x.__dict__['__test__'] = False\n", "test_x", False),
-        (MODULE + "def test_y():\n    pass\nvars(test_y).update(pytestmark=[pytest.mark.skip])\n", "test_y", False),
-        ("def test_x():\n    pass\nregister(test_x)\n", "test_x", False),
-        (MODULE + "pytest.mark.slow = pytest.mark.skip\n@pytest.mark.slow\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "def setup_module():\n    pytest.mark.slow = pytest.mark.skip\n@pytest.mark.slow\ndef test_x():\n    pass\n", "test_x", False),
-        ("import hypothesis\nhypothesis.__dict__['given'] = None\n@hypothesis.given(1)\ndef test_x(h):\n    pass\n", "test_x", False),
-        (MODULE + "def swap():\n    global pytest\n    pytest = None\n@pytest.mark.slow\ndef test_x():\n    pass\n", "test_x", False),
-        # Round-4 review: shapes in files that show everything.
-        (MODULE + "if __name__ == '__main__':\n    pass\nelse:\n    pytest.skip('module', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", False),
-        ("class object:\n    __test__ = False\nclass TestA(object):\n    def test_x(self):\n        pass\n", "TestA::test_x", False),
-        ("class object:\n    __test__ = False\nclass TestA:\n    def test_x(self):\n        pass\n", "TestA::test_x", True),
-        ("def _helper(a: globals().__setitem__('test_x', None)):\n    pass\ndef test_x():\n    pass\n", "test_x", False),
-        ("def test_x():\n    pass\nclass Helper:\n    note: exec('test_x = None')\n", "test_x", False),
-        ("def test_x():\n    pass\nclass Helper:\n    test_x.__dict__['flag'] = 1\n", "test_x", False),
-        ("def __getattr__(name):\n    if name == '__test__':\n        return False\n    raise AttributeError(name)\ndef test_x():\n    pass\n", "test_x", False),
-        ("def test_x():\n    pass\n[test_x][0].__test__ = False\n", "test_x", False),
-        ("def test_x():\n    pass\nsetattr([test_x][0], '__test__', False)\n", "test_x", False),
-        # Final review of 6a21582e: a skip reached at import through a same-file
-        # helper (the optional-data pattern) or an alias.
-        (MODULE + "from pathlib import Path\ndef _require_reference_data():\n    if not Path(__file__).with_name('f.json').is_file():\n        pytest.skip('not downloaded', allow_module_level=True)\n_require_reference_data()\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "def _a():\n    _b()\ndef _b():\n    pytest.importorskip('no_such_module')\n_a()\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "def _load():\n    pytest.skip('x', allow_module_level=True)\nDATA = _load()\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "def deco(f):\n    pytest.skip('x', allow_module_level=True)\n    return f\n@deco\ndef helper():\n    pass\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "skip = pytest.skip\nskip('x', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "ios = pytest.importorskip\nnp = ios('numpy')\ndef test_x():\n    pass\n", "test_x", False),
-        (MODULE + "a = pytest.exit\nb = a\nb('x')\ndef test_x():\n    pass\n", "test_x", False),
-        ("import unittest\ndef _gate():\n    raise unittest.SkipTest('x')\n_gate()\ndef test_x():\n    pass\n", "test_x", False),
-        ("def _hide():\n    globals()['test_x'] = None\n_hide()\ndef test_x():\n    pass\n", "test_x", False),
-        ("import importlib\ndef test_x():\n    pass\nm = importlib.import_module(__name__)\nm.test_x = None\n", "test_x", False),
-        ("import sys\nmodules = sys.modules\ndef test_x():\n    pass\nmodules[__name__].test_x = None\n", "test_x", False),
-        # Round-6 review: call forms the screen cannot follow are accepted with
-        # a warning (test_python_test_warnings), not refused.
-        (MODULE + "from functools import partial\nskip_if_missing = partial(pytest.skip, 'x', allow_module_level=True)\nskip_if_missing()\ndef test_x():\n    pass\n", "test_x", True),
-        # Statically unreachable branches run nothing (round-6 review, nit).
-        (MODULE + "def _gate():\n    pytest.skip('x', allow_module_level=True)\nif False:\n    _gate()\ndef test_x():\n    pass\n", "test_x", True),
-        (MODULE + "from typing import TYPE_CHECKING\ndef _gate():\n    pytest.skip('x', allow_module_level=True)\nif TYPE_CHECKING:\n    _gate()\ndef test_x():\n    pass\n", "test_x", True),
-        (MODULE + "import typing\nif typing.TYPE_CHECKING:\n    pytest.skip('x', allow_module_level=True)\nelse:\n    pass\ndef test_x():\n    pass\n", "test_x", True),
-        (MODULE + "if False:\n    pass\nelse:\n    pytest.skip('x', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", False),
-        # A helper nobody calls at import, or one that only raises loudly, changes nothing.
-        (MODULE + "def _maybe():\n    pytest.skip('x', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", True),
-        ("def _load():\n    raise ValueError('bad')\ndef test_x():\n    pass\n", "test_x", True),
-        # A helper class's own __test__ = False is the usual way to keep it uncollected.
-        ("class TestData:\n    __test__ = False\ndef test_x():\n    pass\n", "test_x", True),
-        ("async def test_x():\n    pass\n", "test_x", False),  # fails without an async plugin
-        # Round-2 review, finding 4: shapes pytest does not collect under that name.
-        ("__test__ = False\ndef test_x():\n    pass\n", "test_x", False),
-        ("class TestK:\n    __test__ = False\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
-        ("def test_x():\n    pass\ntest_x.__test__ = False\n", "test_x", False),
-        ("class TestK:\n    def test_x(self):\n        pass\nTestK.__test__ = False\n", "TestK::test_x", False),
-        ("def test_x():\n    pass\nsetattr(test_x, '__test__', False)\n", "test_x", False),
-        ("def test_x():\n    pass\ndel test_x\n", "test_x", False),
-        ("def test_x():\n    pass\ntest_x = None\n", "test_x", False),
-        ("def test_x():\n    pass\nif True:\n    test_x = None\n", "test_x", False),
-        ("def test_x():\n    pass\ndef rebind():\n    global test_x\n    test_x = None\nrebind()\n", "test_x", False),
-        ("def test_x():\n    pass\nfrom os import getcwd as test_x\n", "test_x", False),
-        ("class TestK:\n    def __new__(cls):\n        return object.__new__(cls)\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
-        ("class TestK:\n    def __init__(self):\n        pass\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
-        ("class TestK:\n    __init__ = lambda self: None\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
-        ("class Base:\n    def __init__(self):\n        pass\nclass TestK(Base):\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
-        ("import dataclasses\n@dataclasses.dataclass\nclass TestK:\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
-        ("import abc\nclass TestK(abc.ABC):\n    @abc.abstractmethod\n    def helper(self):\n        pass\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
-        ("import abc\nclass TestK(metaclass=abc.ABCMeta):\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
-        ("import unittest\nclass TestU(unittest.TestCase):\n    def test_u(self):\n        pass\n", "TestU::test_u", False),
-        ("class TestK:\n    @property\n    def test_x(self):\n        pass\n", "TestK::test_x", False),
-        ("class TestK:\n    @staticmethod\n    def test_x():\n        pass\n", "TestK::test_x", False),
-        ("def parametrize(*a, **k):\n    return lambda f: None\n@parametrize('x', [1])\ndef test_x(x=0):\n    pass\n", "test_x", False),
-        ("def noop(f):\n    return None\n@noop\ndef test_x():\n    pass\n", "test_x", False),
-        ("def test_x():\n    pass\ndef test_gen():\n    yield 1\n", "test_x", False),  # pytest 9 fails the module
-        ("def test_x():\n    yield 1\n", "test_x", False),
-        ("if True:\n    def test_x():\n        pass\n", "test_x", False),
-        ("class TestOuter:\n    class TestInner:\n        def test_x(self):\n            pass\n", "TestInner::test_x", False),
-        ("def broken(:\n", "broken", False),
-        # A decorator counts only when its root name is an import bound nowhere else.
-        ("class pytest:\n    class mark:\n        slow = staticmethod(lambda f: None)\n@pytest.mark.slow\ndef test_x():\n    pass\n", "test_x", False),
-        ("import pytest\npytest = None\n@pytest.mark.slow\ndef test_x():\n    pass\n", "test_x", False),
-        ("@given(1)\ndef test_x():\n    pass\n", "test_x", False),
-        ("def test_x():\n    pass\n", "test_x[1]", False),
+        ("def test_a():\n    pass\n", "TestC::test_a", False),
+        ("class TestC:\n    class Inner:\n        def test_d(self):\n            pass\n", "TestC::test_d", False),
+        ("def make():\n    class TestC:\n        def test_d(self):\n            pass\n", "TestC::test_d", False),
+        ("test_a = lambda: None\n", "test_a", False),
+        ("from helpers import test_a\n", "test_a", False),
+        ("class test_a:\n    pass\n", "test_a", False),
+        # Names the register refuses, and files that do not parse.
+        ("def test_a():\n    pass\n", "test_a[1]", False),
+        ("def test_a():\n    pass\n", "A::B::test_a", False),
+        ("def test_a(:\n    pass\n", "test_a", False),
+        ("def test_a():\n    pass\n\x00", "test_a", False),
     ],
 )
 def test_python_test_resolution(source, name, expected):
@@ -703,93 +613,6 @@ def test_check_is_total_on_every_field(tmp_path):
             target[path[-1]] = new
             issues = check(ctx, value, copy.deepcopy(value), scan=True)
             assert isinstance(issues, list) and all(isinstance(issue, str) for issue in issues), (path, new)
-
-
-@pytest.mark.parametrize(
-    ("source", "name", "reasons"),
-    [
-        (MODULE + "def test_x():\n    pass\n", "test_x", []),
-        (MODULE + "@pytest.mark.slow\n@pytest.mark.parametrize('x', [1])\ndef test_x(x):\n    pass\n", "test_x", []),
-        # Marks, however applied.
-        (MODULE + "@pytest.mark.skip\ndef test_x():\n    pass\n", "test_x", ["a pytest.mark.skip mark"]),
-        (MODULE + "@pytest.mark.skipif(True, reason='r')\ndef test_x():\n    pass\n", "test_x", ["a pytest.mark.skipif mark"]),
-        (MODULE + "@pytest.mark.xfail\ndef test_x():\n    pass\n", "test_x", ["a pytest.mark.xfail mark"]),
-        (MODULE + "pytestmark = [pytest.mark.slow, pytest.mark.skip]\ndef test_x():\n    pass\n", "test_x", ["a pytest.mark.skip mark"]),
-        (MODULE + "class TestK:\n    pytestmark = [pytest.mark.xfail]\n    def test_x(self):\n        pass\n", "TestK::test_x", ["a pytest.mark.xfail mark"]),
-        (MODULE + "@pytest.mark.skip\nclass TestK:\n    def test_x(self):\n        pass\n", "TestK::test_x", ["a pytest.mark.skip mark"]),
-        (MODULE + "def test_x():\n    pass\npytest.mark.skip(test_x)\n", "test_x", ["a pytest.mark.skip mark"]),
-        (MODULE + "class TestA:\n    def test_x(self):\n        pass\npytest.mark.xfail(TestA)\n", "TestA::test_x", ["a pytest.mark.xfail mark"]),
-        # Parameter sets.
-        (MODULE + "@pytest.mark.parametrize('x', [])\ndef test_x(x):\n    pass\n", "test_x", ["an empty parameter set"]),
-        (MODULE + "CASES = []\n@pytest.mark.parametrize('x', CASES)\ndef test_x(x):\n    pass\n", "test_x", ["an empty parameter set"]),
-        (MODULE + "@pytest.mark.parametrize('x', range(0))\ndef test_x(x):\n    pass\n", "test_x", ["an empty parameter set"]),
-        (MODULE + "@pytest.mark.parametrize('x', [c for c in ()])\ndef test_x(x):\n    pass\n", "test_x", ["an empty parameter set"]),
-        (MODULE + "CASES = [pytest.param(1, marks=pytest.mark.skip)]\n@pytest.mark.parametrize('x', CASES)\ndef test_x(x):\n    pass\n", "test_x", ["a skip or xfail mark on every case"]),
-        (MODULE + "from hypothesis import Phase, given, settings, strategies as st\n@settings(phases=[Phase.explicit])\n@given(st.integers())\ndef test_x(h):\n    pass\n", "test_x", ["Hypothesis settings that set phases"]),
-        (MODULE + "@pytest.mark.parametrize('x', [pytest.param(1, marks=pytest.mark.skip)])\ndef test_x(x):\n    pass\n", "test_x", ["a skip or xfail mark on every case"]),
-        # Round-3 review, finding 1: skips the file shows outside the marks.
-        (MODULE + "def test_x():\n    pytest.skip('no data')\n", "test_x", ["pytest.skip in its body"]),
-        (MODULE + "import os\ndef test_x():\n    if not os.environ.get('DATA'):\n        pytest.skip('no data')\n", "test_x", ["pytest.skip in its body"]),
-        (MODULE + "def test_x():\n    pytest.importorskip('no_such_module_xyz')\n", "test_x", ["pytest.importorskip in its body"]),
-        (MODULE + "@pytest.fixture\ndef skipper():\n    pytest.skip('no data')\ndef test_x(skipper):\n    pass\n", "test_x", ["pytest.skip in fixture skipper"]),
-        (MODULE + "@pytest.fixture\ndef skipper():\n    pytest.skip('no data')\n@pytest.fixture\ndef data(skipper):\n    return 1\ndef test_x(data):\n    pass\n", "test_x", ["pytest.skip in fixture skipper"]),
-        (MODULE + "@pytest.fixture(name='staged')\ndef _staged():\n    pytest.skip('no data')\ndef test_x(staged):\n    pass\n", "test_x", ["pytest.skip in fixture staged"]),
-        (MODULE + "@pytest.fixture\ndef skipper():\n    pytest.skip('no data')\n@pytest.mark.usefixtures('skipper')\ndef test_x():\n    pass\n", "test_x", ["pytest.skip in fixture skipper"]),
-        (MODULE + "@pytest.fixture(autouse=True)\ndef skipper():\n    pytest.skip('no data')\ndef test_x():\n    pass\n", "test_x", ["pytest.skip in fixture skipper"]),
-        (MODULE + "def setup_module():\n    pytest.skip('no data')\ndef test_x():\n    pass\n", "test_x", ["pytest.skip in setup_module"]),
-        (MODULE + "def _published_case():\n    return _load()\ndef _load():\n    pytest.skip('evidence absent')\ndef test_x():\n    _published_case()\n", "test_x", ["pytest.skip in _load, which it calls"]),
-        (MODULE + "def _helper():\n    return 1\ndef test_x():\n    assert _helper() == 1\n", "test_x", []),
-        (MODULE + "class TestK:\n    def setup_method(self):\n        pytest.xfail('later')\n    def test_x(self):\n        pass\n", "TestK::test_x", ["pytest.xfail in setup_method"]),
-        (MODULE + "from hypothesis import given, settings, strategies as st\n@settings(phases=())\n@given(st.integers())\ndef test_x(h):\n    pass\n", "test_x", ["Hypothesis settings that set phases"]),
-        (MODULE + "from hypothesis import settings\nsettings.register_profile('none', max_examples=0)\nsettings.load_profile('none')\ndef test_x():\n    pass\n", "test_x", ["a Hypothesis profile loaded at import"]),
-        (MODULE + "pytest.foo = 1\ndef test_x():\n    pytest.skip('x')\n", "test_x", ["pytest.skip in its body"]),
-        # Round-6 review: import-time calls the screen cannot follow.
-        (MODULE + "from functools import partial\nskip_if_missing = partial(pytest.skip, 'x', allow_module_level=True)\nskip_if_missing()\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `partial` at line 3; the test may not be collected", "import-time code the screen can't follow: `skip_if_missing` at line 4; the test may not be collected"]),
-        (MODULE + "import os\nskip = pytest.skip if os.environ.get('X') else print\nskip('x', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `skip` at line 4; the test may not be collected"]),
-        (MODULE + "from typing import Callable\ns: Callable = pytest.skip\ns('x', allow_module_level=True)\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `s` at line 4; the test may not be collected"]),
-        (MODULE + "def _gate():\n    pytest.skip('x', allow_module_level=True)\ng = _gate\ng()\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `g` at line 5; the test may not be collected"]),
-        (MODULE + "try:\n    def _gate():\n        pytest.skip('x', allow_module_level=True)\nexcept Exception:\n    pass\n_gate()\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `_gate` at line 7; the test may not be collected"]),
-        (MODULE + "from mypkg.data import require_data\nrequire_data()\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `require_data` at line 3; the test may not be collected"]),
-        (MODULE + "@retry(3)\ndef helper():\n    pass\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `retry` at line 2; the test may not be collected"]),
-        (MODULE + "GATES = []\nfor gate in GATES:\n    gate.check()\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `gate.check` at line 4; the test may not be collected"]),
-        (MODULE + "from mypkg import configure\ndef _setup():\n    configure()\n_setup()\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `configure` at line 4; the test may not be collected"]),
-        (MODULE + "from mypkg import register\n@register\ndef helper():\n    pass\ndef test_x():\n    pass\n", "test_x", ["import-time code the screen can't follow: `register` at line 3; the test may not be collected"]),
-        # Calling a Hypothesis composite at import runs nothing yet.
-        (MODULE + "from hypothesis import strategies as st\n@st.composite\ndef pairs(draw):\n    return draw(st.integers()), load_more()\nPAIRS = pairs()\ndef test_x():\n    pass\n", "test_x", []),
-        # Safe calls, values the screen can see, and clean helpers it follows give none.
-        (MODULE + "import re\nfrom pathlib import Path\nfrom fractions import Fraction as F\nPAT = re.compile('a')\nDATA = Path(__file__).parent / 'data'\nFILES = sorted(DATA.glob('*.json'))\nTWO = F(1, 2)\ndef _helper():\n    here = Path(__file__)\n    return here.with_name('x').is_file()\nOK = _helper()\n@pytest.mark.parametrize('x', [len('ab'), 2])\ndef test_x(x):\n    pass\n", "test_x", []),
-        # A refused reference has no warnings: it fails instead.
-        (MODULE + "def helper():\n    pytest.skip('x')\n", "helper", []),
-    ],
-)
-def test_python_test_warnings(source, name, reasons):
-    assert sc.python_test_warnings(source, name) == reasons
-    if reasons:
-        assert sc.python_test_exists(source, name)
-
-
-def test_check_warns_on_pins_that_may_not_run(tmp_path, capsys):
-    ctx = make_repo(tmp_path)
-    (ctx.root / "tests" / "test_staged.py").write_text("import pytest\ndef test_needs_data():\n    pytest.skip('no data')\n")
-    value = entry()
-    value.pop("money_case")  # its tests are replaced below
-    del value["implementations"]
-    value["tests"] = [{"path": "tests/test_staged.py", "name": "test_needs_data", "pins": ["reading"]}]
-    payload = {"version": 1, "entries": [value]}
-    assert sc.check_register(payload, ctx, scan_modules=False) == []  # a warning, not an issue
-    assert sc.test_pin_warnings(payload, ctx.root) == [
-        "entries[0].tests[0] tests/test_staged.py::test_needs_data may not run: pytest.skip in its body."
-    ]
-    (ctx.root / sc.REGISTER_FILENAME).write_text(yaml.safe_dump(payload, sort_keys=False))
-    capsys.readouterr()
-    warnings_file = tmp_path / "warnings.txt"
-    assert sc.main(["check", "--root", str(ctx.root), "--warnings-file", str(warnings_file)]) == 0
-    out = capsys.readouterr().out
-    assert "warning: entries[0].tests[0] tests/test_staged.py::test_needs_data may not run" in out
-    assert "0 issue(s), 0 unregistered open interpretation(s), 1 pinned test(s) that may not run." in out
-    assert warnings_file.read_text() == (
-        "entries[0].tests[0] tests/test_staged.py::test_needs_data may not run: pytest.skip in its body.\n"
-    )
 
 
 def test_python_test_file_conventions():
@@ -1257,7 +1080,7 @@ def test_python_test_exists():
         "def test_e(x):\n    pass\n"
     )
     assert sc.python_test_exists(source, "test_a")
-    assert not sc.python_test_exists(source, "test_b")  # async: fails without a plugin
+    assert sc.python_test_exists(source, "test_b")  # defined; whether it runs is the runner's to say
     assert sc.python_test_exists(source, "TestC::test_d")
     assert sc.python_test_exists(source, "test_e")
     assert not sc.python_test_exists(source, "test_e[one]")  # case ids are never pinned
@@ -1369,7 +1192,7 @@ def test_verify_findings():
     assert any("not verbatim at us/statute/42/403/a/5" in issue for issue in issues)
     assert any("not verbatim in tests/data/poms_rs_00630_400.html" in issue for issue in issues)
     assert any("cites_entry is true but the file does not contain" in issue for issue in issues)
-    assert any("test_missing is not a test pytest collects from" in issue for issue in issues)
+    assert any("test_missing is not a test function defined in PolicyEngine/microcosm-dynamics@" in issue for issue in issues)
 
 
 def test_verify_reads_a_test_file_by_its_coding_cookie():
@@ -1385,23 +1208,6 @@ def test_verify_reads_a_test_file_by_its_coding_cookie():
     issues, report = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get)
     assert issues == []
     assert report[0].endswith("2 tests")
-
-
-def test_verify_lists_external_tests_that_may_not_run():
-    payload, net, corpus = verified_inputs()
-    net.files[("PolicyEngine/microcosm-dynamics", COMMIT, "tests/test_g.py")] = (
-        b"import pytest\n"
-        b"def test__given_operational__then_pays():\n    pytest.importorskip('engine')\n"
-        b"class TestLiteral:\n"
-        b"    def test_refuses(self):\n        pass\n"
-    )
-    issues, report = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get)
-    assert issues == []
-    assert [line for line in report if line.startswith("may not run:")] == [
-        "may not run: us:family-maximum-saving-clause (entries[0]).tests[0] PolicyEngine/microcosm-dynamics@"
-        + COMMIT[:12]
-        + ":tests/test_g.py::test__given_operational__then_pays: pytest.importorskip in its body"
-    ]
 
 
 def test_verify_sha_mismatch_unresolved_and_no_corpus():

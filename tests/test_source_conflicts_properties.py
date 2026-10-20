@@ -31,19 +31,12 @@ Invariants, for every input:
 10. Matcher consistency (when axiom-encode is importable): every run of whole
     words taken from a snapshot's text matches it under axiom-encode's
     proof-atom matcher.
-11. Differential, both directions: for generated test modules (fixtures,
-    marks, parametrize, Hypothesis, classes with and without bases or
-    constructors, `__test__` in any form, pytestmark, module-level skips, a
-    main guard's else branch, a shadowed `object`, a module `__getattr__`,
-    annotations, generator and async tests, rebinding, and skips in bodies,
-    fixtures, setup functions, marks, parameter sets and Hypothesis phases,
-    import-time calls the screen cannot follow, project helpers called at
-    import, unreachable branches): an accepted, unwarned name is one pytest
-    collects; every collected name is accepted except the deliberate refusals
-    in `REFUSED_BUT_COLLECTED`; an accepted test that pytest does not collect
-    or does not run is always warned; and every visible skip planted is
-    warned. A warning may also fire on a test that runs. This is evidence for
-    a screen over the shapes generated, not a proof over all Python.
+11. Differential: the syntactic test screen (`python_test_exists`) agrees
+    with Python's own symbol table on whether a generated module defines each
+    name at module level or in a module-level class, through if, try, with,
+    loops, match and nested functions; and it never raises on any text or
+    bytes. The screen decides nothing about collection; tools/pin_runner.py
+    asks pytest (tests/test_pin_runner*.py).
 12. References by id: a `follows`, `adopts` or `pins` value that is neither
     `reading` nor an alternative id of the entry is always reported, and
     reordering an entry's alternatives never changes whether it passes or
@@ -68,10 +61,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
-import json
-import os
 import string
-import subprocess
 import sys
 from pathlib import Path
 
@@ -508,265 +498,75 @@ def test_word_runs_match_under_encoder_matcher(words, data):
     assert matches(text, " ".join(tokens[start:end]))
 
 
-# 11. Differential, both directions: the test-reference screen against
-# pytest itself. Each example writes one to three generated test modules and
-# runs pytest on them in a subprocess (Hypothesis tests inside a Hypothesis
-# test do not run in-process), next to a `helpers_mod` that stands in for
-# project code. A plugin records every collected test, every test whose call
-# phase passed (not skipped, not xfail), and every file that failed to
-# collect. Then:
-# - accepted and unwarned => collected, unless the module failed to collect
-#   (a loud error in the owning repository's own run);
-# - collected => accepted, except the deliberate refusals below;
-# - accepted and (not collected or not run) => warned;
-# - a planted visible skip => warned.
-REFUSED_BUT_COLLECTED = {
-    "testc": "collected by pytest's default python_functions, but not by repositories that set test_*",
-    "@identity": "a decorator outside the allowed list could replace the function",
-    "@staticmethod": "a decorator outside the allowed list",
-    "(Base)": "a base class can add __init__, __test__ or marks the file does not show",
-    "(unittest.TestCase)": "unittest collection follows other rules",
-    "__test__ = True": "any __test__ binding is refused",
-    "async": "an async test fails without a plugin; refused rather than modelled",
-    "__test__ store": "any store to __test__ (attribute, subscript, setattr) refuses the whole module",
-    "generator test": "a generator test anywhere refuses the whole module, even one rebound later",
-    "def _annotated(a: globals().__setitem__('__test__', False)):\n    pass": (
-        "annotations run at import before Python 3.14 (here they turn collection off); from 3.14 they are lazy"
-    ),
-}
-# Features that can stop a collected test running, all visible in the file.
-VISIBLE_SKIPS = {
-    "@pytest.mark.skip", "@pytest.mark.skip(reason='r')", "@pytest.mark.skipif(True, reason='r')",
-    "@pytest.mark.skipif(False, reason='r')", "@pytest.mark.xfail", "@pytest.mark.parametrize('{arg}', [])",
-    "@pytest.mark.parametrize('{arg}', EMPTY)", "@pytest.mark.parametrize('{arg}', [pytest.param(1, marks=pytest.mark.skip)])",
-    "@settings(phases=())\n@given({arg}=st.integers())", "@pytest.mark.usefixtures('skipper')",
-    "skip-body", "importorskip-body", "if-skip-body", "skipper-arg",
-    "pytestmark = pytest.mark.skip", "pytestmark = pytest.mark.skipif(False, reason='r')",
-    "def setup_method(self):\n        pytest.skip('no data')", "def setup_module():\n    pytest.skip('no data')",
-    "@pytest.fixture(autouse=True)\ndef auto_skip():\n    pytest.skip('no data')", "pytest.mark.skip({})",
-}
-# (source, can carry other decorators). {arg} is the function's own argument name.
-FUNCTION_DECORATORS = [
-    ("@pytest.mark.slow", True),
-    ("@pytest.mark.parametrize('{arg}', [1, 2])", True),
-    ("@pytest.mark.parametrize('{arg}', [])", True),
-    ("@pytest.mark.parametrize('{arg}', EMPTY)", True),
-    ("@pytest.mark.parametrize('{arg}', [pytest.param(1, marks=pytest.mark.skip)])", True),
-    ("@pytest.mark.parametrize('{arg}', [pytest.param(1, marks=pytest.mark.slow)])", True),
-    ("@given({arg}=st.integers())", True),
-    ("@settings(phases=())\n@given({arg}=st.integers())", True),
-    ("@pytest.mark.usefixtures('skipper')", True),
-    ("@pytest.mark.skip", True),
-    ("@pytest.mark.skip(reason='r')", True),
-    ("@pytest.mark.skipif(True, reason='r')", True),
-    ("@pytest.mark.skipif(False, reason='r')", True),
-    ("@pytest.mark.xfail", True),
-    ("@identity", True),
-    ("@noop", False),  # a mark or given over None is a loud error
-    ("@pytest.fixture", False),  # marks on a fixture are a loud collection error
-    ("@pytest.fixture(params=[1])", False),
-]
-METHOD_ONLY = [("@staticmethod", False), ("@property", False)]
-BODIES = {
-    "pass": "    pass",
-    "skip-body": "    pytest.skip('no data')",
-    "importorskip-body": "    pytest.importorskip('no_such_module_xyz')",
-    "if-skip-body": "    if True:\n        pytest.skip('no data')",
-}
-CLASS_DECORATORS = ["", "@pytest.mark.slow", "@pytest.mark.skip", "@pytest.mark.skipif(False, reason='r')", "@dataclasses.dataclass"]
-CLASS_BASES = ["", "(object)", "(Base)", "(unittest.TestCase)"]
-SCOPE_LINES = [
-    "", "__test__ = False", "__test__ = True", "pytestmark = pytest.mark.skip", "pytestmark = [pytest.mark.slow]",
-    "pytestmark = pytest.mark.skipif(False, reason='r')",
-]
-CLASS_LINES = SCOPE_LINES + [
-    "def __init__(self):\n        pass", "def __new__(cls):\n        return object.__new__(cls)",
-    "def setup_method(self):\n        pytest.skip('no data')",
-]
-MODULE_LINES = SCOPE_LINES + [
-    "pytest.skip('later', allow_module_level=True)", "def setup_module():\n    pytest.skip('no data')",
-    "@pytest.fixture(autouse=True)\ndef auto_skip():\n    pytest.skip('no data')",
-    # Round-4 review: shapes that turn collection off in a file that shows everything.
-    "if __name__ == '__main__':\n    pass\nelse:\n    pytest.skip('module', allow_module_level=True)",
-    "class object:\n    __test__ = False",
-    "def __getattr__(name):\n    if name == '__test__':\n        return False\n    raise AttributeError(name)",
-    "def _annotated(a: globals().__setitem__('__test__', False)):\n    pass",
-    # Final review of 6a21582e: a skip at import through a helper or an alias.
-    "def _require_data():\n    pytest.skip('no data', allow_module_level=True)\n_require_data()",
-    "skip_module = pytest.skip\nskip_module('no data', allow_module_level=True)",
-    # Round-6 review: call forms the screen cannot follow; it warns on them.
-    "from functools import partial\nskip_if_missing = partial(pytest.skip, 'no data', allow_module_level=True)\nskip_if_missing()",
-    "skip_maybe = pytest.skip if EMPTY == [] else print\nskip_maybe('no data', allow_module_level=True)",
-    "skip_annotated: object = pytest.skip\nskip_annotated('no data', allow_module_level=True)",
-    "def _gate():\n    pytest.skip('no data', allow_module_level=True)\ngate = _gate\ngate()",
-    "try:\n    def _gate_in_try():\n        pytest.skip('no data', allow_module_level=True)\nexcept Exception:\n    pass\n_gate_in_try()",
-    # Project code called at import: one helper skips the module, one does nothing.
-    "from helpers_mod import require_data\nrequire_data()",
-    "from helpers_mod import prepare\nprepare()",
-    # Statically unreachable: never runs.
-    "def _never():\n    pytest.skip('no data', allow_module_level=True)\nif False:\n    _never()",
-]
-HELPERS_MOD = (
-    "import pytest\n\n"
-    "def require_data():\n    pytest.skip('no data', allow_module_level=True)\n\n"
-    "def prepare():\n    return None\n"
-)
-HEADER = (
-    "import dataclasses\nimport unittest\nimport pytest\nfrom hypothesis import given, settings\n"
-    "import hypothesis.strategies as st\n\nEMPTY = []\n\n"
-    "def identity(f):\n    return f\n\ndef noop(f):\n    return None\n\nclass Base:\n    pass\n\n"
-    "@pytest.fixture\ndef skipper():\n    pytest.skip('no data')\n"
-)
+# 11. Differential: the syntactic test screen against Python's own symbol
+# table. A def is defined at module level, or in a module-level class, exactly
+# when symtable gives the module (or that class) a child function scope with
+# that name; compound statements (if, try, with, loops, match) open no scope.
+# The screen says nothing about collection: tools/pin_runner.py asks pytest.
+DEF_NAMES = ["test_a", "test_b"]
+CLASS_NAMES = ["TestC", "TestD"]
+CANDIDATES = DEF_NAMES + [f"{cls}::{name}" for cls in CLASS_NAMES for name in DEF_NAMES]
+
+
+def _indent(lines: list[str]) -> list[str]:
+    return ["    " + line for line in lines]
 
 
 @st.composite
-def generated_defs(draw, name, method, top_level):
-    """One def, the features it uses that the resolver refuses on purpose, and
-    the visible skips it carries."""
+def blocks(draw, depth: int = 0) -> list[str]:
+    """A non-empty block of statements, as source lines."""
 
-    pool = FUNCTION_DECORATORS + (METHOD_ONLY if method else [])
-    chosen = draw(st.lists(st.sampled_from(range(len(pool))), max_size=2, unique=True))
-    decorators = [pool[i] for i in chosen]
-    if any(not combines for _, combines in decorators):
-        decorators = [next(d for d in decorators if not d[1])]
-    texts = [text.replace("{arg}", f"a{i}") for i, (text, _) in enumerate(decorators)]
-    texts.sort(key=lambda text: text not in {"@staticmethod", "@property"})  # outermost
-    args = [f"a{i}" for i, (text, _) in enumerate(decorators) if "{arg}" in text]
-    features = {text for text, _ in decorators}
-    fixture = any("fixture(" in text or text == "@pytest.fixture" for text in texts)
-    if not fixture and draw(st.integers(0, 3)) == 0:
-        args.append("skipper")
-        features.add("skipper-arg")
-    if method and "@staticmethod" not in texts:
-        args.insert(0, "self")
-    flavour = draw(st.sampled_from(["pass"] * 6 + sorted(set(BODIES) - {"pass"})))  # mostly clean, so unwarned runs are common
-    if top_level and not texts and "skipper" not in args:
-        flavour = draw(st.sampled_from([flavour, flavour, "generator", "async"]))
-    body = "    yield 1" if flavour == "generator" else BODIES.get(flavour, "    pass")
-    prefix = "async def" if flavour == "async" else "def"
-    features.add(flavour)
-    source = "".join(f"{text}\n" for text in texts) + f"{prefix} {name}({', '.join(args)}):\n{body}\n"
-    refused = (features | {name}) & REFUSED_BUT_COLLECTED.keys()
-    return source, refused, features & VISIBLE_SKIPS
-
-
-@st.composite
-def generated_modules(draw):
-    """(source, {candidate name: (refused-on-purpose features, visible skips)})."""
-
-    module_line = draw(st.sampled_from([""] * 4 + MODULE_LINES))
-    parts = [HEADER, module_line + "\n" if module_line else ""]
-    candidates: dict[str, tuple[set[str], set[str]]] = {}
-    module_refused = {module_line} & REFUSED_BUT_COLLECTED.keys()
-    module_skips = {module_line} & VISIBLE_SKIPS
-    for name in draw(st.lists(st.sampled_from(["test_a", "test_b", "testc", "helper"]), min_size=1, max_size=3, unique=True)):
-        source, refused, skips = draw(generated_defs(name, method=False, top_level=True))
-        parts.append(source)
-        candidates[name] = (refused | module_refused, skips | module_skips)
-    for cls in draw(st.lists(st.sampled_from(["TestK", "Helper"]), max_size=2, unique=True)):
-        decorator, base, line = (
-            draw(st.sampled_from([""] * 2 + CLASS_DECORATORS)),
-            draw(st.sampled_from([""] * 2 + CLASS_BASES)),
-            draw(st.sampled_from([""] * 3 + CLASS_LINES)),
-        )
-        class_features = {decorator, base, line}
-        lines = [decorator] if decorator else []
-        lines.append(f"class {cls}{base}:")
-        if line:
-            lines.append(f"    {line}")
-        for name in draw(st.lists(st.sampled_from(["test_a", "test_b", "testc", "helper"]), min_size=1, max_size=2, unique=True)):
-            source, refused, skips = draw(generated_defs(name, method=True, top_level=False))
-            lines.extend(f"    {row}" for row in source.splitlines())
-            candidates[f"{cls}::{name}"] = (
-                refused | (class_features & REFUSED_BUT_COLLECTED.keys()) | module_refused,
-                skips | (class_features & VISIBLE_SKIPS) | module_skips,
-            )
-        parts.append("\n".join(lines) + "\n")
-    names = [name for name in candidates if "::" not in name] + sorted({name.split("::")[0] for name in candidates if "::" in name})
-    tail = draw(st.sampled_from(["", "", "", "{} = None", "del {}", "{}.__test__ = False", "[{}][0].__test__ = False", "pytest.mark.skip({})"]))
-    if tail:
-        target = draw(st.sampled_from(names))
-        parts.append(tail.format(target) + "\n")
-        if tail in VISIBLE_SKIPS:
-            for name, (refused, skips) in candidates.items():
-                if name == target or name.startswith(f"{target}::"):
-                    skips.add(tail)
-        if "__test__" in tail:
-            for refused, _ in candidates.values():
-                refused.add("__test__ store")
-    if "    yield 1" in "".join(parts):
-        for refused, _ in candidates.values():
-            refused.add("generator test")
-    for decoy in ("test_missing", "TestK::test_missing"):
-        candidates.setdefault(decoy, (set(), set()))
-    return "\n".join(parts), candidates
+    lines: list[str] = []
+    for _ in range(draw(st.integers(1, 3))):
+        kinds = ["pass", "def", "assign"] + (["class", "if", "try", "with", "for", "while", "match", "nested"] if depth < 3 else [])
+        kind = draw(st.sampled_from(kinds))
+        name = draw(st.sampled_from(DEF_NAMES))
+        if kind == "pass":
+            lines.append("pass")
+        elif kind == "assign":
+            lines.append(f"{name} = lambda: None")
+        elif kind == "def":
+            lines += [f"{draw(st.sampled_from(['def', 'async def']))} {name}(self=None):", *_indent(["pass"])]
+        elif kind == "nested":  # a def inside a function is not module level
+            lines += [f"def outer_{depth}():", *_indent(draw(blocks(depth + 1)))]
+        elif kind == "class":
+            lines += [f"class {draw(st.sampled_from(CLASS_NAMES))}:", *_indent(draw(blocks(depth + 1)))]
+        elif kind == "if":
+            lines += ["if X:", *_indent(draw(blocks(depth + 1)))]
+            if draw(st.booleans()):
+                lines += ["else:", *_indent(draw(blocks(depth + 1)))]
+        elif kind == "try":
+            lines += ["try:", *_indent(draw(blocks(depth + 1))), "except ImportError:", *_indent(draw(blocks(depth + 1)))]
+            if draw(st.booleans()):
+                lines += ["finally:", *_indent(draw(blocks(depth + 1)))]
+        elif kind == "with":
+            lines += ["with open('x') as handle:", *_indent(draw(blocks(depth + 1)))]
+        elif kind == "for":
+            lines += ["for item in []:", *_indent(draw(blocks(depth + 1)))]
+        elif kind == "while":
+            lines += ["while False:", *_indent(draw(blocks(depth + 1)))]
+        else:
+            lines += ["match X:", *_indent(["case 1:", *_indent(draw(blocks(depth + 1)))])]
+    return lines
 
 
-ORACLE_PLUGIN = """
-import json, os
-ITEMS, PASSED, BROKEN = {}, set(), set()
-def pytest_collectreport(report):
-    if report.failed:
-        BROKEN.add(report.nodeid.split("::")[0])
-def pytest_collection_modifyitems(items):
-    for item in items:
-        cls = getattr(item, "cls", None)
-        ITEMS[item.nodeid] = [item.path.name, cls.__name__ if cls else None, getattr(item, "originalname", item.name)]
-def pytest_runtest_logreport(report):
-    if report.when == "call" and report.outcome == "passed" and not hasattr(report, "wasxfail"):
-        PASSED.add(report.nodeid)
-def pytest_sessionfinish(session):
-    with open(os.environ["ORACLE_OUT"], "w") as f:
-        json.dump({"collected": list(ITEMS.values()), "ran": [ITEMS[n] for n in sorted(PASSED) if n in ITEMS],
-                   "broken": sorted(BROKEN)}, f)
-"""
+def _symtable_defines(source: str, name: str) -> bool:
+    import symtable
+
+    scope, _, function = name.rpartition("::")
+    tables = symtable.symtable(source, "test_generated.py", "exec").get_children()
+    if scope:
+        tables = [child for table in tables if table.get_type() == "class" and table.get_name() == scope for child in table.get_children()]
+    return any(table.get_type() == "function" and table.get_name() == function for table in tables)
 
 
-def _pytest_outcomes(folder: Path, files: list[str]) -> tuple[set[tuple[str, str]], set[tuple[str, str]], set[str]]:
-    """(file, test) pairs collected, pairs whose call passed, and files that
-    failed to collect."""
-
-    (folder / "_oracle.py").write_text(ORACLE_PLUGIN)
-    (folder / "helpers_mod.py").write_text(HELPERS_MOD)
-    (folder / "pytest.ini").write_text("[pytest]\n")
-    out = folder / "oracle.json"
-    env = {**os.environ, "PYTHONPATH": str(folder), "ORACLE_OUT": str(out), "PYTHONDONTWRITEBYTECODE": "1"}
-    subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "_oracle", "-W", "ignore",
-         "--continue-on-collection-errors", "--import-mode=importlib", "-c", "pytest.ini", "--rootdir", ".", *files],
-        cwd=folder, env=env, capture_output=True, check=False, timeout=300,
-    )
-    result = json.loads(out.read_text())
-
-    def pairs(rows):
-        return {(path, f"{cls}::{name}" if cls else name) for path, cls, name in rows}
-
-    return pairs(result["collected"]), pairs(result["ran"]), set(result["broken"])
-
-
-@settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow, HealthCheck.data_too_large])
-@given(modules=st.lists(generated_modules(), min_size=1, max_size=3))
-def test_resolver_accepts_exactly_what_pytest_collects(tmp_path_factory, modules):
-    folder = tmp_path_factory.mktemp("collect")
-    files = []
-    for index, (source, _) in enumerate(modules):
-        files.append(f"test_m{index}.py")
-        (folder / files[-1]).write_text(source)
-    collected, ran, broken = _pytest_outcomes(folder, files)
-    for path, (source, candidates) in zip(files, modules):
-        for name, (refused, skips) in candidates.items():
-            accepted = sc.test_exists(path, name, source.encode())
-            warned = bool(sc.python_test_warnings(source, name))
-            seen = (path, name) in collected
-            # Accepted and unwarned implies collected, unless collection fails
-            # loudly in the owning repository's run.
-            assert seen or not accepted or warned or path in broken, f"accepted {name} unwarned, not collected:\n{source}"
-            assert accepted or not seen or refused, f"refused {name}, which pytest collected:\n{source}"
-            if accepted and path not in broken:
-                # Accepted and (not collected or not run) implies warned; a
-                # warning may also fire on a test that runs.
-                assert warned or (path, name) in ran, f"{name} did not run, with no warning:\n{source}"
-                assert warned or not skips, f"{name}: visible skips {sorted(skips)} but no warning:\n{source}"
+@SETTINGS
+@given(lines=blocks())
+def test_screen_matches_the_symbol_table(lines):
+    source = "\n".join(lines) + "\n"
+    for name in CANDIDATES:
+        assert sc.python_test_exists(source, name) == _symtable_defines(source, name), (name, source)
+        assert sc.python_test_exists(source.encode(), name) == _symtable_defines(source, name), (name, source)
 
 
 # 12. References by id
@@ -899,3 +699,9 @@ def test_verify_flags_exactly_the_unshipped_commits(value, data):
     )
     flagged = [issue for issue in issues if "default branch; pin a commit" in issue]
     assert len(flagged) == sum(1 for pair in external if not shipped[pair])
+
+
+@SETTINGS
+@given(source=st.one_of(st.text(max_size=200), st.binary(max_size=200)), name=st.one_of(st.sampled_from(CANDIDATES), st.text(max_size=20)))
+def test_screen_is_total(source, name):
+    assert sc.python_test_exists(source, name) in (True, False)
