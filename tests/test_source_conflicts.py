@@ -42,6 +42,21 @@ SHA = "b" * 64
 # The committed register
 
 
+def test_corpus_checkout_keeps_historical_locked_blobs() -> None:
+    # actions/checkout makes sparse checkouts blobless. corpus-fetch refuses
+    # lazy network reads, so historical git_blob locks need ordinary history.
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/source-conflicts.yml").read_text())
+    checkouts = [
+        step["with"]
+        for step in workflow["jobs"]["verify"]["steps"]
+        if step.get("with", {}).get("repository") == "TheAxiomFoundation/axiom-corpus"
+    ]
+    assert len(checkouts) == 1
+    assert checkouts[0].get("fetch-depth") == 0
+    assert "sparse-checkout" not in checkouts[0]
+    assert "filter" not in checkouts[0]
+
+
 def test_committed_register_passes_check() -> None:
     payload = sc.load_register(REPO_ROOT / sc.REGISTER_FILENAME)
     issues = sc.check_register(payload, sc.RepoContext(root=REPO_ROOT, repo=REPO))
