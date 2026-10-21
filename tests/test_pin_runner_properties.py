@@ -29,6 +29,12 @@ Invariants, for every oracle record:
    never raises, and says a commit is shipped exactly when the canonical name
    is the pinned one, the repository says it is not a fork, and compare says
    `identical` or `behind`. Any exception from the API is a refusal.
+8. A household choice's optimum pin (differential): `optimum_shown` accepts a
+   recorded YAML case exactly when a reference predicate, written
+   independently, holds: the chosen option is not the default, the case's
+   input does not name the decision variable, its output states the
+   variable at least once, and every stated value (per-entity lists and
+   per-period mappings flattened) is the chosen option.
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ import json
 import re
 import sys
 import urllib.error
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -324,3 +331,65 @@ def test_provenance_is_total_and_exact(meta, compare):
     )
     assert record["shipped"] is expected
     assert (record["reason"] is None) is expected
+
+
+# ---------------------------------------------------------------------------
+# 8. A household choice's optimum pin
+
+_REF_NUMBER = re.compile(r"-?(0|[1-9][0-9]*)(\.[0-9]+)?")
+
+
+def _ref_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return Fraction(repr(value)) if value == value and abs(value) != float("inf") else None
+    if isinstance(value, str) and _REF_NUMBER.fullmatch(value):
+        return Fraction(value)
+    return None
+
+
+def _ref_same(a, b):
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    if _ref_number(a) is not None or _ref_number(b) is not None:
+        return _ref_number(a) is not None and _ref_number(a) == _ref_number(b)
+    return isinstance(a, str) and isinstance(b, str) and a == b
+
+
+def _ref_values(node, variable, inside=False):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield from _ref_values(value, variable, inside or key == variable)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _ref_values(value, variable, inside)
+    elif inside:
+        yield node
+
+
+OPTION = st.sampled_from([True, False, "a", "b", "0.5", "0.50", "1", 1, 0.5])
+LEAF = st.one_of(st.booleans(), st.sampled_from([0, 1, 0.5, 2.0, "a", "b", "0.5", "x", None]))
+OUTPUT = st.recursive(
+    LEAF,
+    lambda children: st.lists(children, max_size=3) | st.dictionaries(st.sampled_from(["v", "w", "2024", "unit"]), children, max_size=3),
+    max_leaves=10,
+)
+
+
+@SETTINGS
+@given(
+    st.one_of(st.none(), st.fixed_dictionaries({"input_keys": st.lists(st.sampled_from(["v", "w", "people"]), max_size=3), "output": OUTPUT})),
+    OPTION,
+    OPTION,
+)
+def test_optimum_shown_matches_a_reference(case, chooses, default):
+    values = list(_ref_values(case["output"], "v")) if case else []
+    expected = (
+        case is not None
+        and not _ref_same(chooses, default)
+        and "v" not in case["input_keys"]
+        and bool(values)
+        and all(_ref_same(value, chooses) for value in values)
+    )
+    assert (runner.optimum_shown(case, ("v", chooses, default)) is None) is expected

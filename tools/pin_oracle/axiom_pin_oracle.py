@@ -10,6 +10,8 @@ because a case's name is set only when it runs. A report belongs to the item
 `pytest_runtest_protocol` is running when it arrives. tools/pin_runner.py classifies the record; nothing here
 decides whether a pin passed. Items the register does not pin are dropped
 after the repository's own selection has run, so only pinned tests execute.
+For a pinned YAML case it also records the case's own input keys and stated
+output (`case`), from which the runner checks a household choice's optimum.
 
 Environment (set by the runner):
 - AXIOM_PIN_ORACLE_OUT: where to write the JSON record.
@@ -29,6 +31,42 @@ from pathlib import Path
 import pytest
 
 _MESSAGE_LIMIT = 2000
+_CASE_LIMIT = 200_000  # characters of a case's recorded output
+
+
+def _input_keys(value: object) -> list[str]:
+    """Every mapping key anywhere in a case's input, as strings."""
+
+    keys: set[str] = set()
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            keys.update(str(key) for key in node)
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return sorted(keys)
+
+
+def _jsonable(value: object) -> object:
+    """The case's output as JSON data: mapping keys become strings, and any
+    other value JSON can't hold becomes its text."""
+
+    def convert(node: object) -> object:
+        if isinstance(node, dict):
+            return {str(key): convert(child) for key, child in node.items()}
+        if isinstance(node, list):
+            return [convert(child) for child in node]
+        if node is None or isinstance(node, (bool, int, float, str)):
+            return node
+        return str(node)
+
+    try:
+        converted = convert(value)
+        return converted if len(json.dumps(converted)) <= _CASE_LIMIT else None
+    except (RecursionError, ValueError, TypeError):
+        return None
 
 
 class _Oracle:
@@ -86,9 +124,11 @@ class _Oracle:
     def pytest_itemcollected(self, item: pytest.Item) -> None:
         path, name = self.key(item)
         self.index[id(item)] = len(self.record["collected"])
-        self.record["collected"].append(
-            {"index": self.index[id(item)], "nodeid": item.nodeid, "path": path, "name": name}
-        )
+        collected = {"index": self.index[id(item)], "nodeid": item.nodeid, "path": path, "name": name}
+        case = getattr(item, "test", None)
+        if isinstance(case, dict) and not isinstance(item, pytest.Function) and (path, name) in self.wanted:
+            collected["case"] = {"input_keys": _input_keys(case.get("input")), "output": _jsonable(case.get("output"))}
+        self.record["collected"].append(collected)
 
     @pytest.hookimpl
     def pytest_collectreport(self, report: pytest.CollectReport) -> None:

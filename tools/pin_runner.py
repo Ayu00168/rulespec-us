@@ -1,7 +1,8 @@
 """Run every pinned test at its pinned commit and ask pytest what happened.
 
 A register entry's `tests` pin readings to tests in other repositories at
-fixed commits. `source_conflicts.py check` only screens a pin's syntax: the
+fixed commits, and a household choice's `tests` pin a consumer's default or
+optimum (household-choices.yaml, beside the register; tools/household_choices.py). `source_conflicts.py check` only screens a pin's syntax: the
 file is a test_*.py file and defines the named function. Whether pytest
 collects and passes that test depends on import-time code, conftest files,
 plugins and ini settings, which no static check can decide. This runner asks
@@ -36,7 +37,11 @@ For each (repository, commit) the register pins, it:
 Only the outcome `passed` passes: every collected case of the pinned function
 passed its setup, call and teardown, none was deselected, skipped, xfailed or
 xpassed, and pytest's process exited 0, checked independently of the
-plugin's own record. Anything else is an issue: an unshipped or unprovable
+plugin's own record. A household choice's `optimum` pin must also be
+non-vacuous (`optimum_shown`): it is a YAML case whose own stated output gives
+the decision variable as the chosen option (`chooses`), which differs from
+the entry's default, and whose input does not set that variable, so the
+model chose it. Otherwise the pin is `vacuous`. Anything else is an issue: an unshipped or unprovable
 commit, a fetch, venv or
 install failure, a collection error, a missing or deselected test, a
 module-level skip, `skipped`, `xfail`, `xpass`, `failed` or `error`, a
@@ -70,6 +75,7 @@ import dataclasses
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -79,6 +85,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +101,7 @@ ORACLE_DIR = TOOLS / "pin_oracle"
 ORACLE_MODULE = "axiom_pin_oracle"
 RUNNER_FILES = (Path(__file__).resolve(), ORACLE_DIR / f"{ORACLE_MODULE}.py")
 REPORT_VERSION = 1
+CHOICES_LABEL = "choices."  # prefix of a household choice's pin label
 
 # The runner executes code only from these GitHub owners.
 ALLOWED_OWNERS = ("TheAxiomFoundation", "PolicyEngine")
@@ -122,7 +130,7 @@ PASSED = "passed"
 OUTCOMES = frozenset({
     PASSED, "failed", "error", "skipped", "xfail", "xpass", "not run", "deselected", "missing", "missing file",
     "not collected", "collection error", "untrusted commit", "fetch failed", "install failed", "timed out",
-    "runner error", "ambiguous",
+    "runner error", "ambiguous", "vacuous",
 })
 # Worst first: a pin's outcome is the worst of its cases.
 CASE_SEVERITY = ("error", "failed", "xpass", "xfail", "skipped", "not run", PASSED)
@@ -136,6 +144,9 @@ class Pin:
     commit: str
     path: str
     name: str  # function, or Class::function; or a YAML case's name
+    # A household choice's optimum pin: (decision variable, the option the
+    # case's output must state, the entry's default, which it must differ from).
+    expect: tuple[str, Any, Any] | None = None
 
     @property
     def id(self) -> str:
@@ -215,27 +226,55 @@ def _unrunnable(item: Any) -> str | None:
     return None
 
 
-def collect_pins(payload: Any) -> tuple[dict[tuple[str, str], list[Pin]], list[dict[str, str]]]:
-    """Runnable pins grouped by (repo, commit), and the pins that can't run."""
+def _option(value: Any) -> bool:
+    return isinstance(value, bool) or (isinstance(value, str) and bool(value.strip()))
+
+
+def _optimum_expectation(item: Mapping[str, Any], entry: Mapping[str, Any]) -> tuple[tuple[str, Any, Any] | None, str | None]:
+    """(expectation, None) for a well-formed optimum pin, else (None, why not)."""
+
+    if not str(item.get("path")).endswith(YAML_SUFFIXES):
+        return None, (
+            "is an optimum pin on a Python test; the runner can show the optimum differs from the default "
+            "only from a YAML case's stated output"
+        )
+    variable, chooses = item.get("variable"), item.get("chooses")
+    default = entry.get("default").get("value") if isinstance(entry.get("default"), Mapping) else None
+    if not (isinstance(variable, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable)):
+        return None, "is an optimum pin without a decision variable; run `household_choices.py check`"
+    if not (_option(chooses) and _option(default)):
+        return None, "is an optimum pin without a chosen option and a default; run `household_choices.py check`"
+    if same_option(chooses, default):
+        return None, "is an optimum pin whose chosen option is the default, so it shows nothing; run `household_choices.py check`"
+    return (variable, chooses, default), None
+
+
+def collect_pins(payload: Any, choices: Any = None) -> tuple[dict[tuple[str, str], list[Pin]], list[dict[str, str]]]:
+    """Runnable pins grouped by (repo, commit), and the pins that can't run:
+    the register's, then the household choices' (labels `choices.entries[...]`)."""
 
     groups: dict[tuple[str, str], list[Pin]] = {}
     unrun: list[dict[str, str]] = []
-    entries = payload.get("entries") if isinstance(payload, Mapping) else None
-    for index, entry in enumerate(entries if isinstance(entries, list) else []):
-        if not isinstance(entry, Mapping):
-            continue  # `check` reports it; it has no pins to run
-        gid = f"{entry.get('jurisdiction')}:{entry.get('id')}"
-        tests = entry.get("tests")
-        for t_index, item in enumerate(tests if isinstance(tests, list) else []):
-            label = f"entries[{index}].tests[{t_index}]"
-            reason = _unrunnable(item)
-            if reason is not None:
-                where = item.get("path") if isinstance(item, Mapping) else None
-                name = item.get("name") if isinstance(item, Mapping) else None
-                unrun.append({"entry": gid, "label": label, "pin": f"{where}::{name}", "reason": reason})
-                continue
-            pin = Pin(gid, label, item["repo"], item["commit"], item["path"], item["name"])
-            groups.setdefault((pin.repo, pin.commit), []).append(pin)
+    for prefix, source in (("", payload), (CHOICES_LABEL, choices)):
+        entries = source.get("entries") if isinstance(source, Mapping) else None
+        for index, entry in enumerate(entries if isinstance(entries, list) else []):
+            if not isinstance(entry, Mapping):
+                continue  # `check` reports it; it has no pins to run
+            gid = f"{entry.get('jurisdiction')}:{entry.get('id')}"
+            tests = entry.get("tests")
+            for t_index, item in enumerate(tests if isinstance(tests, list) else []):
+                label = f"{prefix}entries[{index}].tests[{t_index}]"
+                reason = _unrunnable(item)
+                expect = None
+                if reason is None and prefix and isinstance(item.get("pins"), list) and "optimum" in item["pins"]:
+                    expect, reason = _optimum_expectation(item, entry)
+                if reason is not None:
+                    where = item.get("path") if isinstance(item, Mapping) else None
+                    name = item.get("name") if isinstance(item, Mapping) else None
+                    unrun.append({"entry": gid, "label": label, "pin": f"{where}::{name}", "reason": reason})
+                    continue
+                pin = Pin(gid, label, item["repo"], item["commit"], item["path"], item["name"], expect)
+                groups.setdefault((pin.repo, pin.commit), []).append(pin)
     return groups, unrun
 
 
@@ -278,6 +317,78 @@ def worst(outcomes: Iterable[str]) -> str:
     if not outcomes or any(outcome not in CASE_SEVERITY for outcome in outcomes):
         return "error"
     return min(outcomes, key=CASE_SEVERITY.index)
+
+
+_NUMBER_RE = re.compile(r"-?(0|[1-9][0-9]*)(\.[0-9]+)?")
+
+
+def _number(value: Any) -> Decimal | None:
+    """A YAML number, or a decimal string, as a Decimal; None otherwise."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        return Decimal(repr(value)) if math.isfinite(value) else None
+    if isinstance(value, str) and _NUMBER_RE.fullmatch(value):
+        return Decimal(value)
+    return None
+
+
+def same_option(a: Any, b: Any) -> bool:
+    """One option of a choice: booleans by value and type; numbers and
+    decimal strings by value ("0.5" is 0.5 is "0.50"); other strings exactly."""
+
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    x, y = _number(a), _number(b)
+    if x is not None or y is not None:
+        return x is not None and y is not None and x == y
+    return isinstance(a, str) and isinstance(b, str) and a == b
+
+
+def _stated(output: Any, variable: str) -> list[Any]:
+    """Every value the case's output states for `variable`, at any entity
+    level, with per-entity lists and per-period mappings flattened."""
+
+    found: list[Any] = []
+    stack: list[tuple[Any, bool]] = [(output, False)]
+    while stack:
+        node, inside = stack.pop()
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                if inside:
+                    stack.append((value, True))  # a period or instance under the variable
+                else:
+                    stack.append((value, key == variable))
+        elif isinstance(node, list):
+            stack.extend((value, inside) for value in node)
+        elif inside:
+            found.append(node)
+    return found
+
+
+def optimum_shown(case: Any, expect: tuple[str, Any, Any]) -> str | None:
+    """None when a YAML case shows the model choosing the optimum: its input
+    does not set the decision variable, its output states the variable, and
+    every stated value is the chosen option, which is not the default.
+    Otherwise why the pin is vacuous."""
+
+    variable, chooses, default = expect
+    if same_option(chooses, default):
+        return f"the chosen option {chooses!r} is the default, so the case shows nothing"
+    if not (isinstance(case, Mapping) and isinstance(case.get("input_keys"), list)):
+        return "the YAML runner did not expose the case's input and output"
+    if variable in case["input_keys"]:
+        return f"the case sets {variable} as an input, so the model did not choose it"
+    values = _stated(case.get("output"), variable)
+    if not values:
+        return f"the case's output does not state {variable}"
+    wrong = [value for value in values if not same_option(value, chooses)]
+    if wrong:
+        return f"the case's output gives {variable} = {wrong[0]!r}, not the chosen option {chooses!r}"
+    return None
 
 
 def _for_path(records: Any, path: str) -> list[Mapping[str, Any]]:
@@ -345,6 +456,12 @@ def classify(
             if outcome != PASSED:
                 bad = [case["nodeid"] for case in cases if case["outcome"] != PASSED]
                 result["detail"] = f"{len(bad)} of {len(cases)} case(s) did not pass, first {bad[0]}"
+            elif pin.expect is not None:
+                # A household choice's optimum: every case of the pin must show
+                # the model choosing an option other than the default.
+                reason = next(filter(None, (optimum_shown(item.get("case"), pin.expect) for item in items)), None)
+                if reason is not None:
+                    result.update(outcome="vacuous", detail=reason)
         results.append(result)
     if process_exit is None:
         commit_issues.append(f"{runner} did not run")
@@ -368,10 +485,14 @@ def runner_version() -> str:
 
 
 def cache_key(repo: str, commit: str, pins: Iterable[Pin], version: str) -> str:
+    pins = list(pins)
     # Each test as its (path, name) pair, never the joined display id, which
     # two different pairs could share.
     tests = sorted({pin.key for pin in pins})
-    blob = json.dumps({"repo": repo, "commit": commit, "tests": tests, "runner": version}, sort_keys=True)
+    # An optimum pin's pass depends on what it expects, so a changed
+    # expectation never reuses a pass.
+    expect = sorted({json.dumps([pin.path, pin.name, *pin.expect]) for pin in pins if pin.expect is not None})
+    blob = json.dumps({"repo": repo, "commit": commit, "tests": tests, "expect": expect, "runner": version}, sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
@@ -759,9 +880,9 @@ def uv_dirs(uv: str) -> dict[str, str]:
     return dirs
 
 
-def run_register(payload: Any, settings: Settings) -> dict[str, Any]:
+def run_register(payload: Any, settings: Settings, choices: Any = None) -> dict[str, Any]:
     version = runner_version()
-    groups, unrun = collect_pins(payload)
+    groups, unrun = collect_pins(payload, choices)
     report: dict[str, Any] = {
         "report_version": REPORT_VERSION,
         "runner": {
@@ -838,7 +959,7 @@ _SAFE_ID_RE = re.compile(
     r"|[A-Za-z0-9_./-]+\.ya?ml::[A-Za-z0-9][A-Za-z0-9 ,.;:()'%$&+/_#-]*"
 )
 _SAFE_ENTRY_RE = re.compile(r"[a-z0-9-]+:[a-z0-9-]+")
-_SAFE_LABEL_RE = re.compile(r"entries\[[0-9]+\]\.tests\[[0-9]+\]")
+_SAFE_LABEL_RE = re.compile(r"(?:choices\.)?entries\[[0-9]+\]\.tests\[[0-9]+\]")
 _SUMMARY_LIMIT = 100
 
 
@@ -926,6 +1047,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--root", type=Path, default=TOOLS.parent, help="rulespec repository holding the register")
     parser.add_argument("--register", type=Path, help="register file (default: <root>/known-source-conflicts.yaml)")
+    parser.add_argument(
+        "--choices", type=Path,
+        help="household-choices file (default: household-choices.yaml beside the register, when it exists)",
+    )
     parser.add_argument("--report", type=Path, help="write the JSON report here (required for a run)")
     parser.add_argument("--summarize", type=Path, metavar="REPORT", help="print the failing pins of a report as Markdown, and exit")
     parser.add_argument("--cache-dir", type=Path, help="reuse and record passing results here")
@@ -953,12 +1078,19 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if not args.uv or not args.git:
                 raise RuntimeError("uv and git must be on PATH (or given with --uv and --git)")
-            payload = sc.load_register(args.register or args.root / sc.REGISTER_FILENAME)
+            register_path = args.register or args.root / sc.REGISTER_FILENAME
+            payload = sc.load_register(register_path)
+            choices_path = args.choices or register_path.parent / sc.CHOICES_FILENAME
+            choices = (
+                sc.load_register(choices_path)
+                if args.choices is not None or choices_path.exists() or choices_path.is_symlink()
+                else None
+            )
             settings = Settings(
                 uv=args.uv, git=args.git, work=work, timeout=args.timeout, repo_url=args.repo_url,
                 cache_dir=args.cache_dir, uv_dirs=uv_dirs(args.uv), api=sc.github_api(base_url=args.github_api),
             )
-            report = run_register(payload, settings)
+            report = run_register(payload, settings, choices)
         except Exception as exc:  # noqa: BLE001 - fail closed, with a report
             report = {
                 "report_version": REPORT_VERSION, "runner": {}, "commits": [], "unrun": [],

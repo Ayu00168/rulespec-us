@@ -1,0 +1,785 @@
+"""Tests for tools/household_choices.py and the committed household-choices file.
+
+These run in the Repository Checks pytest leg, offline. The committed
+household-choices.yaml must pass `check` exactly. The rest pin each rule on
+small fixture repositories: the schema, the domain and default rules, the
+modeling-state rules, the links (axiom.input, source_conflict, coupling), the
+id namespace shared with the source-conflict register, hygiene and money,
+`verify` against a fake network, the worklist, and `aggregate`. Property-based
+and differential tests live in test_household_choices_properties.py.
+"""
+
+from __future__ import annotations
+
+import copy
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+TOOLS = REPO_ROOT / "tools"
+
+
+def _load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+sc = _load("source_conflicts", TOOLS / "source_conflicts.py")
+hc = _load("household_choices", TOOLS / "household_choices.py")
+REPO = "TheAxiomFoundation/rulespec-us"
+PE = "PolicyEngine/policyengine-us"
+COMMIT = "a" * 40
+SLOT = "parents_of_individual_may_claim_individual_but_no_parent_claims"
+
+
+# ---------------------------------------------------------------------------
+# The committed file
+
+
+def test_committed_file_passes_check() -> None:
+    payload = sc.load_register(REPO_ROOT / hc.CHOICES_FILENAME)
+    assert hc.check_choices(payload, sc.RepoContext(root=REPO_ROOT, repo=REPO)) == []
+
+
+def test_committed_file_cli_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
+    assert hc.main(["check", "--root", str(REPO_ROOT)]) == 0
+    assert "0 issue(s)" in capsys.readouterr().out
+
+
+def test_committed_file_carries_the_cross_tax_unit_case() -> None:
+    # Eng hub ruling 5: a choice spanning tax units (who claims a qualifying
+    # child, IRC 152(c)(4)) is the schema case for actor, per and scope.
+    payload = sc.load_register(REPO_ROOT / hc.CHOICES_FILENAME)
+    entry = next(item for item in payload["entries"] if item["id"] == "qualifying-child-claim-by-non-parent")
+    assert entry["actor"] == "eligible-claimants" and entry["domain"]["per"] == "person"
+    assert entry["objective"]["scope"] == "household"
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+
+
+MODULE = {
+    "format": "rulespec/v1",
+    "module": {"summary": "x"},
+    "imports": ["us:statutes/26/443/a/1#imported_fact"],
+    "rules": [
+        {
+            "name": "tiebreaker",
+            "kind": "derived",
+            "versions": [{"effective_from": "1990-01-01", "formula": f"not {SLOT} and imported_fact or other_input"}],
+        }
+    ],
+}
+
+
+def make_repo(tmp_path: Path, *, register: dict | None = None) -> sc.RepoContext:
+    (tmp_path / "us" / "statutes" / "26" / "152").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "us-mt" / "statutes").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    (tmp_path / "us" / "statutes" / "26" / "152" / "c.yaml").write_text(yaml.safe_dump(MODULE, sort_keys=False))
+    if register is not None:
+        (tmp_path / sc.REGISTER_FILENAME).write_text(yaml.safe_dump(register, sort_keys=False))
+    return sc.RepoContext(root=tmp_path, repo=REPO)
+
+
+def entry(**overrides):
+    base = {
+        "id": "itemized-deduction-election",
+        "jurisdiction": "us",
+        "program": "income-tax",
+        "question": "Does the taxpayer elect to itemize deductions?",
+        "actor": "taxpayer",
+        "texts": [{"corpus_citation_path": "us/statute/26/63/e/1", "excerpt": "Unless an individual makes an election"}],
+        "domain": {"kind": "boolean", "per": "tax-unit"},
+        "default": {"value": False, "basis": "statute", "note": "No election, no itemized deduction."},
+        "objective": {"measure": "net-income", "scope": "household"},
+        "optimization": {"structure": "two-way"},
+        "implementations": [
+            {
+                "repo": PE,
+                "commit": COMMIT,
+                "path": "policyengine_us/variables/tax_unit_itemizes.py",
+                "models": "optimized",
+                "objective": {"measure": "federal-income-tax", "scope": "tax-unit"},
+                "cites_entry": False,
+            }
+        ],
+        "tests": [
+            {
+                "repo": PE,
+                "commit": COMMIT,
+                "path": "policyengine_us/tests/policy/itemizes.yaml",
+                "name": "A case that itemizes",
+                "pins": ["optimum"],
+                "variable": "tax_unit_itemizes",
+                "chooses": True,
+            }
+        ],
+    }
+    base.update(overrides)
+    return base
+
+
+def child_entry(**overrides):
+    base = {
+        "id": "qualifying-child-claim-by-non-parent",
+        "jurisdiction": "us",
+        "program": "income-tax",
+        "question": "Does no parent claim the child?",
+        "actor": "eligible-claimants",
+        "texts": [{"corpus_citation_path": "us/statute/26/152/c/4", "excerpt": "no parent so claims the individual"}],
+        "domain": {"kind": "boolean", "per": "person"},
+        "default": {"value": False, "basis": "statute"},
+        "objective": {"measure": "net-income", "scope": "household"},
+        "optimization": {"structure": "two-way"},
+        "axiom": {"input": f"us:statutes/26/152/c#input.{SLOT}"},
+    }
+    base.update(overrides)
+    return base
+
+
+def payload(*entries, statutory=None):
+    value = {"version": 1, "entries": list(entries)}
+    if statutory is not None:
+        value["statutory_not_choice"] = statutory
+    return value
+
+
+def check(ctx, *entries, statutory=None):
+    return hc.check_choices(payload(*entries, statutory=statutory), ctx)
+
+
+def has(issues, fragment):
+    return any(fragment in issue for issue in issues)
+
+
+# ---------------------------------------------------------------------------
+# Top level and identity
+
+
+def test_valid_entries_have_no_issues(tmp_path):
+    ctx = make_repo(tmp_path)
+    assert check(ctx, entry(), child_entry()) == []
+
+
+def test_top_level_shape(tmp_path):
+    ctx = make_repo(tmp_path)
+    assert hc.check_choices([], ctx) == [f"{hc.CHOICES_FILENAME} must be a mapping with `version` and `entries`."]
+    issues = hc.check_choices({"version": 2, "entries": {}, "extra": 1}, ctx)
+    assert has(issues, "unknown top-level key `extra`")
+    assert has(issues, "version must be 1")
+    assert has(issues, "entries must be a list")
+
+
+def test_required_fields_and_identity(tmp_path):
+    ctx = make_repo(tmp_path)
+    issues = check(ctx, {"id": "Bad_Id"})
+    for key in ("jurisdiction", "program", "question", "actor", "domain", "default", "objective"):
+        assert has(issues, f".{key} is required"), key
+    assert has(issues, "id must match")
+    issues = check(ctx, entry(jurisdiction="us-zz", program="Income Tax", actor="spouse"))
+    assert has(issues, "jurisdiction must be a jurisdiction directory")
+    assert has(issues, "program must be kebab-case")
+    assert has(issues, "actor must be one of")
+
+
+def test_duplicate_global_ids(tmp_path):
+    issues = check(make_repo(tmp_path), entry(), entry())
+    assert has(issues, "`us:itemized-deduction-election` duplicates entries[0]")
+
+
+def test_an_entry_cites_the_provision_that_grants_the_choice(tmp_path):
+    issues = check(make_repo(tmp_path), entry(texts=[]))
+    assert has(issues, "must cite the provision that grants the choice")
+
+
+def test_texts_and_pending_texts_are_checked_as_the_register_checks_them(tmp_path):
+    ctx = make_repo(tmp_path)
+    issues = check(ctx, entry(texts=[{"corpus_citation_path": "not a path", "excerpt": ""}]))
+    assert has(issues, "is not a canonical corpus citation path")
+    assert has(issues, "excerpt must be a non-blank string")
+    pending = [{"citation": "Form 2", "kind": "letter", "url": "http://x", "excerpt": "e", "snapshot": {}}]
+    issues = check(ctx, entry(pending_texts=pending))
+    assert has(issues, "pending_texts[0].kind must be one of")
+    assert has(issues, "pending_texts[0].url must be an https URL")
+    assert has(issues, "pending_texts[0].snapshot.repo is required")
+
+
+def test_unknown_keys_rejected_at_every_level(tmp_path):
+    ctx = make_repo(tmp_path)
+    value = entry(extra=1)
+    value["domain"]["extra"] = 1
+    value["default"]["extra"] = 1
+    value["objective"]["extra"] = 1
+    value["optimization"]["extra"] = 1
+    value["implementations"][0]["follows"] = "reading"
+    value["tests"][0]["extra"] = 1
+    issues = check(ctx, value)
+    for where in ("", ".domain", ".default", ".objective", ".optimization", ".implementations[0]", ".tests[0]"):
+        assert any(f"{where} has unknown key" in issue for issue in issues), where
+
+
+# ---------------------------------------------------------------------------
+# Domain and default
+
+
+@pytest.mark.parametrize(
+    ("domain", "fragment"),
+    [
+        ({"kind": "set", "per": "person"}, "kind must be one of"),
+        ({"kind": "boolean", "per": "dependent"}, "per must be one of"),
+        ({"kind": "enum", "per": "person", "options": ["a"]}, "at least two options"),
+        ({"kind": "enum", "per": "person", "options": ["a", "a"]}, "repeats an option"),
+        ({"kind": "enum", "per": "person", "options": ["A", "b"]}, "kebab-case"),
+        ({"kind": "boolean", "per": "person", "options": ["a", "b"]}, "options is only for an enum"),
+        ({"kind": "share", "per": "person", "bounds": ["0", "2"]}, "lie within 0 and 1"),
+        ({"kind": "share", "per": "person", "bounds": ["1", "0"]}, "low bound below the high bound"),
+        ({"kind": "share", "per": "person", "bounds": [0, 1]}, "two non-negative decimal strings"),
+        ({"kind": "amount", "per": "person", "bounds": ["0", "100"]}, "currency must be an ISO 4217 code"),
+        ({"kind": "boolean", "per": "person", "bounds": ["0", "1"]}, "bounds is only for a share or an amount"),
+        ({"kind": "boolean", "per": "person", "currency": "USD"}, "currency is only for an amount"),
+    ],
+)
+def test_domain_rules(tmp_path, domain, fragment):
+    issues = check(make_repo(tmp_path), entry(domain=domain, optimization={"structure": "search"}, implementations=[], tests=[]))
+    assert has(issues, fragment), issues
+
+
+@pytest.mark.parametrize(
+    ("domain", "value", "ok"),
+    [
+        ({"kind": "boolean", "per": "person"}, True, True),
+        ({"kind": "boolean", "per": "person"}, "true", False),
+        ({"kind": "enum", "per": "person", "options": ["joint", "separate"]}, "joint", True),
+        ({"kind": "enum", "per": "person", "options": ["joint", "separate"]}, "single", False),
+        ({"kind": "share", "per": "person", "bounds": ["0", "1"]}, "0.5", True),
+        ({"kind": "share", "per": "person", "bounds": ["0", "1"]}, 0.5, False),  # quoted decimal strings only
+        ({"kind": "share", "per": "person", "bounds": ["0", "1"]}, "1.5", False),
+        ({"kind": "amount", "per": "person", "bounds": ["0", "5000"], "currency": "USD"}, "5000", True),
+    ],
+)
+def test_default_value_lies_in_the_domain(tmp_path, domain, value, ok):
+    value_entry = entry(
+        domain=domain, default={"value": value, "basis": "convention", "note": "n"},
+        optimization={"structure": "search"}, implementations=[], tests=[],
+    )
+    issues = check(make_repo(tmp_path), value_entry)
+    assert has(issues, "default.value is not one of the domain's options") != ok, issues
+
+
+def test_default_basis(tmp_path):
+    ctx = make_repo(tmp_path)
+    assert has(check(ctx, entry(default={"value": False, "basis": "custom"})), "default.basis must be one of")
+    assert has(check(ctx, entry(default={"value": False, "basis": "convention"})), "default.note is required for a convention")
+    assert has(check(ctx, entry(default={"value": False})), "default.basis must be one of")
+    assert has(check(ctx, entry(default={"basis": "statute"})), "default.value is required")
+    # A statutory default cites a statute; a regulation's, a regulation.
+    form = [{"corpus_citation_path": "us/form/irs/1040/instructions", "excerpt": "e"}]
+    assert has(check(ctx, entry(texts=form)), "must cite a text of kind statute")
+    assert has(check(ctx, entry(default={"value": False, "basis": "regulation"})), "must cite a text of kind regulation")
+    assert not has(
+        check(ctx, entry(texts=form, default={"value": False, "basis": "agency"})), "must cite a text of kind"
+    )
+    pending = [{"citation": "ARM 42.15.524", "kind": "regulation", "url": "https://x.example",
+                "excerpt": "e", "snapshot": {"repo": PE, "commit": COMMIT, "path": "s.html", "sha256": "b" * 64}}]
+    assert not has(
+        check(ctx, entry(pending_texts=pending, default={"value": False, "basis": "regulation"})), "must cite a text of kind"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Objective, scope, multi-year
+
+
+def test_objective_shape(tmp_path):
+    ctx = make_repo(tmp_path)
+    issues = check(ctx, entry(objective={"measure": "federal-income-tax", "scope": "family"}))
+    assert has(issues, "objective.measure must be one of net-income, total-tax")
+    assert has(issues, "objective.scope must be one of")
+    assert check(ctx, entry(objective={"measure": "total-tax", "scope": "tax-unit"})) == []
+
+
+@pytest.mark.parametrize(
+    ("actor", "per", "ok"),
+    [
+        ("taxpayer", "tax-unit", True),
+        ("spouses-jointly", "person", True),
+        ("eligible-claimants", "person", False),  # who claims a child: spans tax units
+        ("household", "household", False),
+        ("taxpayer", "spm-unit", False),
+        ("provider-household", "person", False),
+    ],
+)
+def test_a_choice_spanning_tax_units_takes_the_household_as_its_scope(tmp_path, actor, per, ok):
+    value = child_entry(actor=actor, domain={"kind": "boolean", "per": per},
+                        objective={"measure": "net-income", "scope": "tax-unit"})
+    assert has(check(make_repo(tmp_path), value), "objective.scope must be household") != ok
+
+
+def test_multi_year_is_a_flag(tmp_path):
+    ctx = make_repo(tmp_path)
+    assert check(ctx, entry(multi_year=True)) == []
+    assert has(check(ctx, entry(multi_year=False)), "multi_year must be true when present")
+
+
+# ---------------------------------------------------------------------------
+# Optimization and modeling states
+
+
+@pytest.mark.parametrize(
+    ("domain", "structure", "fragment"),
+    [
+        ({"kind": "enum", "per": "person", "options": ["a", "b", "c"]}, "two-way", "two-way needs a boolean or a two-option enum"),
+        ({"kind": "share", "per": "person", "bounds": ["0", "1"]}, "finite", "finite needs a boolean or an enum"),
+        ({"kind": "boolean", "per": "person"}, "piecewise-linear", "piecewise-linear needs a share or an amount"),
+        ({"kind": "boolean", "per": "person"}, "gradient", "structure must be one of"),
+    ],
+)
+def test_structure_fits_the_domain(tmp_path, domain, structure, fragment):
+    value = entry(domain=domain, optimization={"structure": structure},
+                  default={"value": "a" if domain["kind"] == "enum" else ("0" if domain["kind"] == "share" else False),
+                           "basis": "convention", "note": "n"})
+    assert has(check(make_repo(tmp_path), value), fragment)
+
+
+def test_modeling_states(tmp_path):
+    ctx = make_repo(tmp_path)
+    impl = entry()["implementations"][0]
+    cases = [
+        ({**impl, "models": "best"}, "models must be one of"),
+        ({key: value for key, value in impl.items() if key != "objective"}, "objective is required when models is optimized"),
+        ({**impl, "objective": {"measure": "utility", "scope": "household"}}, "objective.measure must be one of"),
+        ({**impl, "models": "convention"}, "objective is only for an implementation that optimizes"),
+        ({**impl, "cites_entry": "no"}, "cites_entry must be true or false"),
+        ({**impl, "path": "/abs.py"}, "path must be a relative path"),
+        ({key: value for key, value in impl.items() if key not in ("repo", "commit")}, "repo is required"),
+    ]
+    for implementation, fragment in cases:
+        assert has(check(ctx, entry(implementations=[implementation])), fragment), fragment
+    # An optimizing implementation needs the entry's optimization; an exact
+    # optimum needs an exact structure; a candidate set must be described.
+    unoptimized = {key: value for key, value in entry().items() if key != "optimization"}
+    assert has(check(ctx, unoptimized), "so the entry needs optimization.structure")
+    assert has(check(ctx, entry(optimization={"structure": "search"})), "structure is search, which finds no exact optimum")
+    candidate = {**impl, "models": "candidate-min"}
+    assert has(check(ctx, entry(implementations=[candidate])), "needs optimization.candidates")
+    assert check(ctx, entry(implementations=[candidate], optimization={"structure": "two-way", "candidates": "both"})) == []
+
+
+def test_the_state_agency_decides(tmp_path):
+    # Eng hub ruling 4: a state-agency entry is never optimized by the household.
+    ctx = make_repo(tmp_path)
+    value = entry(actor="state-agency")
+    issues = check(ctx, value)
+    assert has(issues, "optimization must be absent: the State agency decides")
+    assert has(issues, "models must be one of convention, input, absent: the State agency decides")
+    agency = {k: v for k, v in entry(actor="state-agency").items() if k not in ("optimization", "tests")}
+    agency["implementations"] = [{**entry()["implementations"][0], "models": "absent"}]
+    del agency["implementations"][0]["objective"]
+    assert check(ctx, agency) == []
+
+
+# ---------------------------------------------------------------------------
+# Pins
+
+
+def test_every_modeling_implementation_is_pinned(tmp_path):
+    ctx = make_repo(tmp_path)
+    assert has(check(ctx, entry(tests=[])), "tests must be a non-empty list")
+    no_tests = {k: v for k, v in entry().items() if k != "tests"}
+    assert has(check(ctx, no_tests), "models optimized, so a test in PolicyEngine/policyengine-us must pin optimum")
+    convention = {**entry()["implementations"][0], "models": "convention"}
+    del convention["objective"]
+    issues = check(ctx, entry(implementations=[convention]))
+    assert has(issues, "models convention, so a test in PolicyEngine/policyengine-us must pin default")
+    default_pin = {"repo": PE, "commit": COMMIT, "path": "policyengine_us/tests/policy/itemizes.yaml",
+                   "name": "Takes the default", "pins": ["default"]}
+    assert check(ctx, entry(implementations=[convention], tests=[default_pin])) == []
+    # A pin in another repository does not pin this one.
+    elsewhere = {**entry()["tests"][0], "repo": "PolicyEngine/policyengine-uk"}
+    assert has(check(ctx, entry(tests=[elsewhere])), "must pin optimum")
+    # An implementation that does not model the choice needs no pin.
+    absent = {k: v for k, v in convention.items()} | {"models": "absent"}
+    assert check(ctx, {k: v for k, v in entry(implementations=[absent]).items() if k != "tests"}) == []
+
+
+@pytest.mark.parametrize(
+    ("change", "fragment"),
+    [
+        ({"pins": []}, "pins must be a non-empty list of default or optimum"),
+        ({"pins": ["reading"]}, "pins may name only default and optimum"),
+        ({"pins": ["optimum", "optimum"]}, "pins repeats a pin"),
+        ({"pins": ["default", "optimum"]}, "pins both default and optimum"),
+        ({"variable": "not a name"}, "variable must name the model variable"),
+        ({"chooses": "yes"}, "chooses is not one of the domain's options"),
+        ({"chooses": False}, "chooses is the default, so the pin is vacuous"),
+        ({"path": "policyengine_us/tests/test_itemizes.py", "name": "test_itemizes"}, "must be another repository's YAML test case"),
+    ],
+)
+def test_optimum_pin_rules(tmp_path, change, fragment):
+    pin = {**entry()["tests"][0], **change}
+    assert has(check(make_repo(tmp_path), entry(tests=[pin])), fragment)
+
+
+def test_an_optimum_pin_names_its_option(tmp_path):
+    pin = {key: value for key, value in entry()["tests"][0].items() if key != "chooses"}
+    assert has(check(make_repo(tmp_path), entry(tests=[pin])), "chooses is required with optimum")
+
+
+def test_variable_and_chooses_belong_to_an_optimum_pin(tmp_path):
+    convention = {**entry()["implementations"][0], "models": "input"}
+    del convention["objective"]
+    pin = {**entry()["tests"][0], "pins": ["default"]}
+    issues = check(make_repo(tmp_path), entry(implementations=[convention], tests=[pin]))
+    assert has(issues, "tests[0].variable is only for an optimum pin")
+    assert has(issues, "tests[0].chooses is only for an optimum pin")
+
+
+def test_test_locations_are_checked_as_the_register_checks_them(tmp_path):
+    ctx = make_repo(tmp_path)
+    pin = {**entry()["tests"][0], "path": "policyengine_us/policy/itemizes.yaml"}
+    assert has(check(ctx, entry(tests=[pin])), "is not under a tests directory")
+    local = {"path": "tests/test_missing.py", "name": "test_x", "pins": ["default"]}
+    convention = {**entry()["implementations"][0], "models": "input"}
+    del convention["objective"]
+    assert has(check(ctx, entry(implementations=[convention], tests=[local])), "does not exist in this repository")
+    repeated = entry()["tests"][0]
+    assert has(check(ctx, entry(tests=[repeated, copy.deepcopy(repeated)])), "repeats policyengine_us/tests/policy/itemizes.yaml")
+
+
+# ---------------------------------------------------------------------------
+# Links: axiom.input, source_conflict, coupling
+
+
+@pytest.mark.parametrize(
+    ("value", "fragment"),
+    [
+        (f"us/statutes/26/152/c#input.{SLOT}", "must be <jurisdiction>:<module path>#input.<slot>"),
+        (f"us:statutes/26/152/d#input.{SLOT}", "which is not a RuleSpec module in this repository"),
+        (f"us-mt:statutes/26/152/c#input.{SLOT}", "which is not a RuleSpec module in this repository"),
+        ("us:statutes/26/152/c#input.tiebreaker", "is a rule of us/statutes/26/152/c.yaml, not an input"),
+        ("us:statutes/26/152/c#input.imported_fact", "is imported by us/statutes/26/152/c.yaml"),
+        ("us:statutes/26/152/c#input.never_read", "no formula in us/statutes/26/152/c.yaml reads `never_read`"),
+        (f"us:statutes/26/152/c#input.{SLOT[:-1]}", "reads"),  # a prefix of a slot is not that slot
+    ],
+)
+def test_axiom_input_names_a_slot_a_formula_reads(tmp_path, value, fragment):
+    issues = check(make_repo(tmp_path), child_entry(axiom={"input": value}))
+    assert has(issues, fragment), issues
+
+
+def test_axiom_needs_its_input(tmp_path):
+    assert has(check(make_repo(tmp_path), child_entry(axiom={})), "axiom.input is required when axiom is present")
+
+
+def test_source_conflict_names_a_register_entry(tmp_path):
+    register = {"version": 1, "entries": [{"id": "some-conflict", "jurisdiction": "us"}]}
+    ctx = make_repo(tmp_path, register=register)
+    assert not has(check(ctx, entry(source_conflict="us:some-conflict")), "source_conflict")
+    assert has(check(ctx, entry(source_conflict="us:no-such-conflict")), "source_conflict must be the global id of an entry")
+
+
+def test_coupled_choices_list_each_other(tmp_path):
+    ctx = make_repo(tmp_path)
+    a = entry(domain={"kind": "boolean", "per": "tax-unit", "coupled_with": ["us:qualifying-child-claim-by-non-parent"]})
+    b = child_entry()
+    assert has(check(ctx, a, b), "does not list `us:itemized-deduction-election` in domain.coupled_with")
+    b["domain"]["coupled_with"] = ["us:itemized-deduction-election"]
+    assert check(ctx, a, b) == []
+    assert has(check(ctx, entry(domain={"kind": "boolean", "per": "tax-unit", "coupled_with": ["us:itemized-deduction-election"]})),
+               "must be the global id of another entry")
+    assert has(check(ctx, entry(domain={"kind": "boolean", "per": "tax-unit", "coupled_with": []})), "non-empty list of global ids")
+
+
+# ---------------------------------------------------------------------------
+# One id namespace with the register
+
+
+def test_a_global_id_is_never_in_both_files(tmp_path):
+    # Eng hub ruling 2: one shared function, called by both checks, so a
+    # register entry added later can't take a choice's id either.
+    register = {"version": 1, "entries": [{"id": "itemized-deduction-election", "jurisdiction": "us"}]}
+    ctx = make_repo(tmp_path, register=register)
+    fragment = "`us:itemized-deduction-election` is both known-source-conflicts.yaml entries[0] and household-choices.yaml entries[0]"
+    assert has(check(ctx, entry()), fragment)
+    (tmp_path / hc.CHOICES_FILENAME).write_text(yaml.safe_dump(payload(entry())))
+    assert has(sc.check_register(register, ctx, scan_modules=False), fragment)
+    # The same local id in another jurisdiction is another global id.
+    register["entries"][0]["jurisdiction"] = "us-mt"
+    (tmp_path / sc.REGISTER_FILENAME).write_text(yaml.safe_dump(register))
+    assert not has(check(ctx, entry()), "is both")
+
+
+def test_an_unreadable_other_file_fails_both_checks(tmp_path):
+    ctx = make_repo(tmp_path)
+    (tmp_path / sc.REGISTER_FILENAME).write_text("entries: [&a {}]\n")
+    issues = check(ctx, entry())
+    assert has(issues, "cannot read known-source-conflicts.yaml to check that no global id is in both files")
+    (tmp_path / sc.REGISTER_FILENAME).unlink()
+    (tmp_path / hc.CHOICES_FILENAME).symlink_to(tmp_path / "elsewhere.yaml")
+    issues = sc.check_register({"version": 1, "entries": []}, ctx, scan_modules=False)
+    assert has(issues, "cannot read household-choices.yaml to check that no global id is in both files")
+
+
+# ---------------------------------------------------------------------------
+# statutory_not_choice, hygiene, money
+
+
+def test_statutory_not_choice(tmp_path):
+    ctx = make_repo(tmp_path)
+    good = {"jurisdiction": "us-mt", "citation": "MCA 2021 15-30-2131(1)(c)(vi)(D)", "note": "Split equally by statute."}
+    assert check(ctx, entry(), statutory=[good]) == []
+    issues = check(ctx, entry(), statutory=[good, dict(good), {"jurisdiction": "us-zz", "citation": "", "extra": 1}])
+    assert has(issues, "statutory_not_choice[1] repeats MCA 2021 15-30-2131(1)(c)(vi)(D) for us-mt")
+    assert has(issues, "statutory_not_choice[2] has unknown key `extra`")
+    assert has(issues, "statutory_not_choice[2].jurisdiction must be a jurisdiction directory")
+    assert has(issues, "statutory_not_choice[2].citation must be a non-blank string")
+    assert has(issues, "statutory_not_choice[2].note must be a non-blank string")
+    assert has(check(ctx, entry(), statutory=[]), "statutory_not_choice must be a non-empty list")
+
+
+@pytest.mark.parametrize("text", ["see d1741", "from local_26f3b41d", "at /Users/x/file", "mail a@b.org"])
+def test_hygiene(tmp_path, text):
+    issues = check(make_repo(tmp_path), entry(question=f"Does it? ({text})"))
+    assert has(issues, "; household-choices.yaml is public.")
+
+
+@pytest.mark.parametrize("question", ["Is it worth $1,200?", "Is it worth 200 dollars?", "Is it worth USD 200?"])
+def test_prose_states_no_money(tmp_path, question):
+    issues = check(make_repo(tmp_path), entry(question=question))
+    assert has(issues, "describe the effect without an amount")
+
+
+def test_excerpts_may_quote_money(tmp_path):
+    texts = [{"corpus_citation_path": "us/statute/26/63/e/1", "excerpt": "a deduction of $1,200"}]
+    assert check(make_repo(tmp_path), entry(texts=texts)) == []
+
+
+def test_anchors_are_refused(tmp_path):
+    path = tmp_path / hc.CHOICES_FILENAME
+    path.write_text("version: 1\nentries: [&a {id: x}, *a]\n")
+    with pytest.raises(sc.RegisterError):
+        sc.load_register(path)
+
+
+def _field_paths(value, prefix=()):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield (*prefix, key)
+            yield from _field_paths(child, (*prefix, key))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield (*prefix, index)
+            yield from _field_paths(child, (*prefix, index))
+
+
+def test_check_is_total_on_every_field(tmp_path):
+    # As for the register: replace every field of well-formed entries, at
+    # every depth, with each malformed shape; check returns strings and never raises.
+    ctx = make_repo(tmp_path, register={"version": 1, "entries": [{"id": "c", "jurisdiction": "us"}]})
+    for base in (entry(source_conflict="us:c", multi_year=True), child_entry(domain={"kind": "share", "per": "person", "bounds": ["0", "1"], "coupled_with": ["us:x"]})):
+        for path in list(_field_paths(base)):
+            for new in ([], {}, None, 7, -1.5, True, "", "x", [[]], {"a": []}):
+                value = copy.deepcopy(base)
+                target = value
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = new
+                issues = hc.check_choices(payload(value, copy.deepcopy(value), statutory=[{"note": new}]), ctx)
+                assert isinstance(issues, list) and all(isinstance(issue, str) for issue in issues), (path, new)
+
+
+def test_check_cli(tmp_path, capsys):
+    make_repo(tmp_path)
+    assert hc.main(["check", "--root", str(tmp_path)]) == 1
+    assert "must be a regular file" in capsys.readouterr().err
+    (tmp_path / hc.CHOICES_FILENAME).write_text(yaml.safe_dump(payload(entry(actor="robot"))))
+    assert hc.main(["check", "--root", str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert "actor must be one of" in captured.err and "1 entry, 1 issue(s)" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# The worklist
+
+
+def test_worklist():
+    assert hc.worklist(child_entry()) == ["no implementation recorded"]
+    itemize = entry()
+    assert hc.worklist(itemize) == [
+        "PolicyEngine/policyengine-us optimizes federal-income-tax over the tax-unit, narrower than net-income over the household",
+        "no Axiom input slot yet",
+    ]
+    impl = itemize["implementations"][0]
+    broad = {**impl, "objective": {"measure": "net-income", "scope": "household"}}
+    assert hc.worklist(entry(implementations=[broad], axiom={"input": "x"})) == []
+    convention = {**impl, "models": "convention"}
+    absent = {**impl, "models": "absent"}
+    candidate = {**broad, "models": "candidate-min"}
+    lines = hc.worklist(entry(implementations=[convention, absent, candidate], multi_year=True, axiom={"input": "x"}))
+    assert lines == [
+        "PolicyEngine/policyengine-us uses convention where a two-way comparison finds the exact optimum",
+        "PolicyEngine/policyengine-us does not model this choice",
+        "PolicyEngine/policyengine-us uses candidate-min where a two-way comparison finds the exact optimum",
+        "binds later years or carries amounts forward; optimized one year at a time",
+    ]
+    # With no cheap exact structure, a convention is not a gap.
+    assert hc.worklist(entry(implementations=[convention], optimization={"structure": "search"}, axiom={"input": "x"})) == []
+
+
+@pytest.mark.parametrize(
+    ("wanted", "actual", "ok"),
+    [
+        (("net-income", "household"), ("net-income", "household"), True),
+        (("net-income", "household"), ("total-tax", "household"), False),
+        (("total-tax", "household"), ("net-income", "household"), True),
+        (("total-tax", "tax-unit"), ("total-tax", "tax-unit"), True),
+        (("total-tax", "household"), ("total-tax", "tax-unit"), False),
+        (("net-income", "tax-unit"), ("federal-income-tax", "tax-unit"), False),
+    ],
+)
+def test_meets_standard(wanted, actual, ok):
+    as_objective = lambda pair: {"measure": pair[0], "scope": pair[1]}  # noqa: E731
+    assert hc.meets_standard(as_objective(wanted), as_objective(actual)) is ok
+
+
+# ---------------------------------------------------------------------------
+# verify (network, faked)
+
+
+class FakeNet:
+    def __init__(self, files):
+        self.files = files
+
+    def __call__(self, repo, commit, path):
+        try:
+            return self.files[(repo, commit, path)]
+        except KeyError:
+            raise OSError(f"404 {repo}@{commit}:{path}") from None
+
+
+def substring(source_text, excerpt):
+    return excerpt in source_text
+
+
+def verified_inputs(source=b"def f():\n    pass\n"):
+    value = entry(proposed=[{"repo": PE, "pr": f"https://github.com/{PE}/pull/1", "path": "x.py", "models": "candidate-min"}])
+    files = {
+        (PE, COMMIT, value["implementations"][0]["path"]): source,
+        (PE, COMMIT, value["tests"][0]["path"]): b"- name: A case that itemizes\n  output: {}\n",
+    }
+    corpus = {"us/statute/26/63/e/1": "... Unless an individual makes an election under this subsection ..."}
+    return payload(value), FakeNet(files), corpus
+
+
+def test_verify_passes_and_reports_the_worklist():
+    choices, net, corpus = verified_inputs()
+    issues, report = hc.verify_choices(choices, fetch=net, matches=substring, resolve=corpus.get, on_default_branch=lambda r, c: True)
+    assert issues == []
+    assert report[0] == "verified: 1 texts, 0 pending texts, 1 implementations, 1 tests"
+    assert any(line.startswith("uncited: us:itemized-deduction-election") for line in report)
+    assert any(line.startswith("proposed: ") and "would model it as candidate-min" in line for line in report)
+    assert "worklist: us:itemized-deduction-election: no Axiom input slot yet" in report
+
+
+def test_verify_findings():
+    choices, net, corpus = verified_inputs(source=b"# Household choice us:itemized-deduction-election\n")
+    issues, report = hc.verify_choices(choices, fetch=net, matches=substring, resolve=None, on_default_branch=lambda r, c: False)
+    assert any("not verified; no pinned corpus release was given" in issue for issue in issues)
+    assert any("cites_entry is false but the file carries `# Household choice us:itemized-deduction-election`" in issue for issue in issues)
+    assert sum("is not on PolicyEngine/policyengine-us's default branch" in issue for issue in issues) == 2
+    choices["entries"][0]["tests"][0]["name"] = "No such case"
+    issues, _ = hc.verify_choices(choices, fetch=net, matches=substring, resolve=corpus.get)
+    assert any("No such case is not a test case in" in issue for issue in issues)
+    issues, report = hc.verify_choices(choices, fetch=FakeNet({}), matches=substring, resolve=corpus.get)
+    assert report[1] == sc.UNCHECKED_REACHABILITY
+    assert sum("cannot read" in issue for issue in issues) == 2
+
+
+@pytest.mark.parametrize(
+    ("source", "found"),
+    [
+        ("# Household choice us:a\n", True),
+        ("x = 1  #  Household choice us:a", True),
+        ("# Household choice us:a-b\n", False),
+        ("# Household choice us:a:b\n", False),
+        ("# Source conflict us:a\n", False),
+        ("us:a\n", False),
+    ],
+)
+def test_cites_is_the_marker_with_a_whole_id(source, found):
+    assert hc.cites(source, "us:a") is found
+
+
+@pytest.mark.parametrize(
+    ("source", "found"),
+    [
+        ("# Source conflict us:a\n", True),
+        ("see us:a.", True),
+        ("# Household choice us:a-b\n", False),
+        ("# Source conflict us-mt:a\n", False),
+        ("# Source conflict us:a:b\n", False),
+    ],
+)
+def test_the_registers_cite_is_a_whole_id(source, found):
+    # A household choice's marker never reads as a cite of a register entry
+    # whose id it extends: ids are compared whole, in both tools.
+    assert sc.cites_global_id(source, "us:a") is found
+
+
+# ---------------------------------------------------------------------------
+# aggregate
+
+
+def test_aggregate_view_round_trips_and_is_deterministic():
+    files = {
+        "TheAxiomFoundation/rulespec-us": payload(entry(), child_entry(), statutory=[{"jurisdiction": "us-mt", "citation": "c", "note": "n"}]),
+        "TheAxiomFoundation/rulespec-uk": payload(entry(id="marriage-allowance-transfer", jurisdiction="uk")),
+    }
+    view, issues = hc.aggregate(files)
+    assert issues == []
+    assert [row["global_id"] for row in view["entries"]] == [
+        "uk:marriage-allowance-transfer", "us:itemized-deduction-election", "us:qualifying-child-claim-by-non-parent",
+    ]
+    assert hc.files_from_view(view) == {repo: files[repo] for repo in sorted(files)}
+    reversed_files = dict(reversed(list(files.items())))
+    assert hc.render_json(hc.aggregate(reversed_files)[0]) == hc.render_json(view)
+    assert hc.render_markdown(hc.aggregate(reversed_files)[0]) == hc.render_markdown(view)
+
+
+def test_aggregate_collisions_and_jurisdictions():
+    files = {
+        "TheAxiomFoundation/rulespec-us": payload(entry()),
+        "TheAxiomFoundation/rulespec-us-ca": payload(entry(), entry(id="other", jurisdiction="uk")),
+    }
+    view, issues = hc.aggregate(files)
+    assert "us:itemized-deduction-election is in both TheAxiomFoundation/rulespec-us and TheAxiomFoundation/rulespec-us-ca." in issues
+    assert "TheAxiomFoundation/rulespec-us-ca: uk:other has a jurisdiction outside that repository." in issues
+    assert len(view["entries"]) == 2
+
+
+def test_markdown_escapes_cells():
+    view, _ = hc.aggregate({"TheAxiomFoundation/rulespec-us": payload(entry(actor="a|b\nc"))})
+    row = hc.render_markdown(view).splitlines()[6]
+    assert "a\\|b c" in row and row.count(" | ") == 5
+
+
+def test_aggregate_cli_writes_the_same_bytes_twice(tmp_path, capsys):
+    source = tmp_path / "choices.yaml"
+    source.write_text(yaml.safe_dump(payload(entry(), child_entry())))
+    outputs = []
+    for run in range(2):
+        out = tmp_path / f"view-{run}.json"
+        assert hc.main(["aggregate", "--file", f"TheAxiomFoundation/rulespec-us={source}", "--json", str(out)]) == 0
+        outputs.append(out.read_bytes())
+    assert outputs[0] == outputs[1]
+    assert json.loads(outputs[0])["entries"][0]["worklist"]

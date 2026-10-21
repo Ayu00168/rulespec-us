@@ -172,6 +172,8 @@ of these:
 - a `resolution` without `conflict: resolved`, or a resolved entry without a
   `resolution` or `years.to`;
 - a hygiene hit (one of the four token patterns below);
+- a global id that `household-choices.yaml` also uses (see
+  [Household choices](#household-choices); both checks call one function);
 - an adopting module that is missing, or that does not carry the entry's
   interpretation core unchanged, or whose `affects` name no rule in the module;
 - an in-repo test whose file does not exist or does not define the named
@@ -197,7 +199,8 @@ daily and on dispatch, as two jobs. `tools/source_conflicts.py verify` (the
 - every `pending_texts` excerpt is verbatim in its snapshot, whose sha256 must
   match;
 - external implementations, tests and snapshots are pinned to commits reachable from their repository's default branch (a squash-merged pull request's own commits are not), and they exist there; each external Python test file defines its pinned test (the same syntactic screen), and each external YAML test file has its pinned case;
-- each `cites_entry` claim matches its file.
+- each `cites_entry` claim matches its file, which must name the global id
+  as a whole id (a cite of `us:a-b` is not a cite of `us:a`).
 
 `tools/pin_runner.py` (the `pinned-tests` job) runs every pinned test at its
 pinned commit and fails unless pytest reports it passed; see
@@ -447,3 +450,124 @@ malformed-artifact alarm for any JSON artifact.
   hour per address) can refuse a run; that fails closed and passes on retry.
 - Deliberate evasion, such as a test that detects the runner, is out of
   scope: the register guards against honest mistakes.
+
+# Household choices
+
+`household-choices.yaml`, beside the register at each rulespec repository's
+root, records the points where the law lets a household pick among options
+and the pick can change tax or benefits. Examples are an election
+(itemizing, IRC 63(e)), an allocation between spouses, columns or returns,
+a method, or the kind of return. The law agrees with itself at these points,
+so they are not source conflicts. The open question is which option a model
+assumes.
+
+Axiom stays deterministic. A choice is an ordinary free input of the module
+that grants it, and the caller supplies it; RuleSpec has no defaulted input.
+The file holds the default a caller supplies when the household states
+nothing, the authority for that default, and the objective a household
+would pursue. The simulation layer does the optimizing (PolicyEngine-US
+today). For each consumer, the file records how it models the choice and
+which tests pin that. `tools/household_choices.py` checks, verifies and
+aggregates the file. It imports the register's loader and validators, so
+texts, snapshots, years, test references, hygiene and provenance follow the
+register's rules exactly.
+
+## Entry shape
+
+| Field | Meaning |
+|---|---|
+| `id`, `jurisdiction`, `program` | As in the register. The global id is `<jurisdiction>:<id>`. It shares the register's namespace: `check` on either file refuses an id the other file uses. One function, `id_collision_issues`, does this for both. |
+| `question` | The choice, as a question. |
+| `actor` | Who the law lets choose: `taxpayer`, `spouses-jointly`, `either-spouse`, `eligible-claimants` (the taxpayers who could each claim a person), `household`, `provider-household` or `state-agency`. `provider-household` and `state-agency` are the unit-derivation RFC's terms (axiom-rules-engine `docs/unit-derivation.md`, section 4.3). Where the State agency decides, the household optimizes nothing. Such an entry has no `optimization`, and its implementations model `convention`, `input` or `absent`. |
+| `texts`, `pending_texts`, `text_kinds`, `years` | The provision that grants the choice, and when, checked as in the register. At least one text is required. |
+| `domain` | `kind` (`boolean`, `enum`, `share` or `amount`) and `per`, the entity each value belongs to (`person`, `marital-unit`, `tax-unit`, `family`, `spm-unit`, `household` or `benefit-unit`). An enum lists at least two kebab-case `options`. A share or amount has `bounds`, two quoted decimal strings, low then high; a share lies within 0 and 1, and an amount gives its `currency`. An optional `coupled_with` lists other entries in the file that must be chosen together, and each must list this one back. |
+| `default` | `value`, an option of the domain, and its `basis`: `statute`, `regulation`, `agency` or `convention`. A basis other than `convention` needs a cited text of that kind. Agency kinds are forms, instructions, worksheets, manuals, guidance, policies, plans and calculators. A convention needs a `note` saying what it is. A statute that sets its own default ("unless the taxpayer elects") is already encoded as the statutory branch keyed on the election input, with "no election" as `false`. So a statutory default is just the value a caller supplies. |
+| `objective` | What a household would pursue: `measure` (`net-income`, the standard, or `total-tax` for a choice that moves only tax, which is the same choice) and `scope` (`tax-unit` or `household`). A choice that can move more than one tax unit takes the household as its scope. That is any choice whose actor is `eligible-claimants`, `household` or `provider-household`, or whose entity is a family, SPM unit, household or benefit unit. |
+| `multi_year` | Optional, `true` only. The choice binds later years or carries amounts forward, and is optimized one year at a time for now. |
+| `optimization` | `structure`, how an optimum can be found: `two-way` (a boolean or a two-option enum), `finite` (a boolean or an enum), `piecewise-linear` (a share or an amount, exact at the endpoints and kinks) or `search`. It may add `candidates`, a description of a cheap candidate set. |
+| `axiom` | `input`: the input key of the choice's slot, `<jurisdiction>:<module path>#input.<slot>`. `check` screens it: the module exists in this repository, the slot is not one of its rules or imports, and some formula in it reads the slot as a whole word. Axiom modules carry no marker, because they are encoder output; this field is the only link from Axiom. |
+| `implementations` | Code outside RuleSpec that models the choice: `repo`, `commit`, `path`, `models` and `cites_entry`. `models` is `optimized` (the exact optimum), `candidate-min` (the best of a cheap candidate set), `convention` (a fixed documented rule), `input` (the user supplies it, with the default) or `absent` (not modeled). An implementation that optimizes states its own `objective`, which may be narrower than the entry's, such as `federal-income-tax` over the `tax-unit`. Its measures are `net-income`, `total-tax`, `federal-income-tax` and `state-income-tax`. `optimized` needs a structure other than `search`, and `candidate-min` needs `candidates`. `basis` may say how the code decides. |
+| `proposed` | Unmerged changes: `repo`, `pr`, `path` and `models`, listed by verify and never counted. |
+| `tests` | Tests that pin a consumer: `pins` is `[default]` or `[optimum]`. An implementation that optimizes needs an `optimum` pin in its repository. A `convention` or `input` implementation needs a `default` pin there; an `absent` one needs none. An `optimum` pin is another repository's YAML test case. It names the decision `variable` whose output shows the choice, and the option the case `chooses`, which must be an option of the domain and not the default. |
+| `source_conflict` | Optional: the global id of a register entry this choice meets, such as a form that forbids an allocation a regulation allows. The conflict entry settles which options the law grants; this entry records which one models assume. |
+| `full_optimization` | Optional prose: what exact optimization would take. |
+
+`statutory_not_choice` lists the near misses, so an inventory does not raise
+them again. These are a "whichever is greater" that the statute computes, or
+a split the statute fixes, such as Montana's equal division of the dependent
+care deduction between spouses filing separately on one form. Each item has
+a `jurisdiction`, a `citation` and a `note`, and needs no tests.
+
+The file is public, so the register's hygiene rules apply to it. Its prose
+also states no money: the file has no money cases, and a public figure needs
+a test that computes it.
+
+## Checks and the worklist
+
+`tools/household_choices.py check` runs offline. `tests/test_household_choices.py`
+runs it inside the Repository Checks pytest leg. It fails on any of these:
+
+- a malformed entry or an unknown key;
+- a default outside the domain, or without the authority its basis names;
+- a choice spanning tax units scoped to one;
+- a modeling state without what it needs: an optimizing implementation with
+  no objective, structure or candidates, or a state-agency entry that is
+  optimized;
+- an implementation without the pin its state needs, or a vacuous `optimum`
+  pin;
+- an `axiom.input`, `source_conflict` or `coupled_with` that names nothing;
+- a global id that the register also uses;
+- a hygiene hit, or an amount of money in prose.
+
+`verify` (the `source-conflicts` job) checks excerpts, snapshots, shipped
+commits and external test files, as the register's verify does. Each
+implementation's `cites_entry` must match whether its file carries
+`# Household choice <global id>`, compared as a whole id, so a cite of
+`us:a-b` is never a cite of `us:a`. The register's verify now compares ids
+the same way. The report adds the worklist:
+
+- an implementation that does not model the choice;
+- a `convention` or `candidate-min` where a two-way, finite or
+  piecewise-linear comparison finds the exact optimum;
+- an objective narrower than the entry's;
+- a choice no implementation is recorded for;
+- a multi-year choice;
+- a choice with no Axiom input slot yet.
+
+`tools/pin_runner.py` runs the household choices' pins with the register's,
+labelled `choices.entries[i].tests[j]`. An `optimum` pin must pass and also be
+non-vacuous, or it is `vacuous`. For each pinned YAML case, the oracle records
+the case's input keys and stated output as the YAML runner collected it. The
+runner then requires three things:
+
+- the case's input does not set the decision variable;
+- its output states the variable;
+- every stated value is the chosen option, and that option is not the
+  default.
+
+So each `optimum` pin shows the model choosing something other than the
+default. That `optimum` pin is an example test. The property it samples is
+that an optimizing implementation's choice is no worse, on its objective,
+than every listed candidate, or any point of the domain for an exact
+structure. Testing that property is the implementing repository's job, for
+example with Hypothesis over households, forcing each option on a branch.
+
+`aggregate` collects every rulespec repository's file into one JSON or
+Markdown view: each entry once, as it is in its file, with its repository,
+global id and worklist, and every `statutory_not_choice` item. It reads
+repositories in sorted order and entries in file order, and writes JSON with
+sorted keys. So the same files give byte-identical output in any order, and
+`files_from_view` rebuilds the files it read.
+`tests/test_household_choices_properties.py` states these properties and the
+tool's other invariants: one namespace from either side, vacuity, scope, the
+worklist, and totality. It also includes a differential test of the check's
+and the runner's notion of one option.
+
+Run locally:
+
+```bash
+python tools/household_choices.py check
+AXIOM_CORPUS_RELEASE_PUBLIC_KEY=... python tools/household_choices.py verify \
+  --corpus-path ../axiom-corpus          # needs axiom-encode importable
+python tools/household_choices.py aggregate --markdown /tmp/choices.md
+```

@@ -17,6 +17,8 @@ Property-based tests of the classifier live in test_pin_runner_properties.py.
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import email.message
 import http.server
 import importlib.util
@@ -363,6 +365,152 @@ def test_cache_key():
         runner.cache_key("PolicyEngine/a", COMMIT, [a], "v1"),
         runner.cache_key("PolicyEngine/a", COMMIT, [a, b], "v2"),
     }) == 5
+
+
+# ---------------------------------------------------------------------------
+# Household choices: an optimum pin must show the model choosing
+
+PE_US = "PolicyEngine/policyengine-us"
+EXPECT = ("tax_unit_itemizes", True, False)
+OPTIMUM = {"repo": PE_US, "commit": COMMIT, "path": "policyengine_us/tests/a.yaml", "name": "Itemizes",
+           "pins": ["optimum"], "variable": "tax_unit_itemizes", "chooses": True}
+
+
+def choice_entry(*tests, default=False):
+    return {"jurisdiction": "us", "id": "choice", "default": {"value": default, "basis": "statute"}, "tests": list(tests)}
+
+
+def choices(*tests, default=False):
+    return {"version": 1, "entries": [choice_entry(*tests, default=default)]}
+
+
+def test_collect_pins_reads_household_choices():
+    default_pin = {**OPTIMUM, "name": "Takes the default", "pins": ["default"]}
+    no_option = {key: value for key, value in OPTIMUM.items() if key != "chooses"}
+    groups, unrun = runner.collect_pins(register(), choices(
+        OPTIMUM,
+        default_pin,
+        {**OPTIMUM, "path": "tests/test_a.py", "name": "test_a"},
+        {**OPTIMUM, "name": "No variable", "variable": "not a name"},
+        {**OPTIMUM, "name": "The default", "chooses": False},
+        {**no_option, "name": "No option"},
+    ))
+    assert [(p.label, p.name, p.expect) for p in groups[(PE_US, COMMIT)]] == [
+        ("choices.entries[0].tests[0]", "Itemizes", EXPECT),
+        ("choices.entries[0].tests[1]", "Takes the default", None),
+    ]
+    assert [item["label"] for item in unrun] == [f"choices.entries[0].tests[{index}]" for index in (2, 3, 4, 5)]
+    reasons = [item["reason"] for item in unrun]
+    assert "optimum pin on a Python test" in reasons[0]
+    assert "without a decision variable" in reasons[1]
+    assert "chosen option is the default" in reasons[2]
+    assert "without a chosen option and a default" in reasons[3]
+    # A register pin is never read as an optimum, whatever its pins say.
+    groups, unrun = runner.collect_pins(register({**OPTIMUM, "pins": ["optimum"], "chooses": False}))
+    assert [p.expect for p in groups[(PE_US, COMMIT)]] == [None] and unrun == []
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ({"input_keys": ["people", "age"], "output": {"tax_unit_itemizes": True}}, None),
+        ({"input_keys": [], "output": {"tax_units": {"tax_unit": {"tax_unit_itemizes": True}}}}, None),
+        ({"input_keys": [], "output": {"tax_unit_itemizes": [True, True]}}, None),
+        ({"input_keys": [], "output": {"tax_unit_itemizes": {"2024": True}}}, None),
+        ({"input_keys": ["tax_unit_itemizes"], "output": {"tax_unit_itemizes": True}}, "sets tax_unit_itemizes as an input"),
+        ({"input_keys": [], "output": {"taxable_income": 1}}, "does not state tax_unit_itemizes"),
+        ({"input_keys": [], "output": {"tax_unit_itemizes": [True, False]}}, "gives tax_unit_itemizes = False"),
+        ({"input_keys": [], "output": {"tax_unit_itemizes": 1}}, "gives tax_unit_itemizes = 1"),  # 1 is not true
+        ({"input_keys": [], "output": None}, "does not state tax_unit_itemizes"),
+        (None, "did not expose the case's input and output"),
+        ({"output": {"tax_unit_itemizes": True}}, "did not expose the case's input and output"),
+    ],
+)
+def test_optimum_shown(case, reason):
+    found = runner.optimum_shown(case, EXPECT)
+    assert (found is None) if reason is None else (found is not None and reason in found), found
+
+
+def test_an_optimum_that_is_the_default_shows_nothing():
+    case = {"input_keys": [], "output": {"share": 0.5}}
+    assert "is the default" in runner.optimum_shown(case, ("share", "0.5", "0.50"))
+    assert runner.optimum_shown(case, ("share", "0.5", "1")) is None
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "same"),
+    [
+        (True, True, True), (True, 1, False), (False, 0, False), ("a", "a", True), ("a", "b", False),
+        ("0.5", 0.5, True), ("0.5", "0.50", True), (1, 1.0, True), ("1", "1.5", False), ("inf", float("inf"), False),
+        ("true", True, False), (None, None, False),
+    ],
+)
+def test_same_option(a, b, same):
+    assert runner.same_option(a, b) is same
+
+
+def test_classify_marks_a_vacuous_optimum():
+    item = ("policyengine_us/tests/a.yaml::", "policyengine_us/tests/a.yaml", "Itemizes")
+    good = oracle([item], reports={item[0]: phases()})
+    good["collected"][0]["case"] = {"input_keys": [], "output": {"tax_unit_itemizes": True}}
+    optimum = runner.Pin("us:choice", "choices.entries[0].tests[0]", PE_US, COMMIT, item[1], item[2], EXPECT)
+    results, issues = runner.classify(good, [optimum], process_exit=0)
+    assert results[0]["outcome"] == "passed" and issues == []
+    forced = copy.deepcopy(good)
+    forced["collected"][0]["case"]["input_keys"] = ["tax_unit_itemizes"]
+    results, _ = runner.classify(forced, [optimum], process_exit=0)
+    assert results[0]["outcome"] == "vacuous" and "as an input" in results[0]["detail"]
+    assert not runner.commit_passed({"pins": results, "issues": [], "pytest_exit": 0})
+    # A failing case fails, whatever it states.
+    failing = oracle([item], reports={item[0]: phases(call="failed")})
+    failing["collected"][0]["case"] = good["collected"][0]["case"]
+    assert runner.classify(failing, [optimum], process_exit=0)[0][0]["outcome"] == "failed"
+    # Only an optimum pin is checked: without the expectation the record passes.
+    plain = dataclasses.replace(optimum, expect=None)
+    assert runner.classify(forced, [plain], process_exit=0)[0][0]["outcome"] == "passed"
+
+
+def test_cache_key_covers_an_optimum_pins_expectation():
+    plain = pin("Itemizes", path="tests/a.yaml")
+    keys = {
+        runner.cache_key(PE_US, COMMIT, [plain], "v1"),
+        runner.cache_key(PE_US, COMMIT, [dataclasses.replace(plain, expect=EXPECT)], "v1"),
+        runner.cache_key(PE_US, COMMIT, [dataclasses.replace(plain, expect=("tax_unit_itemizes", False, True))], "v1"),
+    }
+    assert len(keys) == 3
+
+
+def test_summarize_prints_household_choice_pins(tmp_path):
+    report = {
+        "commits": [{"repo": PE_US, "commit": COMMIT, "issues": [], "pins": [
+            {"entry": "us:choice", "label": "choices.entries[0].tests[0]", "id": "policyengine_us/tests/a.yaml::Itemizes",
+             "outcome": "vacuous"}]}],
+        "unrun": [{"entry": "us:choice", "label": "choices.entries[0].tests[1]", "reason": "x"}],
+        "issues": ["x"],
+    }
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report))
+    assert runner.summarize(path) == [
+        f"- `us:choice` choices.entries[0].tests[0]: `{PE_US}@cccccccccccc:policyengine_us/tests/a.yaml::Itemizes` vacuous",
+        "- `us:choice` choices.entries[0].tests[1]: the runner can't execute this pin.",
+    ]
+
+
+def test_cli_reads_the_household_choices_file(tmp_path):
+    tools = ["--uv", sys.executable, "--git", sys.executable]
+    report_path = tmp_path / "report.json"
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "known-source-conflicts.yaml").write_text(yaml.safe_dump(register()))
+    # No household-choices file beside the register: nothing more to run.
+    assert runner.main(["--root", str(root), "--report", str(report_path), *tools]) == 0
+    # The file beside the register is read; its unrunnable pins are issues.
+    (root / "household-choices.yaml").write_text(yaml.safe_dump(choices({**OPTIMUM, "path": "tests/test_a.py", "name": "test_a"})))
+    assert runner.main(["--root", str(root), "--report", str(report_path), *tools]) == 1
+    assert json.loads(report_path.read_text())["unrun"][0]["label"] == "choices.entries[0].tests[0]"
+    # A file named explicitly must exist.
+    assert runner.main(["--root", str(root), "--choices", str(tmp_path / "absent.yaml"), "--report", str(report_path), *tools]) == 1
+    assert json.loads(report_path.read_text())["issues"][0].startswith("runner error:")
 
 
 def test_the_cache_holds_and_returns_only_passing_commits(tmp_path):
@@ -773,11 +921,17 @@ def test_pinned_tests_runs_on_every_change_it_depends_on():
     on = workflow()[True]  # PyYAML reads the `on:` key as True
     for event in ("pull_request", "push"):
         paths = on[event]["paths"]
-        for needed in ("known-source-conflicts.yaml", "tools/source_conflicts.py", "tools/pin_runner.py",
-                       "tools/pin_oracle/**", ".github/workflows/source-conflicts.yml"):
+        for needed in ("known-source-conflicts.yaml", "household-choices.yaml", "tools/source_conflicts.py",
+                       "tools/household_choices.py", "tools/pin_runner.py", "tools/pin_oracle/**",
+                       ".github/workflows/source-conflicts.yml"):
             assert needed in paths, (event, needed)
-    for needed in ("tests/test_pin_runner.py", "tests/test_pin_runner_properties.py"):
+    for needed in ("tests/test_pin_runner.py", "tests/test_pin_runner_properties.py", "tests/test_household_choices.py",
+                   "tests/test_household_choices_properties.py"):
         assert needed in on["pull_request"]["paths"]
+    # A pass is cached against both files the pins come from.
+    key = next(step for step in workflow()["jobs"]["pinned-tests"]["steps"]
+               if str(step.get("uses", "")).startswith("actions/cache/save@"))["with"]["key"]
+    assert "rulespec-us/household-choices.yaml" in key
     assert "schedule" in on
 
 
@@ -934,6 +1088,8 @@ FIXTURE_CORE = textwrap.dedent(
             output = self.test.get("output")
             if output == "skip":
                 pytest.skip("planted")
+            if isinstance(output, dict):  # a case that states variables, as a policy test does
+                output = output.get("status")
             assert output == "ok", f"expected ok, got {output!r}"
 
         def reportinfo(self):
@@ -991,6 +1147,24 @@ YAML_CASES = textwrap.dedent(
       output: ok
     - name: Both pass
       output: ok
+    """
+)
+
+
+CHOICE_CASES = textwrap.dedent(
+    """\
+    - name: Chooses to itemize
+      input: {income: 1}
+      output: {status: ok, itemizes: true}
+    - name: Told to itemize
+      input: {households: {household: {itemizes: true}}}
+      output: {status: ok, itemizes: true}
+    - name: Does not itemize
+      input: {income: 1}
+      output: {status: ok, itemizes: false}
+    - name: Silent on the choice
+      input: {income: 1}
+      output: {status: ok}
     """
 )
 
@@ -1133,6 +1307,7 @@ def fixtures(tmp_path_factory):
             "fixture_core/cli.py": FIXTURE_CORE,
             "tests/policy/cases.yaml": YAML_CASES,
             "tests/policy/passing.yaml": "- name: Only passing\n  output: ok\n",
+            "tests/policy/choices.yaml": CHOICE_CASES,
             "tests/test_py.py": "def test_ok():\n    pass\n",
         }),
         "slow": fixture_repo(base, "PolicyEngine/fixture-slow", {
@@ -1463,3 +1638,38 @@ def test_cli_fails_closed_without_a_register(tmp_path):
     assert runner.main(["--register", str(tmp_path / "absent.yaml"), "--report", str(report_path)]) == 1
     report = json.loads(report_path.read_text())
     assert report["issues"][0].startswith("runner error:")
+
+
+@needs_tools
+def test_an_optimum_pin_passes_only_when_its_case_shows_the_model_choosing(tmp_path, fixtures, monkeypatch):
+    # The oracle records each pinned case's input keys and stated output as
+    # the YAML runner collected it; the runner then requires the model's own
+    # choice, of an option other than the default.
+    base, commits = fixtures
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-yaml", ("fixture_core.cli", ()))
+    names = ("Chooses to itemize", "Told to itemize", "Does not itemize", "Silent on the choice")
+    tests = [
+        {"repo": "PolicyEngine/fixture-yaml", "commit": commits["yaml"], "path": "tests/policy/choices.yaml", "name": name,
+         "pins": ["optimum"], "variable": "itemizes", "chooses": True}
+        for name in names
+    ]
+    report = runner.run_register(register(), settings(tmp_path, base), choices(*tests))
+    assert outcomes(report) == {
+        "tests/policy/choices.yaml::Chooses to itemize": "passed",
+        "tests/policy/choices.yaml::Told to itemize": "vacuous",
+        "tests/policy/choices.yaml::Does not itemize": "vacuous",
+        "tests/policy/choices.yaml::Silent on the choice": "vacuous",
+    }
+    details = {pin["id"].split("::")[1]: pin.get("detail", "") for pin in report["commits"][0]["pins"]}
+    assert "sets itemizes as an input" in details["Told to itemize"]
+    assert "gives itemizes = False" in details["Does not itemize"]
+    assert "does not state itemizes" in details["Silent on the choice"]
+    # The YAML run itself passed: vacuity is the runner's finding, not pytest's.
+    assert report["commits"][0]["pytest_exit"] == 0
+    # A pass is cached for its expectation only.
+    cache = tmp_path / "cache"
+    first = runner.run_register(register(), settings(tmp_path, base, cache_dir=cache), choices(tests[0]))
+    second = runner.run_register(register(), settings(tmp_path, base, cache_dir=cache), choices(tests[0]))
+    other = runner.run_register(register(), settings(tmp_path, base, cache_dir=cache), choices(tests[0], default="no"))
+    assert [r["commits"][0]["cached"] for r in (first, second, other)] == [False, True, False]
+    assert outcomes(other) == {"tests/policy/choices.yaml::Chooses to itemize": "passed"}

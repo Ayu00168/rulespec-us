@@ -1,0 +1,100 @@
+# Household choices: the points where the law lets a household pick among
+# options and the pick can change tax or benefits. Axiom models each choice as
+# an input; the default here is what a caller supplies when the household
+# states nothing. The simulation layer optimizes. See tools/README.md
+# ("Household choices") and tools/household_choices.py.
+version: 1
+entries:
+  - id: itemized-deduction-election
+    jurisdiction: us
+    program: income-tax
+    question: >-
+      Does the taxpayer elect to itemize deductions instead of taking the
+      standard deduction?
+    actor: taxpayer
+    texts:
+      - corpus_citation_path: us/statute/26/63/e/1
+        excerpt: >-
+          Unless an individual makes an election under this subsection for the
+          taxable year, no itemized deduction shall be allowed for the taxable
+          year.
+    domain:
+      kind: boolean
+      per: tax-unit
+    default:
+      value: false
+      basis: statute
+      note: With no election, 63(e)(1) allows no itemized deduction.
+    objective:
+      measure: net-income
+      scope: household
+    optimization:
+      structure: two-way
+    implementations:
+      - repo: PolicyEngine/policyengine-us
+        commit: ce9377ee80157a17eb730fa1b8550b4d433c696c
+        path: policyengine_us/variables/gov/irs/income/taxable_income/deductions/tax_unit_itemizes.py
+        models: optimized
+        objective:
+          measure: federal-income-tax
+          scope: tax-unit
+        basis: >-
+          When gov.simulation.branch_to_determine_itemization is true, it
+          compares the tax unit's federal income tax with and without
+          itemizing and takes the lower; on a tie it itemizes when itemized
+          deductions exceed the standard deduction.
+        cites_entry: false
+    tests:
+      - repo: PolicyEngine/policyengine-us
+        commit: ce9377ee80157a17eb730fa1b8550b4d433c696c
+        path: policyengine_us/tests/policy/baseline/gov/irs/income/taxable_income/deductions/tax_unit_itemizes.yaml
+        name: 2026 - the itemization choice uses the section 68 limitation net of the QBI deduction
+        pins: [optimum]
+        variable: tax_unit_itemizes
+        chooses: true
+    full_optimization: >-
+      Compare the two choices on the household's net income, so that state and
+      local taxes that depend on the federal election count too.
+
+  - id: qualifying-child-claim-by-non-parent
+    jurisdiction: us
+    program: income-tax
+    question: >-
+      When a child's parents may claim the child as a qualifying child, does no
+      parent claim the child, so that another taxpayer whose adjusted gross
+      income is higher than any parent's may claim the child?
+    actor: eligible-claimants
+    texts:
+      - corpus_citation_path: us/statute/26/152/c/4
+        excerpt: >-
+          If the parents of an individual may claim such individual as a
+          qualifying child but no parent so claims the individual, such
+          individual may be claimed as the qualifying child of another taxpayer
+          but only if the adjusted gross income of such taxpayer is higher than
+          the highest adjusted gross income of any parent of the individual.
+    domain:
+      kind: boolean
+      per: person
+    default:
+      value: false
+      basis: statute
+      note: >-
+        False means a parent claims the child, and 152(c)(4)(A) and (B) decide
+        which taxpayer the child belongs to.
+    objective:
+      measure: net-income
+      scope: household
+    optimization:
+      structure: two-way
+    axiom:
+      input: us:statutes/26/152/c#input.parents_of_individual_may_claim_individual_but_no_parent_claims
+    full_optimization: >-
+      Compare the household's net income with a parent claiming the child and
+      with the other eligible taxpayer claiming the child.
+
+statutory_not_choice:
+  - jurisdiction: us-mt
+    citation: MCA 2021 15-30-2131(1)(c)(vi)(D)
+    note: >-
+      Spouses filing separately on the same form divide the dependent care
+      deduction equally; the statute fixes the split, so it is not a choice.
