@@ -114,6 +114,9 @@ STRUCTURES = ("two-way", "finite", "piecewise-linear", "search")
 # Structures whose exact optimum is cheap: compare both branches, enumerate
 # the options, or evaluate the endpoints and listed kinks.
 EXACT_STRUCTURES = ("two-way", "finite", "piecewise-linear")
+# `optimized` is the exact optimum, including an implementation that evaluates
+# the structure's whole exact set (both branches, every option, or every
+# endpoint and listed kink); `candidate-min` is the best of a cheap subset.
 MODELS = ("optimized", "candidate-min", "convention", "input", "absent")
 OPTIMIZING = ("optimized", "candidate-min")
 # An entry's objective is the standard one: the household's net income for
