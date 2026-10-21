@@ -1347,9 +1347,19 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:dd2091604f1ce9f2ee0225e84ee90895b18c0ceb79767d390ade881f43d450d4"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
   "us-co/regulations/9-ccr-2503-6/3.606.6.yaml":
     active:
       fingerprint: "sha256:93aacbe77f4ff7d5c938dfe9a12abd154ada8c48849e104fce0adadef0af6b73"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:dba9d034ce001d90bffd3417e98c6a828ddc855e3073cf3e2376bbe04ad6a22e"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -1860,6 +1870,11 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
   "us-co/regulations/9-ccr-2503-6/3.606.2.yaml":
     active:
       fingerprint: "sha256:ee917e7c4e61911abffd9f57bc8b7a3c0a59fefdf3e092c09ae6ccea65f4bd09"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:1e7a054ce3493f382cc7d814dc6632abc65965ac579ca1db915a9036fbb04cc2"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -3754,6 +3769,11 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
   "us-il/policies/dhs/csmm/25-06-01.yaml":
     active:
       fingerprint: "sha256:014ef635d95a9c1af7ac4fa10b8ef50c7975161af591dca8c2e8d918fecec937"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:73f710c8a2bba56faf1a1de705402a369901de6379d704f992a87f0331b12e99"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -5689,6 +5709,11 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:3bf79c044a34cfa67c421950a176f45edde0a6189e548e048e96c5558f3498fc"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
   "us-ny/statutes/TAX/618.yaml":
     active:
       fingerprint: "sha256:2840df3601ec834ee48be20848c8d4628411f3a9b092d4e21be48289867591a0"
@@ -5797,6 +5822,11 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:698136c6def993216002ef729f3b7e7fe93ece11baaefe1b836ca9b585d7cb59"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
   "us-sd/policies/cms/south-dakota-chip-eligibility.yaml":
     active:
       fingerprint: "sha256:3571c958ce787971a91b041b75c6c3f51126473ce71749a1c13d5a7b149f91d5"
@@ -5854,6 +5884,11 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
   "us-ut/statutes/59-10-1018.yaml":
     active:
       fingerprint: "sha256:7252fb133a959df98c0df7d319dbabbe0c2f0792509df462060ed04526f0be98"
+      owner: "@MaxGhenis"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
+    pending:
+      fingerprint: "sha256:be24a1d188e376af1b1b0ce9cf2ee24c2aa414ec377b5f1a2757c8c9ab848346"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
