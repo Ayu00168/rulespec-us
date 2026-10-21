@@ -595,8 +595,8 @@ entries:
   jurisdiction: us-hi
   program: income-tax
   question: From 2022 through 2025, which claim of right repayments fall under Hawaii's 2% floor on miscellaneous
-    itemized deductions? The statute keeps a section 1341 repayment over $3,000 outside the floor and one of $3,000
-    or less inside it. The Form N-11 instructions list them the other way round.
+    itemized deductions? The statute keeps a section 1341 repayment, one above the section 1341 threshold, outside the
+    floor and one at or below the threshold inside it. The Form N-11 instructions list them the other way round.
   texts:
   - corpus_citation_path: us-hi/statute/235-2.4
     excerpt: Section 67 (with respect to the 2-percent floor on miscellaneous itemized deductions) of the Internal
@@ -636,14 +636,14 @@ entries:
       sha256: d49a31bc696484a3c756360b129c94f9b34a5463cc2821937c5cacace9ddc6e1
     excerpt: Deduction for repayment of amounts under a claim of right over $3,000. See Repayments in the 2017 federal
       Publication 525
-  reading: Section 67(b)(9), operative through HRS 235-2.4(b), keeps a section 1341 deduction (a repayment over
-    $3,000) outside the 2% floor; a repayment of $3,000 or less is a miscellaneous itemized deduction above 2% of
-    Hawaii AGI.
+  reading: Section 67(b)(9), operative through HRS 235-2.4(b), keeps a section 1341 deduction (a repayment above
+    the section 1341 threshold) outside the 2% floor; a repayment at or below the threshold is a miscellaneous
+    itemized deduction above 2% of Hawaii AGI.
   alternatives:
   - id: n11-instruction-lists
-    reading: Follow the 2022-2025 N-11 lists, which put the over-$3,000 repayment among expenses subject to the
-      2% floor and the $3,000-or-less repayment among expenses not subject to it.
-    effect: Following the lists would put a repayment over $3,000 under the 2% floor, reducing its deduction by 2% of Hawaii AGI, and leave a repayment of $3,000 or less outside it.
+    reading: Follow the 2022-2025 N-11 lists, which put the repayment above the section 1341 threshold among expenses
+      subject to the 2% floor and the repayment at or below it among expenses not subject to it.
+    effect: Following the lists would put a repayment above the section 1341 threshold under the 2% floor, reducing its deduction by 2% of Hawaii AGI, and leave a repayment at or below the threshold outside it.
   basis: Section 1341 became operative in Hawaii for taxable years beginning after December 31, 2021 (Act 56, SLH
     2023), so section 67(b)(9)'s exception for the section 1341 deduction applies through HRS 235-2.4(b). The N-11
     lists match the federal Schedule A categories transposed, and no Hawaii statute or rule adopts them.
@@ -714,6 +714,8 @@ entries:
     from: 2021
     to: 2025
     type: tax
+    note: The 2021, 2022, 2024 and 2025 IT 1040 instructions were checked; 2023 is inferred from the editions on
+      either side.
   proposed:
   - repo: PolicyEngine/policyengine-us
     pr: https://github.com/PolicyEngine/policyengine-us/pull/10195

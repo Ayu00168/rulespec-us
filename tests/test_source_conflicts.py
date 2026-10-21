@@ -779,15 +779,16 @@ def test_dollar_amounts_in_prose_need_a_money_case(tmp_path):
 
 
 def test_dollar_amounts_the_sources_state_or_consumers_write(tmp_path):
-    # A figure the entry's own verified excerpt states (a statutory threshold)
-    # may be quoted as the excerpt writes it; consumer prose (an
+    # An excerpt may state a figure (a statutory threshold); the entry's own
+    # prose may not restate it without a money case. Consumer prose (an
     # implementation's basis, the years' note, an unpublished source's
     # description) is checked too.
     ctx = make_repo(tmp_path)
     quoted = entry()
     quoted["texts"][0]["excerpt"] = "a repayment that exceeds $3,000"
-    quoted["question"] = "Does a repayment that exceeds $3,000 sit outside the floor?"
     assert not [issue for issue in check(ctx, quoted) if "no money case backs" in issue]
+    quoted["question"] = "Does a repayment that exceeds $3,000 sit outside the floor?"
+    assert any("question states $3000, which no money case backs" in issue for issue in check(ctx, quoted))
     for path, text in (
         (("implementations", 0, "basis"), "The statute pays $900 more."),
         (("years", "note"), "A program year worth $40."),
@@ -801,33 +802,36 @@ def test_dollar_amounts_the_sources_state_or_consumers_write(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("text", "backed"),
+    "text",
     [
-        # Quoted as the excerpts write them: the word before the figure, or the two after it.
-        ("A repayment over $3,000 stays outside the floor.", True),
-        ("The over-$3,000 repayment stays outside the floor.", True),
-        ("A repayment of $3,000 or less falls under it.", True),
-        ("The $3,000-or-less repayment falls under it.", True),
-        # #1825 review: the same number as a computed effect is not a quotation.
-        ("This reading pays $3,000 more in the invented case.", False),
-        ("This reading pays $3,000 or more in tax.", False),
-        ("A repayment exceeding $3,000 stays outside the floor.", False),  # not the excerpt's word
-        ("A repayment over $3,001 stays outside the floor.", False),  # not the excerpt's figure
+        # #1825 reviews (rounds 1 and 2): an excerpt's figure backs no amount in
+        # the entry's own prose, however the prose words it. No test on the
+        # surrounding words can tell a quoted threshold from a computed claim.
+        "A repayment over $3,000 stays outside the floor.",
+        "This reading pays $3,000 more in the invented case.",
+        "This reading pays over $3,000 more than the statute's reading.",
+        "It allows a deduction of $3,000 for the invented filer.",
+        "The readings differ by a difference of $3,000.",
+        "It costs the filer a tax of $3,000.",
+        "It means $3,000 or less in extra tax.",
+        "It gives a refund of $3,000.",
+        "This reading pays $3000 more.",
+        "This reading pays $3,000.00 more.",
+        "The repayment is over. $3,000 more tax is due.",
+        "A repayment over\u00a0$3,000 stays outside the floor.",
     ],
 )
-def test_a_source_figure_backs_only_a_quotation_of_it(tmp_path, text, backed):
-    # Review of #1825 (P2): an excerpt's figure used to back the same number
-    # anywhere in the entry, so a computed effect such as "pays $3,000 more"
-    # passed with no money case. Now only a quotation of the figure, as the
-    # excerpt writes it, is backed; a computed amount still needs the money
-    # case and its computing test.
+def test_an_excerpts_figure_backs_no_amount_in_prose(tmp_path, text):
     value = entry()
     value["texts"][0]["excerpt"] = "Deduction for repayment of amounts under a claim of right over $3,000."
     value["pending_texts"][0]["excerpt"] = "Deduction for repayment of amounts under a claim of right of $3,000 or less."
     del value["money_case"]
     value["alternatives"][0]["effect"] = text
-    unbacked = [issue for issue in check(make_repo(tmp_path), value) if "which no money case backs" in issue]
-    assert (unbacked == []) is backed, unbacked
+    issues = check(make_repo(tmp_path), value)
+    assert any("states $3000, which no money case backs" in issue for issue in issues), issues
+    # Naming the threshold without restating it is the way to cite it.
+    value["alternatives"][0]["effect"] = "A repayment above the section 1341 threshold stays outside the floor."
+    assert not [issue for issue in check(make_repo(tmp_path), value) if "no money case backs" in issue]
 
 
 @pytest.mark.parametrize(
@@ -1015,6 +1019,15 @@ UNPUBLISHED = {"kind": "agency-practice", "description": "MN DHS correspondence 
         ({"description": "It wrote 'one two three four five six seven eight'"}, "quotes more than 4 words in all"),
         ({"description": "The agency's reply 'approves it' and \"the waiver\""}, None),
         ({"description": "The agency's reply to the board and the clerk's note were brief"}, None),
+        # Round 2: a span runs from its opening mark to its closing mark, past
+        # apostrophes inside it; an elision or a plural possessive opens nothing.
+        ({"description": "It wrote 'the county's policy is to deny every such claim'"}, "quotes more than 4 words in all"),
+        ({"description": "It wrote \u2018we\u2019ll deny every claim of this kind\u2019"}, "quotes more than 4 words in all"),
+        ({"description": "Since the '90s the clerks in each county office have handled the clerks' files"}, None),
+        ({"description": "The agency's reply was brief, said the clerks' office"}, None),
+        ({"description": 'An unclosed "quotation runs to the end of the text'}, "quotes more than 4 words in all"),
+        # A mark after a space closes nothing: the span runs on to the real closer.
+        ({"description": "It wrote 'one two ' three four five six seven'"}, "quotes more than 4 words in all"),
         ({"description": "Reply from someone@example.gov"}, "contains `@`"),
         ({"kind": "phone"}, "kind must be one of"),
         ({"date": "October 19"}, "date must be a real"),
@@ -1379,11 +1392,15 @@ def test_aggregate_carries_years_kinds_conflict_and_adopts():
     assert "agency-practice, manual, statute" in markdown
     # Review of #1825 (P3): the Markdown view carries alternative ids and what
     # each consumer follows and adopts, as the JSON rows do.
-    assert "`every-later-month`" in markdown
-    assert "PolicyEngine/microcosm-dynamics: follows `every-later-month`" in markdown
+    assert "PolicyEngine/microcosm-dynamics: follows `every-later-month`, adopts `every-later-month`" not in markdown
+    assert "PolicyEngine/microcosm-dynamics: follows `every-later-month` |" in markdown
     value["implementations"][0]["adopts"] = "reading"
+    value["alternatives"].append({"id": "only-in-alternatives", "reading": "Another reading."})
     markdown = sc.render_markdown(sc.aggregate({"TheAxiomFoundation/rulespec-us": {"version": 1, "entries": [value]}})[0])
-    assert "follows `every-later-month`, adopts `reading`" in markdown
+    row = next(line for line in markdown.splitlines() if line.startswith("| `us:"))
+    cells = [cell.strip() for cell in row.split(" | ")]
+    assert cells[7] == "`every-later-month`, `only-in-alternatives`"  # the Alternatives column
+    assert cells[8] == "PolicyEngine/microcosm-dynamics: follows `every-later-month`, adopts `reading`"
 
 
 def test_citation_label():

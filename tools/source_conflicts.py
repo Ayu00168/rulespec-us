@@ -146,21 +146,75 @@ CONFLICT_STATES = ("live", "resolved")
 RESOLVERS = ("legislation", "agency")
 # An unpublished source (correspondence, a call) is described, never quoted:
 # a description may hold at most this many words inside quotation marks, in
-# all its quoted spans together. Spans are double quotes (straight or curly),
-# curly single quotes, and straight single quotes that open and close outside
-# a word (so the apostrophe in "agency's" opens nothing).
+# all its quoted spans together (quoted_spans says what a span is).
 MAX_QUOTED_WORDS = 4
-QUOTED_RE = re.compile(
-    r'["\u201c]([^"\u201c\u201d]+)["\u201d]'
-    r"|\u2018([^\u2018\u2019]+)\u2019"
-    r"|(?<![A-Za-z0-9])'([^']+)'(?![A-Za-z0-9])"
-)
+_DOUBLE_CLOSERS = {'"': '"', "\u201c": "\u201d"}
+_SINGLE_OPENERS = ("'", "\u2018")
+_SINGLE_CLOSERS = ("'", "\u2019")
+_BEFORE_OPENER = frozenset(" \t\n\r([{\u2014\u2013-/")
+
+
+def _opens_single(text: str, index: int) -> bool:
+    """A single quotation mark opens a quotation when it starts the text or
+    follows a space or an opening bracket or dash, and a letter follows it.
+    So the apostrophe in "agency's" opens nothing, and neither does the elision
+    in "the '90s"."""
+
+    before_ok = index == 0 or text[index - 1] in _BEFORE_OPENER
+    return before_ok and index + 1 < len(text) and text[index + 1].isalpha()
+
+
+def _closes_single(text: str, index: int) -> bool:
+    """A single quotation mark closes a quotation when it follows a non-space
+    and no letter or digit follows it, so the apostrophe in "county's" or
+    "we\u2019ll" closes nothing."""
+
+    return (
+        index > 0
+        and not text[index - 1].isspace()
+        and (index + 1 == len(text) or not text[index + 1].isalnum())
+    )
+
+
+def quoted_spans(text: str) -> list[str]:
+    """The quoted spans of a text, each opening mark paired with its closing
+    mark. Double quotes (straight or curly) pair with their own closer; an
+    unclosed one quotes the rest of the text, failing closed. Single quotes
+    (straight or curly) open and close only at word edges (_opens_single,
+    _closes_single), so apostrophes and elisions inside a span or a word are
+    neither; an unclosed single quote is read as an apostrophe."""
+
+    spans: list[str] = []
+    index = 0
+    while index < len(text):
+        mark = text[index]
+        if mark in _DOUBLE_CLOSERS:
+            close = text.find(_DOUBLE_CLOSERS[mark], index + 1)
+            close = len(text) if close == -1 else close
+            spans.append(text[index + 1 : close])
+            index = close + 1
+            continue
+        if mark in _SINGLE_OPENERS and _opens_single(text, index):
+            close = next(
+                (
+                    position
+                    for position in range(index + 1, len(text))
+                    if text[position] in _SINGLE_CLOSERS and _closes_single(text, position)
+                ),
+                None,
+            )
+            if close is not None:
+                spans.append(text[index + 1 : close])
+                index = close + 1
+                continue
+        index += 1
+    return spans
 
 
 def quoted_words(text: str) -> int:
     """How many words a text holds inside quotation marks, across all spans."""
 
-    return sum(len("".join(groups).split()) for groups in QUOTED_RE.findall(text))
+    return sum(len(span.split()) for span in quoted_spans(text))
 
 # The interpretation core: compared field by field with a module's
 # `module.interpretations` entry, and the only fields a module may carry
@@ -392,42 +446,6 @@ def _dollar_values(text: str) -> set[str]:
     return {
         format(Decimal(match.group(1).replace(",", "")).normalize(), "f") for match in DOLLAR_RE.finditer(text)
     }
-
-
-_WORD_RE = re.compile(r"[A-Za-z0-9%]+")
-AmountContext = tuple[str, str | None, tuple[str, ...]]
-
-
-def _amount_contexts(text: str) -> list[AmountContext]:
-    """(amount, the word before it, the two words after it) for each dollar
-    amount, normalised as _dollar_values does and lowercased."""
-
-    contexts: list[AmountContext] = []
-    for match in DOLLAR_RE.finditer(text):
-        before = _WORD_RE.findall(text[: match.start()][-80:])
-        after = _WORD_RE.findall(text[match.end() : match.end() + 80])
-        contexts.append(
-            (
-                format(Decimal(match.group(1).replace(",", "")).normalize(), "f"),
-                before[-1].lower() if before else None,
-                tuple(word.lower() for word in after[:2]),
-            )
-        )
-    return contexts
-
-
-def _quotes_source(context: AmountContext, sources: list[AmountContext]) -> bool:
-    """Does prose quote a source excerpt's figure as the excerpt writes it?
-    That is, the same amount, with the word the excerpt puts before it ("over
-    $3,000") or the two words it puts after it ("$3,000 or less"). A computed
-    effect in other words ("pays $3,000 more", "$3,000 or more") does not."""
-
-    amount, before, after = context
-    return any(
-        amount == other
-        and ((before is not None and before == other_before) or (len(after) == 2 and after == other_after))
-        for other, other_before, other_after in sources
-    )
 
 
 def _unsupported_money(text: str) -> list[str]:
@@ -1104,18 +1122,11 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
     # A public dollar figure needs a pinned test: every $ amount in the entry's
     # own prose must be one its money case (computed by a named test) states.
     money = entry.get("money_case") if isinstance(entry.get("money_case"), dict) else {}
+    # Excerpts are the sources' own words and may state any figure; the entry's
+    # prose names a threshold without restating it ("above the section 1341
+    # threshold"). No lexical test can tell a quoted threshold from a computed
+    # amount, so prose amounts are never backed by an excerpt.
     covered = _dollar_values(str(money.get("description", ""))) | _dollar_values(f"${money.get('amount', '')}")
-    # A figure that the entry's own verified source excerpts state (a statutory
-    # threshold) may be quoted, but only as the source writes it (see
-    # _quotes_source). The same number in another context, such as "pays $3,000
-    # more", is a computed claim, which needs the money case.
-    sources = [
-        context
-        for key in ("texts", "pending_texts")
-        for item in (entry.get(key) if isinstance(entry.get(key), list) else [])
-        if isinstance(item, dict) and isinstance(item.get("excerpt"), str)
-        for context in _amount_contexts(item["excerpt"])
-    ]
     spelled = list(_prose_fields(entry, label))
     if isinstance(money.get("description"), str):
         spelled.append((f"{label}.money_case.description", money["description"]))
@@ -1126,16 +1137,11 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
                 "where needed (such as $1,234.56), so the money-case rule can see it."
             )
     for field_label, text in _prose_fields(entry, label):
-        unbacked = {
-            context[0]
-            for context in _amount_contexts(text)
-            if context[0] not in covered and not _quotes_source(context, sources)
-        }
-        for amount in sorted(unbacked):
+        for amount in sorted(_dollar_values(text) - covered):
             issues.append(
                 f"{field_label} states ${amount}, which no money case backs: name it in the money case "
-                "(whose computed_by test computes it), quote a source's figure as its excerpt writes it, "
-                "or describe the effect without the amount."
+                "(whose computed_by test computes it) or describe the effect without the amount; name a "
+                "source's threshold without restating it."
             )
 
     if "money_case" in entry:
