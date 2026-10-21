@@ -145,9 +145,22 @@ MIN_YEAR, MAX_YEAR = 1900, 2100
 CONFLICT_STATES = ("live", "resolved")
 RESOLVERS = ("legislation", "agency")
 # An unpublished source (correspondence, a call) is described, never quoted:
-# a description may hold at most this many words inside quotation marks.
+# a description may hold at most this many words inside quotation marks, in
+# all its quoted spans together. Spans are double quotes (straight or curly),
+# curly single quotes, and straight single quotes that open and close outside
+# a word (so the apostrophe in "agency's" opens nothing).
 MAX_QUOTED_WORDS = 4
-QUOTED_RE = re.compile(r'["\u201c]([^"\u201c\u201d]+)["\u201d]')
+QUOTED_RE = re.compile(
+    r'["\u201c]([^"\u201c\u201d]+)["\u201d]'
+    r"|\u2018([^\u2018\u2019]+)\u2019"
+    r"|(?<![A-Za-z0-9])'([^']+)'(?![A-Za-z0-9])"
+)
+
+
+def quoted_words(text: str) -> int:
+    """How many words a text holds inside quotation marks, across all spans."""
+
+    return sum(len("".join(groups).split()) for groups in QUOTED_RE.findall(text))
 
 # The interpretation core: compared field by field with a module's
 # `module.interpretations` entry, and the only fields a module may carry
@@ -379,6 +392,42 @@ def _dollar_values(text: str) -> set[str]:
     return {
         format(Decimal(match.group(1).replace(",", "")).normalize(), "f") for match in DOLLAR_RE.finditer(text)
     }
+
+
+_WORD_RE = re.compile(r"[A-Za-z0-9%]+")
+AmountContext = tuple[str, str | None, tuple[str, ...]]
+
+
+def _amount_contexts(text: str) -> list[AmountContext]:
+    """(amount, the word before it, the two words after it) for each dollar
+    amount, normalised as _dollar_values does and lowercased."""
+
+    contexts: list[AmountContext] = []
+    for match in DOLLAR_RE.finditer(text):
+        before = _WORD_RE.findall(text[: match.start()][-80:])
+        after = _WORD_RE.findall(text[match.end() : match.end() + 80])
+        contexts.append(
+            (
+                format(Decimal(match.group(1).replace(",", "")).normalize(), "f"),
+                before[-1].lower() if before else None,
+                tuple(word.lower() for word in after[:2]),
+            )
+        )
+    return contexts
+
+
+def _quotes_source(context: AmountContext, sources: list[AmountContext]) -> bool:
+    """Does prose quote a source excerpt's figure as the excerpt writes it?
+    That is, the same amount, with the word the excerpt puts before it ("over
+    $3,000") or the two words it puts after it ("$3,000 or less"). A computed
+    effect in other words ("pays $3,000 more", "$3,000 or more") does not."""
+
+    amount, before, after = context
+    return any(
+        amount == other
+        and ((before is not None and before == other_before) or (len(after) == 2 and after == other_after))
+        for other, other_before, other_after in sources
+    )
 
 
 def _unsupported_money(text: str) -> list[str]:
@@ -738,13 +787,11 @@ def _check_unpublished_source(item: Any, *, label: str, issues: list[str]) -> No
     if "description" in item and _string(description, label=f"{label}.description", issues=issues):
         if "@" in description:
             issues.append(f"{label}.description contains `@`; describe the source, never give an address.")
-        for quoted in QUOTED_RE.findall(description):
-            if len(quoted.split()) > MAX_QUOTED_WORDS:
-                issues.append(
-                    f"{label}.description quotes more than {MAX_QUOTED_WORDS} words; an unpublished "
-                    "source is described, never quoted."
-                )
-                break
+        if quoted_words(description) > MAX_QUOTED_WORDS:
+            issues.append(
+                f"{label}.description quotes more than {MAX_QUOTED_WORDS} words in all; an unpublished "
+                "source is described, never quoted."
+            )
 
 
 def _check_snapshot(snapshot: Any, *, label: str, issues: list[str]) -> None:
@@ -1058,13 +1105,17 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
     # own prose must be one its money case (computed by a named test) states.
     money = entry.get("money_case") if isinstance(entry.get("money_case"), dict) else {}
     covered = _dollar_values(str(money.get("description", ""))) | _dollar_values(f"${money.get('amount', '')}")
-    # A figure the entry's own verified source excerpts state (a statutory
-    # threshold) is backed by them.
-    for key in ("texts", "pending_texts"):
-        quoted = entry.get(key)
-        for item in quoted if isinstance(quoted, list) else []:
-            if isinstance(item, dict) and isinstance(item.get("excerpt"), str):
-                covered |= _dollar_values(item["excerpt"])
+    # A figure that the entry's own verified source excerpts state (a statutory
+    # threshold) may be quoted, but only as the source writes it (see
+    # _quotes_source). The same number in another context, such as "pays $3,000
+    # more", is a computed claim, which needs the money case.
+    sources = [
+        context
+        for key in ("texts", "pending_texts")
+        for item in (entry.get(key) if isinstance(entry.get(key), list) else [])
+        if isinstance(item, dict) and isinstance(item.get("excerpt"), str)
+        for context in _amount_contexts(item["excerpt"])
+    ]
     spelled = list(_prose_fields(entry, label))
     if isinstance(money.get("description"), str):
         spelled.append((f"{label}.money_case.description", money["description"]))
@@ -1075,10 +1126,16 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
                 "where needed (such as $1,234.56), so the money-case rule can see it."
             )
     for field_label, text in _prose_fields(entry, label):
-        for amount in sorted(_dollar_values(text) - covered):
+        unbacked = {
+            context[0]
+            for context in _amount_contexts(text)
+            if context[0] not in covered and not _quotes_source(context, sources)
+        }
+        for amount in sorted(unbacked):
             issues.append(
                 f"{field_label} states ${amount}, which no money case backs: name it in the money case "
-                "(whose computed_by test computes it) or describe the effect without the amount."
+                "(whose computed_by test computes it), quote a source's figure as its excerpt writes it, "
+                "or describe the effect without the amount."
             )
 
     if "money_case" in entry:
@@ -1677,8 +1734,8 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
         "",
         f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}. Generated by tools/source_conflicts.py aggregate.",
         "",
-        "| Global id | Years | Status | Conflict | Outcome | Kinds | Sources | Money case |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Global id | Years | Status | Conflict | Outcome | Kinds | Sources | Alternatives | Implementations | Money case |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in rows:
         money = row.get("money_case") or {}
@@ -1689,9 +1746,16 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
             f"{years.get('from')}\u2013{years.get('to', '')} ({years.get('type')})" if isinstance(years, dict) and years else ""
         )
         kinds = ", ".join(row.get("source_kinds") or [])
+        alternatives = ", ".join(f"`{alt.get('id')}`" for alt in row.get("alternatives") or [])
+        # Each consumer: what it follows today, and what it adopts when that differs.
+        implementations = "; ".join(
+            f"{item.get('repo')}: follows `{item.get('follows')}`"
+            + (f", adopts `{item.get('adopts')}`" if item.get("adopts") != item.get("follows") else "")
+            for item in row.get("implementations") or []
+        )
         lines.append(
             f"| `{row['global_id']}` | {span} | {row['status']} | {row.get('conflict', 'live')} | "
-            f"{row['outcome']} | {kinds} | {sources} | {size} |"
+            f"{row['outcome']} | {kinds} | {sources} | {alternatives} | {implementations} | {size} |"
         )
     return "\n".join(lines) + "\n"
 

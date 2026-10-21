@@ -703,7 +703,8 @@ entries:
   alternatives:
   - id: it1040-federal-claim
     reading: Deduct only when the federal return claimed the section 1341 credit or itemized the repayment on Schedule
-      A, as every IT 1040 edition from 2021 (line 23) to 2025 (line 29) instructs.
+      A, as the IT 1040 instructions say in the 2021 (line 23), 2022, 2024 and 2025 (line 29) editions; the 2023
+      edition was not checked.
     effect: An eligible repayment above the section 1341 threshold on a return that takes the federal standard deduction and whose section 1341 methods tie gets no Ohio deduction.
   basis: The statute conditions the deduction on its being allowable, not on a federal claim; the federal-claim
     condition appears only in the department's instructions, and no Ohio rule adopts it.
@@ -808,11 +809,6 @@ entries:
   years:
     from: 2026
     type: calendar
-  proposed:
-  - repo: PolicyEngine/policyengine-us
-    pr: https://github.com/PolicyEngine/policyengine-us/pull/10176
-    path: policyengine_us/parameters/gov/states/co/ssa/oap/income/sources/unearned.yaml
-    follows: reading
 - id: poverty-credit-earned-income-losses
   jurisdiction: us-md
   program: income-tax

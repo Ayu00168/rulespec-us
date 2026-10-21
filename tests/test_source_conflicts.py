@@ -11,6 +11,7 @@ property-based and differential tests live in test_source_conflicts_properties.p
 
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import importlib.util
@@ -599,6 +600,19 @@ def test_the_screen_fails_closed_on_input_the_parser_cannot_handle(tmp_path, pre
                for issue in check(ctx, value))
 
 
+def test_the_scope_walk_is_iterative():
+    # Review of #1825 (P3): 98 parsed levels never reach the recursion limit,
+    # so they also pass a recursive walk. A tree built directly, 5,000 levels
+    # of `if` deep, would raise RecursionError in one; the iterative walk
+    # visits every statement.
+    inner: list[ast.stmt] = [ast.FunctionDef(name="test_deep", args=ast.arguments(), body=[ast.Pass()], decorator_list=[])]
+    for _ in range(5000):
+        inner = [ast.If(test=ast.Constant(True), body=inner, orelse=[])]
+    statements = list(sc._scope_statements(inner))
+    assert len(statements) == 5001
+    assert isinstance(statements[-1], ast.FunctionDef) and statements[-1].name == "test_deep"
+
+
 def test_the_screen_walks_deeply_nested_blocks():
     # The walk over compound statements is iterative; 98 levels of `if`, with
     # the def's body at the 100th (CPython's indentation limit), still find it.
@@ -766,12 +780,13 @@ def test_dollar_amounts_in_prose_need_a_money_case(tmp_path):
 
 def test_dollar_amounts_the_sources_state_or_consumers_write(tmp_path):
     # A figure the entry's own verified excerpt states (a statutory threshold)
-    # is backed by it; consumer prose (an implementation's basis, the years'
-    # note, an unpublished source's description) is checked too.
+    # may be quoted as the excerpt writes it; consumer prose (an
+    # implementation's basis, the years' note, an unpublished source's
+    # description) is checked too.
     ctx = make_repo(tmp_path)
     quoted = entry()
     quoted["texts"][0]["excerpt"] = "a repayment that exceeds $3,000"
-    quoted["question"] = "Does a repayment over $3,000 sit outside the floor?"
+    quoted["question"] = "Does a repayment that exceeds $3,000 sit outside the floor?"
     assert not [issue for issue in check(ctx, quoted) if "no money case backs" in issue]
     for path, text in (
         (("implementations", 0, "basis"), "The statute pays $900 more."),
@@ -783,6 +798,36 @@ def test_dollar_amounts_the_sources_state_or_consumers_write(tmp_path):
             target = target[key]
         target[path[-1]] = text
         assert any("which no money case backs" in issue for issue in check(ctx, value)), path
+
+
+@pytest.mark.parametrize(
+    ("text", "backed"),
+    [
+        # Quoted as the excerpts write them: the word before the figure, or the two after it.
+        ("A repayment over $3,000 stays outside the floor.", True),
+        ("The over-$3,000 repayment stays outside the floor.", True),
+        ("A repayment of $3,000 or less falls under it.", True),
+        ("The $3,000-or-less repayment falls under it.", True),
+        # #1825 review: the same number as a computed effect is not a quotation.
+        ("This reading pays $3,000 more in the invented case.", False),
+        ("This reading pays $3,000 or more in tax.", False),
+        ("A repayment exceeding $3,000 stays outside the floor.", False),  # not the excerpt's word
+        ("A repayment over $3,001 stays outside the floor.", False),  # not the excerpt's figure
+    ],
+)
+def test_a_source_figure_backs_only_a_quotation_of_it(tmp_path, text, backed):
+    # Review of #1825 (P2): an excerpt's figure used to back the same number
+    # anywhere in the entry, so a computed effect such as "pays $3,000 more"
+    # passed with no money case. Now only a quotation of the figure, as the
+    # excerpt writes it, is backed; a computed amount still needs the money
+    # case and its computing test.
+    value = entry()
+    value["texts"][0]["excerpt"] = "Deduction for repayment of amounts under a claim of right over $3,000."
+    value["pending_texts"][0]["excerpt"] = "Deduction for repayment of amounts under a claim of right of $3,000 or less."
+    del value["money_case"]
+    value["alternatives"][0]["effect"] = text
+    unbacked = [issue for issue in check(make_repo(tmp_path), value) if "which no money case backs" in issue]
+    assert (unbacked == []) is backed, unbacked
 
 
 @pytest.mark.parametrize(
@@ -963,6 +1008,13 @@ UNPUBLISHED = {"kind": "agency-practice", "description": "MN DHS correspondence 
         ({"description": 'The department "approves one hundred dollars a month" in practice'}, "quotes more than 4 words"),
         ({"description": "The department \u201capproves one hundred dollars a month\u201d"}, "quotes more than 4 words"),
         ({"description": 'The department "approves the waiver" in practice'}, None),
+        # Review of #1825 (P3): the bound counts every quoted span together,
+        # and single quotation marks quote too; an apostrophe does not.
+        ({"description": 'It wrote "one two three four" and "five six seven eight"'}, "quotes more than 4 words in all"),
+        ({"description": "It wrote \u2018one two three four five six seven eight\u2019"}, "quotes more than 4 words in all"),
+        ({"description": "It wrote 'one two three four five six seven eight'"}, "quotes more than 4 words in all"),
+        ({"description": "The agency's reply 'approves it' and \"the waiver\""}, None),
+        ({"description": "The agency's reply to the board and the clerk's note were brief"}, None),
         ({"description": "Reply from someone@example.gov"}, "contains `@`"),
         ({"kind": "phone"}, "kind must be one of"),
         ({"date": "October 19"}, "date must be a real"),
@@ -1325,6 +1377,13 @@ def test_aggregate_carries_years_kinds_conflict_and_adopts():
     markdown = sc.render_markdown(rows)
     assert "2022\u20132025 (tax)" in markdown
     assert "agency-practice, manual, statute" in markdown
+    # Review of #1825 (P3): the Markdown view carries alternative ids and what
+    # each consumer follows and adopts, as the JSON rows do.
+    assert "`every-later-month`" in markdown
+    assert "PolicyEngine/microcosm-dynamics: follows `every-later-month`" in markdown
+    value["implementations"][0]["adopts"] = "reading"
+    markdown = sc.render_markdown(sc.aggregate({"TheAxiomFoundation/rulespec-us": {"version": 1, "entries": [value]}})[0])
+    assert "follows `every-later-month`, adopts `reading`" in markdown
 
 
 def test_citation_label():
@@ -1424,4 +1483,7 @@ def test_verify_lists_proposed_implementations():
     payload["entries"][0]["proposed"] = [dict(PROPOSED)]
     issues, report = sc.verify_register(payload, fetch=net, matches=substring, resolve=corpus.get)
     assert issues == []
-    assert any(line.startswith("proposed:") and "pull/10200" in line for line in report)
+    proposed = [line for line in report if line.startswith("proposed:")]
+    assert len(proposed) == 1 and "pull/10200" in proposed[0]
+    # Review of #1825 (P3): a proposal is listed, never counted as an implementation.
+    assert report[0] == "verified: 1 texts, 1 pending texts, 1 implementations, 2 tests"
