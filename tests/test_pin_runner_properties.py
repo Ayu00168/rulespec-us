@@ -31,10 +31,14 @@ Invariants, for every oracle record:
    `identical` or `behind`. Any exception from the API is a refusal.
 8. A household choice's optimum pin (differential): `optimum_shown` accepts a
    recorded YAML case exactly when a reference predicate, written
-   independently, holds: the chosen option is not the default, the case's
-   input does not name the decision variable, its output states the
-   variable at least once, and every stated value (per-entity lists and
-   per-period mappings flattened) is the chosen option.
+   independently, holds:
+   - the chosen option is not the default;
+   - the case's input names neither the decision variable nor a parameter
+     (a dotted key), and it applies no reform;
+   - no error margin could pass the default in place of the chosen option
+     (a boolean compares as 0 or 1);
+   - its output states the variable at least once, and every stated value
+     (per-entity lists and per-period mappings flattened) is the chosen option.
 """
 
 from __future__ import annotations
@@ -377,18 +381,52 @@ OUTPUT = st.recursive(
 )
 
 
-@SETTINGS
-@given(
-    st.one_of(st.none(), st.fixed_dictionaries({"input_keys": st.lists(st.sampled_from(["v", "w", "people"]), max_size=3), "output": OUTPUT})),
-    OPTION,
-    OPTION,
+def _ref_magnitude(value):
+    """What a YAML runner compares: a boolean as 0 or 1, a number or decimal string as itself."""
+
+    return Fraction(int(value)) if isinstance(value, bool) else _ref_number(value)
+
+
+def _ref_margin_passes_default(case, chooses, default) -> bool:
+    """policyengine-core accepts a value within every given margin (absolute,
+    and relative to the stated value), or exactly with none. Could the default
+    pass where the case states `chooses`?"""
+
+    target, other = _ref_magnitude(chooses), _ref_magnitude(default)
+    if target is None or other is None:
+        return False
+    limits = []
+    if case.get("absolute_error_margin") is not None:
+        limits.append(Fraction(repr(case["absolute_error_margin"])))
+    if case.get("relative_error_margin") is not None:
+        limits.append(Fraction(repr(case["relative_error_margin"])) * abs(target))
+    return abs(target - other) <= (min(limits) if limits else 0)
+
+
+CASES = st.one_of(
+    st.none(),
+    st.fixed_dictionaries(
+        {"input_keys": st.lists(st.sampled_from(["v", "w", "people", "gov.x.y"]), max_size=3), "output": OUTPUT},
+        optional={
+            "absolute_error_margin": st.sampled_from([0, 0.01, 0.25, 0.5, 1, 2]),
+            "relative_error_margin": st.sampled_from([0, 0.1, 0.5, 1]),
+            "reforms": st.booleans(),
+        },
+    ),
 )
+
+
+@SETTINGS
+@given(CASES, OPTION, OPTION)
 def test_optimum_shown_matches_a_reference(case, chooses, default):
     values = list(_ref_values(case["output"], "v")) if case else []
     expected = (
         case is not None
         and not _ref_same(chooses, default)
         and "v" not in case["input_keys"]
+        and not any("." in key for key in case["input_keys"])
+        and not case.get("reforms")
+        and not _ref_margin_passes_default(case, chooses, default)
         and bool(values)
         and all(_ref_same(value, chooses) for value in values)
     )

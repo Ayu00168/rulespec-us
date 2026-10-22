@@ -431,6 +431,8 @@ def optimum_shown(case: Any, expect: tuple[str, Any, Any]) -> str | None:
         return f"the case changes the model ({changed}), so it does not show the model choosing as shipped"
     margin = margin_admits_default(case, chooses, default)
     if margin is not None:
+        if _magnitude(chooses) == _magnitude(default):
+            return f"the default {default!r} compares as the same number as {chooses!r}, so the case shows nothing"
         return f"the case's error margin ({margin}) would also pass the default {default!r}"
     values = _stated(case.get("output"), variable)
     if not values:

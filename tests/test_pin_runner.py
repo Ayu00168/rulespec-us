@@ -456,6 +456,9 @@ def test_a_share_margin_must_be_narrower_than_the_gap_to_the_default(margins, va
 def test_an_optimum_that_is_the_default_shows_nothing():
     case = {"input_keys": [], "output": {"share": 0.5}}
     assert "is the default" in runner.optimum_shown(case, ("share", "0.5", "0.50"))
+    # A YAML runner compares true and 1 as the same number, so neither shows the other.
+    flag = {"input_keys": [], "output": {"v": True}}
+    assert "compares as the same number" in runner.optimum_shown(flag, ("v", True, "1"))
     assert runner.optimum_shown(case, ("share", "0.5", "1")) is None
 
 
