@@ -408,7 +408,18 @@ fails closed. The fixtures cover:
   `pytest.main` itself, with items that have no name until they run): a case
   that passes, fails or is skipped, two cases with one name, a missing case, a
   missing file, a Python pin at the same commit with its own exit, a passing
-  YAML commit that is cached, and an install without the runner's package.
+  YAML commit that is cached, and an install without the runner's package;
+- household-choice optimum pins through that stand-in: a case the model
+  chooses, a forced input, axes, an override, a reform, an extension, an enum,
+  two entries pinning one case on different variables, and a case where only
+  one unit chooses, pinned with and without `instances`.
+
+`tests/test_pin_oracle_core.py` runs the oracle through the real
+policyengine-core YAML runner, with a minimal model. The cases are the
+reviews' counterexamples and the legitimate case next to each, 21 pins on 16
+cases. The `pinned-tests` job runs it in an environment of its own with
+policyengine-core 3.33.12; elsewhere it skips when policyengine-core isn't
+installed.
 
 The fixtures also check that no secret in the caller's environment reaches
 the pinned tests. `tests/test_pin_runner_properties.py` checks the classifier
@@ -487,10 +498,10 @@ register's rules exactly.
 | `objective` | What a household would pursue: `measure` (`net-income`, the standard, or `total-tax` for a choice that moves only tax, which is the same choice) and `scope` (`tax-unit` or `household`). A choice that can move more than one tax unit takes the household as its scope. That is any choice whose actor is `eligible-claimants`, `household` or `provider-household`, or whose entity is a family, SPM unit, household or benefit unit. `tax-unit` means the model's tax unit with every member's liability combined. For a filing-status choice between spouses, such as filing jointly or separately, or Montana's separate filing on one form, that is both spouses' liability together. PolicyEngine-US keeps the spouses in one tax unit there, so the choice needs no narrower scope. |
 | `multi_year` | Optional, `true` only. The choice binds later years or carries amounts forward, and is optimized one year at a time for now. |
 | `optimization` | `structure`, how an optimum can be found: `two-way` (a boolean or a two-option enum), `finite` (a boolean or an enum), `piecewise-linear` (a share or an amount, exact at the endpoints and kinks) or `search`. It may add `candidates`, a description of a cheap candidate set. |
-| `axiom` | `input`: the input key of the choice's slot, `<jurisdiction>:<module path>#input.<slot>`. `check` screens it: the module exists in this repository, the slot is not one of its rules or imports, and some formula in it reads the slot as a whole word. Axiom modules carry no marker, because they are encoder output; this field is the only link from Axiom. |
-| `implementations` | Code outside RuleSpec that models the choice: `repo`, `commit`, `path`, `models` and `cites_entry`. `models` is one of:<br>• `optimized`: the exact optimum. This includes an implementation that evaluates the structure's whole exact set: both branches, every option, or every endpoint and listed kink of a piecewise-linear choice.<br>• `candidate-min`: the best of a cheap subset of that set, which may miss the optimum.<br>• `convention`: a fixed, documented rule.<br>• `input`: the user supplies it, with the default.<br>• `absent`: not modeled.<br>So the worklist's "uses candidate-min where a … comparison finds the exact optimum" always names a real gap. An implementation that optimizes states its own `objective`, which may be narrower than the entry's, such as `federal-income-tax` over the `tax-unit`. Its measures are `net-income`, `total-tax`, `federal-income-tax` and `state-income-tax`. `optimized` needs a structure other than `search`, and `candidate-min` needs `candidates`. `basis` may say how the code decides. |
+| `axiom` | `input`: the input key of the choice's slot in the module that encodes the provision granting the choice, `<jurisdiction>:<module path>#input.<slot>`. `consumers`: input slots in other modules that take the same choice, each with its `polarity`, `same` or `inverse` (true there means the other option, so a boolean only). It may give either or both. `check` screens every slot: the module exists in this repository, the slot is not one of its rules or imports, and some formula in it reads the slot as a whole word. When the module declares the slot under `inputs:`, its entity and dtype must fit the domain: `per` is the declared entity (`TaxUnit` is `tax-unit`), and the dtype can hold the kind (`Boolean` or `Judgment` for a boolean, `Money` for an amount, `Rate`, `Decimal` or `Number` for a share, `Text`, `String` or `Integer` for an enum). A consumer is not `input` itself and is listed once. Axiom modules carry no marker, because they are encoder output; this field is the only link from Axiom. |
+| `implementations` | Code outside RuleSpec that models the choice: `repo`, `commit`, `path`, `models`, `cites_entry` and `variable`, the model variable that holds the choice. `variable` is required when the implementation optimizes, and `verify` checks that a Python `path` defines `class <variable>(`. `models` is one of:<br>• `optimized`: the exact optimum. This includes an implementation that evaluates the structure's whole exact set: both branches, every option, or every endpoint and listed kink of a piecewise-linear choice.<br>• `candidate-min`: the best of a cheap subset of that set, which may miss the optimum.<br>• `convention`: a fixed, documented rule.<br>• `input`: the user supplies it, with the default.<br>• `absent`: not modeled.<br>So the worklist's "uses candidate-min where a … comparison finds the exact optimum" always names a real gap. An implementation that optimizes states its own `objective`, which may be narrower than the entry's, such as `federal-income-tax` over the `tax-unit`. Its measures are `net-income`, `total-tax`, `federal-income-tax` and `state-income-tax`. `optimized` needs a structure other than `search`, and `candidate-min` needs `candidates`. `basis` may say how the code decides. |
 | `proposed` | Unmerged changes: `repo`, `pr`, `path` and `models`, listed by verify and never counted. |
-| `tests` | Tests that pin a consumer: `pins` is `[default]` or `[optimum]`. An implementation that optimizes needs an `optimum` pin in its repository. A `convention` or `input` implementation needs a `default` pin there; an `absent` one needs none. An `optimum` pin is another repository's YAML test case. It names the decision `variable` whose output shows the choice, and the option the case `chooses`, which must be an option of the domain and not the default. |
+| `tests` | Tests that pin a consumer: `pins` is `[default]` or `[optimum]`. Each implementation that models the choice is pinned in its repository at its own commit: one that optimizes by an `optimum` pin on its `variable`, so two optimizing implementations need a pin each, and a `convention` or `input` one by a `default` pin. An `absent` one needs none. An `optimum` pin is another repository's YAML test case. It names the decision `variable`, which the runner reads from the case's own simulation (the case need not assert it), and the option the model `chooses`, which must be an option of the domain and not the default. Its optional `instances` lists the case's entity instance ids that must compute that option (for a case where only some tax units or people choose it); without it, every instance must. |
 | `source_conflict` | Optional: the global id of a register entry this choice meets, such as a form that forbids an allocation a regulation allows. The conflict entry settles which options the law grants; this entry records which one models assume. |
 | `full_optimization` | Optional prose: what exact optimization would take. |
 
@@ -534,36 +545,57 @@ the same way. The report adds the worklist:
 - an objective narrower than the entry's;
 - a choice no implementation is recorded for;
 - a multi-year choice;
-- a choice with no Axiom input slot yet.
+- a choice with no Axiom input slot in the module that grants it, naming any
+  consumer slots, which a caller sets consistently.
 
 `tools/pin_runner.py` runs the household choices' pins with the register's,
 labelled `choices.entries[i].tests[j]`. An `optimum` pin must pass and also be
 non-vacuous, or it is `vacuous`. The runner hands the oracle each optimum
-pin's decision variable. After the case runs, the oracle reads that variable
-from the case's own simulation (`simulation.calculate`), along with the
-variables the simulation took as inputs (`simulation.input_variables`, which
-counts direct inputs and axes). It also records whether the case changes the
-model: a top-level dotted input key (a parameter override, as the YAML runner
-reads it), a reform or an extension. The runner then requires:
+pin's decision variable; two entries can pin one case on different
+variables. After the case runs, the oracle reads each of those variables from
+the case's own simulation at the case's period (`simulation.calculate`), with
+the id of the entity instance each value belongs to and the dtype the model
+stored it in, and the variables the simulation took as inputs
+(`simulation.input_variables`, which counts direct inputs and axes). It also
+records whether the case changes the model: a top-level dotted input key (a
+parameter override, as the YAML runner reads it), a reform or an extension.
+The runner judges each pin on the record for its own variable only, and
+requires:
 
 - the case runs the model as shipped: no parameter override, reform or
   extension;
 - the decision variable is not among the simulation's inputs;
-- the model computed at least one value, and every value is the chosen
+- the model computed at least one value, and the value at every instance the
+  pin's `instances` names (at every instance, if it names none) is the chosen
   option;
 - the chosen option is not the default.
 
 The check reads the model's own computed value, not the case's stated
-output. So an error margin, an implicit tolerance, or an entity instance
-named like the variable can't stand in for the choice.
+output, and the case need not assert the variable. So an error margin, an
+implicit tolerance, an entity instance named like the variable, or another
+entry's pin on the same case can't stand in for the choice.
 
-Options compare as the model stores them:
+Computed values compare as the model stored them:
 - A boolean must be a boolean: 1 is not true.
-- Numbers and decimal strings compare as float32. `16777217` and `16777216`
-  are one option, so neither shows the other, and `check` refuses such a
-  `chooses` too.
+- An integer compares exactly, and a float64 as a float64.
+- A float32, and a number whose dtype the oracle couldn't record, compare as
+  float32 numbers.
 - An enum option compares by name, so `head-of-household` matches
   PolicyEngine-US's `HEAD_OF_HOUSEHOLD`.
+
+Whether the chosen option is the default is judged before the case runs, as
+float32 numbers whatever the dtype: `16777217` and `16777216` are one option,
+so neither shows the other, and `check` refuses such a `chooses` too. That
+fails closed.
+
+Two more limits, both documented here rather than checked:
+- A choice forced through an input upstream of the variable (an input the
+  variable's formula reads, which makes it compute the option whatever the
+  household's circumstances) is not seen. The variable is not itself an
+  input, so the pin passes.
+- The oracle reads the variable at the case's period, as core's `calculate`
+  does. A variable defined by month in a case for a year is read as its sum
+  over the year, so such a pin fails closed; give it a case for the month.
 
 So each `optimum` pin shows the model choosing something other than the
 default. It does not show which rule chose it: a convention that picks the

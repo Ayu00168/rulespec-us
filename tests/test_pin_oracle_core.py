@@ -6,6 +6,7 @@ is not in this repository's CI, so there it skips): a minimal model, cases
 that force, imitate or override a choice, core's `OpenFiscaPlugin`, the
 oracle, and `optimum_shown` on what the oracle recorded. Each case is one the
 #1844 reviews executed against core, or the legitimate case next to it.
+The pinned-tests workflow job installs policyengine-core to run it.
 """
 
 from __future__ import annotations
@@ -19,7 +20,10 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("policyengine_core")
+if os.environ.get("AXIOM_PIN_ORACLE_CORE_REQUIRED"):
+    import policyengine_core  # noqa: F401 - the workflow requires it, so a missing install fails
+else:
+    pytest.importorskip("policyengine_core")
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 
@@ -29,7 +33,7 @@ MODEL = textwrap.dedent(
     from policyengine_core.enums import Enum
     from policyengine_core.model_api import where
     from policyengine_core.parameters import ParameterNode
-    from policyengine_core.periods import YEAR
+    from policyengine_core.periods import MONTH, YEAR
     from policyengine_core.taxbenefitsystems import TaxBenefitSystem
     from policyengine_core.variables import Variable
 
@@ -79,6 +83,37 @@ MODEL = textwrap.dedent(
         label = "p0"
 
 
+    class always_true(Variable):
+        value_type = bool
+        entity = Person
+        definition_period = YEAR
+        label = "always true"
+
+        def formula(person, period, parameters):
+            return person("income", period) > -1
+
+
+    class count(Variable):
+        # An integer the model stores exactly, past float32's precision.
+        value_type = int
+        entity = Person
+        definition_period = YEAR
+        label = "count"
+
+        def formula(person, period, parameters):
+            return person("income", period) * 0 + 16777220
+
+
+    class monthly_share(Variable):
+        value_type = float
+        entity = Person
+        definition_period = MONTH
+        label = "monthly share"
+
+        def formula(person, period, parameters):
+            return person("income", period.this_year) * 0 + 0.3
+
+
     class share(Variable):
         value_type = float
         entity = Person
@@ -104,57 +139,84 @@ MODEL = textwrap.dedent(
     class MiniSystem(TaxBenefitSystem):
         def __init__(self):
             super().__init__([Person, Household])
-            for variable in (income, elects, checked, p0, share, filing_status):
+            for variable in (income, elects, checked, p0, always_true, count, monthly_share, share, filing_status):
                 self.add_variable(variable)
             self.parameters = ParameterNode("", data={"gov": {"flag": {"values": {"2000-01-01": True}}}})
     """
 )
 
-# name -> (case, (variable, chooses, default), shown)
+# name -> the YAML case
 CASES = {
-    "the model chooses": (
-        {"input": {"income": 20}, "output": {"elects": True}},
-        ("elects", True, False), True),
-    "forced by input": (
-        {"input": {"income": 0, "elects": True}, "output": {"elects": True}},
-        ("elects", True, False), False),
-    "forced through axes": (
-        {"input": {"people": {"p": {"income": 0}}, "axes": [[{"name": "elects", "count": 1, "min": 1, "max": 1}]]},
-         "output": {"elects": True}},
-        ("elects", True, False), False),
+    "the model chooses": {"input": {"income": 20}, "output": {"elects": True}},
+    "forced by input": {"input": {"income": 0, "elects": True}, "output": {"elects": True}},
+    "forced through axes": {
+        "input": {"people": {"p": {"income": 0}}, "axes": [[{"name": "elects", "count": 1, "min": 1, "max": 1}]]},
+        "output": {"elects": True},
+    },
     # Core's YAML runner compares within 1e-3 when a case gives no margin.
-    "an implicit margin admits the default": (
-        {"input": {"income": 0}, "output": {"share": 0.5005}},
-        ("share", "0.5005", "0.5"), False),
-    # A margin of 0.99999999 rounds, in float32, to 1: false passes as true.
-    "a boolean margin admits the default": (
-        {"input": {"income": 0}, "output": {"elects": True}, "absolute_error_margin": 0.99999999},
-        ("elects", True, False), False),
-    "a float32 share the model chose": (
-        {"input": {"income": 20}, "output": {"share": 0.3}},
-        ("share", "0.3", "0.5"), True),
+    "an implicit margin admits the default": {"input": {"income": 0}, "output": {"share": 0.5005}},
+    # A margin of 0.99999999 rounds, in float32, to 1, so false passes as true
+    # under some numpy versions (the round-2 review's core 3.23.6); under
+    # others the case fails as a test. Either way, no pin passes.
+    "a boolean margin admits the default": {
+        "input": {"income": 0}, "output": {"elects": True}, "absolute_error_margin": 0.99999999,
+    },
+    "a float32 share the model chose": {"input": {"income": 20}, "output": {"share": 0.3}},
     # 0.500000001 is the default's float32 number, so the case can't tell them apart.
-    "an option the default's float32 number": (
-        {"input": {"income": 0}, "output": {"share": 0.500000001}, "absolute_error_margin": 0},
-        ("share", "0.500000001", "0.5"), False),
+    "an option the default's float32 number": {
+        "input": {"income": 0}, "output": {"share": 0.500000001}, "absolute_error_margin": 0,
+    },
     # The axis names the instance p0; the output asserts `checked` for it, not the choice p0.
-    "an instance named like the choice": (
-        {"input": {"people": {"p": {"income": 6}}, "axes": [[{"name": "checked", "count": 1, "min": 1, "max": 1}]]},
-         "output": {"people": {"p0": {"checked": True}}}},
-        ("p0", True, False), False),
-    "a dotted entity id is not a parameter": (
-        {"input": {"people": {"person.a": {"income": 20}}}, "output": {"elects": True}},
-        ("elects", True, False), True),
-    "a parameter override": (
-        {"input": {"gov.flag": True, "income": 20}, "output": {"elects": True}},
-        ("elects", True, False), False),
-    "an enum the model chose": (
-        {"input": {"income": 20}, "output": {"filing_status": "SEPARATE"}},
-        ("filing_status", "separate", "joint"), True),
-    "an enum the model did not choose": (
-        {"input": {"income": 0}, "output": {"filing_status": "JOINT"}},
-        ("filing_status", "separate", "joint"), False),
+    "an instance named like the choice": {
+        "input": {"people": {"p": {"income": 6}}, "axes": [[{"name": "checked", "count": 1, "min": 1, "max": 1}]]},
+        "output": {"people": {"p0": {"checked": True}}},
+    },
+    "a dotted entity id is not a parameter": {"input": {"people": {"person.a": {"income": 20}}}, "output": {"elects": True}},
+    "a parameter override": {"input": {"gov.flag": True, "income": 20}, "output": {"elects": True}},
+    "an enum the model chose": {"input": {"income": 20}, "output": {"filing_status": "SEPARATE"}},
+    "an enum the model did not choose": {"input": {"income": 0}, "output": {"filing_status": "JOINT"}},
+    # Round 3 (P1): two entries pin one case on different variables.
+    "a case two entries pin": {"input": {"income": 0}, "output": {"always_true": True}},
+    # Round 3 (P2): one person chooses and the other doesn't.
+    "two people, one chooses": {
+        "input": {"people": {"rich": {"income": 20}, "poor": {"income": 0}}},
+        "output": {"people": {"rich": {"elects": True}, "poor": {"elects": False}}},
+    },
+    # Round 3 (P3): an integer is compared exactly, not as float32.
+    "an integer past float32": {"input": {"income": 0}, "output": {"count": 16777220}},
+    # Round 3 (P3): a monthly variable read at a yearly case period is its
+    # sum over the year, so the pin fails closed.
+    "a monthly choice at a yearly period": {"input": {"income": 0}, "output": {"monthly_share": 3.6}},
 }
+
+# Cases whose test outcome depends on the numpy under core: each must either
+# fail as a test (so its pins fail) or pass and be judged as listed below.
+MAY_FAIL = {"a boolean margin admits the default"}
+
+# (case name, (variable, chooses, default, instances), shown)
+PINS = [
+    ("the model chooses", ("elects", True, False, None), True),
+    ("forced by input", ("elects", True, False, None), False),
+    ("forced through axes", ("elects", True, False, None), False),
+    ("an implicit margin admits the default", ("share", "0.5005", "0.5", None), False),
+    ("a boolean margin admits the default", ("elects", True, False, None), False),
+    ("a float32 share the model chose", ("share", "0.3", "0.5", None), True),
+    ("an option the default's float32 number", ("share", "0.500000001", "0.5", None), False),
+    ("an instance named like the choice", ("p0", True, False, None), False),
+    ("a dotted entity id is not a parameter", ("elects", True, False, None), True),
+    ("a parameter override", ("elects", True, False, None), False),
+    ("an enum the model chose", ("filing_status", "separate", "joint", None), True),
+    ("an enum the model did not choose", ("filing_status", "separate", "joint", None), False),
+    ("a case two entries pin", ("elects", True, False, None), False),
+    ("a case two entries pin", ("always_true", True, False, None), True),
+    ("two people, one chooses", ("elects", True, False, None), False),
+    ("two people, one chooses", ("elects", True, False, ("rich",)), True),
+    ("two people, one chooses", ("elects", True, False, ("poor",)), False),
+    ("two people, one chooses", ("elects", True, False, ("nobody",)), False),
+    ("an integer past float32", ("count", "16777219", "0", None), False),
+    ("an integer past float32", ("count", "16777220", "0", None), True),
+    ("a monthly choice at a yearly period", ("monthly_share", "0.3", "0.5", None), False),
+]
 
 DRIVER = textwrap.dedent(
     """\
@@ -182,7 +244,7 @@ def _load_runner():
 
 def test_the_oracle_reads_what_core_computed(tmp_path):
     runner = _load_runner()
-    cases = [{"name": name, "period": 2026, **case} for name, (case, _, _) in CASES.items()]
+    cases = [{"name": name, "period": 2026, **case} for name, case in CASES.items()]
     (tmp_path / "minimodel.py").write_text(MODEL)
     (tmp_path / "driver.py").write_text(DRIVER)
     (tmp_path / "cases.yaml").write_text(json.dumps(cases))  # JSON is YAML
@@ -192,27 +254,42 @@ def test_the_oracle_reads_what_core_computed(tmp_path):
         "AXIOM_PIN_ORACLE_OUT": str(tmp_path / "oracle.json"),
         "AXIOM_PIN_ORACLE_ROOT": str(tmp_path),
         "AXIOM_PIN_ORACLE_PINS": json.dumps([["cases.yaml", name] for name in CASES]),
-        "AXIOM_PIN_ORACLE_CHOICES": json.dumps([["cases.yaml", name, expect[0]] for name, (_, expect, _) in CASES.items()]),
+        "AXIOM_PIN_ORACLE_CHOICES": json.dumps(sorted({("cases.yaml", name, expect[0]) for name, expect, _ in PINS})),
     }
     process = subprocess.run([sys.executable, "driver.py"], cwd=tmp_path, env=env, capture_output=True, text=True,
                              timeout=600)
-    assert process.returncode == 0, process.stdout[-3000:] + process.stderr[-3000:]
+    output = process.stdout[-3000:] + process.stderr[-3000:]
+    assert (tmp_path / "oracle.json").is_file(), output
     record = json.loads((tmp_path / "oracle.json").read_text())
-    verdicts = {}
+    items, failed = {}, set()
     for item in record["collected"]:
         phases = record["reports"].get(str(item["index"]), {})
-        assert [phases[when]["outcome"] for when in ("setup", "call", "teardown")] == ["passed"] * 3, item["name"]
-        _, expect, _ = CASES[item["name"]]
-        verdicts[item["name"]] = runner.optimum_shown(item, expect)
-    assert set(verdicts) == set(CASES)
-    # Every case passes as a test; only those the model chose show an optimum.
-    assert {name: reason is None for name, reason in verdicts.items()} == {
-        name: shown for name, (_, _, shown) in CASES.items()
-    }, verdicts
-    assert "sets elects as an input" in verdicts["forced through axes"]
-    assert "computed share = 0.5" in verdicts["an implicit margin admits the default"]
-    assert "computed elects = False" in verdicts["a boolean margin admits the default"]
-    assert "is the default" in verdicts["an option the default's float32 number"]
-    assert "computed p0 = False" in verdicts["an instance named like the choice"]
-    assert "changes the model (gov.flag)" in verdicts["a parameter override"]
-    assert "computed filing_status = 'JOINT'" in verdicts["an enum the model did not choose"]
+        outcomes = [phases[when]["outcome"] for when in ("setup", "call", "teardown")]
+        if outcomes != ["passed"] * 3:
+            assert item["name"] in MAY_FAIL, (item["name"], outcomes)
+            failed.add(item["name"])
+        items[item["name"]] = item
+    assert set(items) == set(CASES)
+    assert process.returncode == (1 if failed else 0), output
+    # The case two entries pin holds one record per variable.
+    assert set(items["a case two entries pin"]["choices"]) == {"elects", "always_true"}
+    assert items["two people, one chooses"]["choices"]["elects"]["ids"] == ["rich", "poor"]
+    assert items["an integer past float32"]["choices"]["count"]["dtype"].startswith("int")
+    verdicts = [(name, expect, runner.optimum_shown(items[name], expect)) for name, expect, _ in PINS if name not in failed]
+    # Only the pins the model chose show an optimum.
+    assert [reason is None for _, _, reason in verdicts] == [shown for name, _, shown in PINS if name not in failed], verdicts
+    detail = {(name, expect[0], expect[1], expect[3]): reason for name, expect, reason in verdicts}
+    assert "sets elects as an input" in detail[("forced through axes", "elects", True, None)]
+    assert "computed share = 0.5" in detail[("an implicit margin admits the default", "share", '0.5005', None)]
+    if "a boolean margin admits the default" not in failed:
+        assert "computed elects = False" in detail[("a boolean margin admits the default", "elects", True, None)]
+    assert "is the default" in detail[("an option the default's float32 number", "share", '0.500000001', None)]
+    assert "computed p0 = False" in detail[("an instance named like the choice", "p0", True, None)]
+    assert "changes the model (gov.flag)" in detail[("a parameter override", "elects", True, None)]
+    assert "computed filing_status = 'JOINT'" in detail[("an enum the model did not choose", "filing_status", 'separate', None)]
+    assert "computed elects = False" in detail[("a case two entries pin", "elects", True, None)]
+    assert "computed elects = False, not" in detail[("two people, one chooses", "elects", True, None)]
+    assert "computed elects = False for poor" in detail[("two people, one chooses", "elects", True, ("poor",))]
+    assert "has no instance 'nobody'" in detail[("two people, one chooses", "elects", True, ("nobody",))]
+    assert "computed count = 16777220" in detail[("an integer past float32", "count", '16777219', None)]
+    assert "computed monthly_share = 3.59999" in detail[("a monthly choice at a yearly period", "monthly_share", '0.3', None)]

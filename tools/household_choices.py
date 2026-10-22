@@ -37,10 +37,12 @@ loader and validators this tool imports:
   as the register's verify checks them, every external commit is shipped
   code, each implementation's `cites_entry` matches whether its file carries
   `# Household choice <global id>`, and each external test file defines its
-  pinned test. It also prints the worklist. tools/pin_runner.py runs the
-  pinned tests, and for an `optimum` pin it asserts that the case's own
-  output states the chosen option (`chooses`), that the option differs from
-  the default, and that the case does not set it as an input.
+  pinned test, and that an implementation naming its decision `variable`
+  defines it. It also prints the worklist. tools/pin_runner.py runs the
+  pinned tests, and for an `optimum` pin it reads the pin's decision
+  variable from the case's own simulation: the model must compute the chosen
+  option (`chooses`), which must differ from the default, without the case
+  setting the variable as an input or changing the model.
 - `aggregate`: collect every rulespec repository's file into one JSON or
   Markdown view. It is deterministic (the same files give byte-identical
   output, in any order) and round-trips (`files_from_view` rebuilds the
@@ -158,7 +160,7 @@ ENTRY_KEYS = frozenset(
 )
 REQUIRED_ENTRY_KEYS = ("id", "jurisdiction", "program", "question", "actor", "domain", "default", "objective")
 TOP_LEVEL_KEYS = frozenset({"version", "entries", "statutory_not_choice"})
-TEST_KEYS = frozenset({"repo", "commit", "path", "name", "pins", "variable", "chooses"})
+TEST_KEYS = frozenset({"repo", "commit", "path", "name", "pins", "variable", "chooses", "instances"})
 VARIABLE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 OPTION_RE = sc.KEBAB_RE
 # `<jurisdiction>:<content dir>/<path>#input.<slot>`, the key a request uses
@@ -294,6 +296,20 @@ def _objective_issues(value: Any, *, label: str, measures: tuple[str, ...]) -> l
 # axiom.input
 
 
+# A module's declared input (`inputs:`) against the entry's domain: the
+# RuleSpec entity that is each domain entity, and the dtypes that can hold
+# each kind of value. An entity or dtype outside these tables doesn't match.
+RULESPEC_ENTITIES = {
+    "Person": "person", "MaritalUnit": "marital-unit", "TaxUnit": "tax-unit", "Family": "family",
+    "SPMUnit": "spm-unit", "Household": "household", "BenefitUnit": "benefit-unit",
+}
+KIND_DTYPES = {
+    "boolean": ("Boolean", "Judgment"), "amount": ("Money",), "share": ("Rate", "Decimal", "Number"),
+    "enum": ("Text", "String", "Integer"),
+}
+POLARITIES = ("same", "inverse")
+
+
 def _module_rules(path: Path) -> tuple[set[str], set[str], list[str]] | None:
     """(rule names, imported names, formula texts) of a module, or None."""
 
@@ -319,10 +335,27 @@ def _module_rules(path: Path) -> tuple[set[str], set[str], list[str]] | None:
     return names, imported, formulas
 
 
-def axiom_input_issues(value: Any, *, label: str, ctx: sc.RepoContext) -> list[str]:
-    """`axiom.input` names a free input slot that a formula in an existing
+def _declared_inputs(path: Path) -> dict[str, Mapping[str, Any]]:
+    """A module's declared inputs (`inputs:`), by name; {} when it has none."""
+
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError):
+        return {}
+    inputs = payload.get("inputs") if isinstance(payload, dict) else None
+    return {
+        item["name"]: item
+        for item in (inputs if isinstance(inputs, list) else [])
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+
+
+def axiom_input_issues(value: Any, *, label: str, ctx: sc.RepoContext, domain: Any = None) -> list[str]:
+    """An Axiom input slot names a free input that a formula in an existing
     module of this repository reads. A syntactic screen: the slot is a whole
-    word in a formula, and is neither a rule of the module nor an import."""
+    word in a formula, and is neither a rule of the module nor an import.
+    When the module declares the slot under `inputs:`, its entity and dtype
+    must fit the entry's domain (`per` and `kind`)."""
 
     match = AXIOM_INPUT_RE.fullmatch(value) if isinstance(value, str) else None
     if match is None:
@@ -342,7 +375,15 @@ def axiom_input_issues(value: Any, *, label: str, ctx: sc.RepoContext) -> list[s
     word = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(slot)}(?![A-Za-z0-9_])")
     if not any(word.search(formula) for formula in formulas):
         return [f"{label}: no formula in {relative} reads `{slot}`."]
-    return []
+    declared = _declared_inputs(ctx.root / relative).get(slot)
+    issues: list[str] = []
+    if declared is not None and isinstance(domain, dict):
+        entity, dtype = declared.get("entity"), declared.get("dtype")
+        if "entity" in declared and RULESPEC_ENTITIES.get(entity) != domain.get("per"):
+            issues.append(f"{label}: {relative} declares `{slot}` on {entity}, not the domain's {domain.get('per')}.")
+        if "dtype" in declared and dtype not in KIND_DTYPES.get(domain.get("kind"), ()):
+            issues.append(f"{label}: {relative} declares `{slot}` as {dtype}, which can't hold a {domain.get('kind')} choice.")
+    return issues
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +429,36 @@ def _cites_kind(entry: Mapping[str, Any], kinds: tuple[str, ...]) -> bool:
         return True
     pending = entry.get("pending_texts")
     return any(isinstance(item, dict) and item.get("kind") in kinds for item in (pending if isinstance(pending, list) else []))
+
+
+def _consumer_issues(axiom: Mapping[str, Any], *, label: str, ctx: sc.RepoContext, domain: Any) -> list[str]:
+    """`axiom.consumers`: input slots in other modules that take the same
+    choice, each with its polarity (`inverse`: true means the other option,
+    so a boolean only)."""
+
+    issues: list[str] = []
+    consumers = axiom.get("consumers")
+    if not sc._nonempty_list(consumers, label=label, issues=issues):
+        return issues
+    seen: set[str] = set()
+    for c_index, item in enumerate(consumers):
+        c_label = f"{label}[{c_index}]"
+        if not sc._mapping(item, label=c_label, allowed={"input", "polarity"}, issues=issues):
+            continue
+        slot = item.get("input")
+        issues.extend(axiom_input_issues(slot, label=f"{c_label}.input", ctx=ctx, domain=domain))
+        if isinstance(slot, str):
+            if slot == axiom.get("input"):
+                issues.append(f"{c_label}.input is axiom.input itself; a consumer is a slot in another module.")
+            if slot in seen:
+                issues.append(f"{c_label}.input repeats a consumer.")
+            seen.add(slot)
+        polarity = item.get("polarity")
+        if polarity not in POLARITIES:
+            issues.append(f"{c_label}.polarity must be same or inverse.")
+        elif polarity == "inverse" and not (isinstance(domain, dict) and domain.get("kind") == "boolean"):
+            issues.append(f"{c_label}.polarity inverse needs a boolean domain.")
+    return issues
 
 
 def check_entry(
@@ -510,11 +581,13 @@ def check_entry(
 
     if "axiom" in entry:
         axiom = entry["axiom"]
-        if sc._mapping(axiom, label=f"{label}.axiom", allowed={"input"}, issues=issues):
-            if "input" not in axiom:
-                issues.append(f"{label}.axiom.input is required when axiom is present.")
-            else:
-                issues.extend(axiom_input_issues(axiom.get("input"), label=f"{label}.axiom.input", ctx=ctx))
+        if sc._mapping(axiom, label=f"{label}.axiom", allowed={"input", "consumers"}, issues=issues):
+            if "input" not in axiom and "consumers" not in axiom:
+                issues.append(f"{label}.axiom needs input, consumers or both.")
+            if "input" in axiom:
+                issues.extend(axiom_input_issues(axiom.get("input"), label=f"{label}.axiom.input", ctx=ctx, domain=domain))
+            if "consumers" in axiom:
+                issues.extend(_consumer_issues(axiom, label=f"{label}.axiom.consumers", ctx=ctx, domain=domain))
     if "source_conflict" in entry:
         value = entry["source_conflict"]
         if not (isinstance(value, str) and value in conflict_ids):
@@ -527,10 +600,13 @@ def check_entry(
         for i_index, item in enumerate(implementations):
             i_label = f"{label}.implementations[{i_index}]"
             if not sc._mapping(
-                item, label=i_label, allowed={"repo", "commit", "path", "models", "objective", "basis", "cites_entry"},
+                item, label=i_label,
+                allowed={"repo", "commit", "path", "models", "objective", "basis", "cites_entry", "variable"},
                 issues=issues,
             ):
                 continue
+            if "variable" in item and not (isinstance(item["variable"], str) and VARIABLE_RE.fullmatch(item["variable"])):
+                issues.append(f"{i_label}.variable must name the model variable that holds the choice.")
             if "repo" not in item:
                 issues.append(f"{i_label}.repo is required; an Axiom module links through axiom.input.")
             else:
@@ -543,6 +619,11 @@ def check_entry(
             elif actor in AGENCY_ACTORS and models not in AGENCY_MODELS:
                 issues.append(f"{i_label}.models must be one of {', '.join(AGENCY_MODELS)}: the State agency decides.")
             elif models in OPTIMIZING:
+                if "variable" not in item:
+                    issues.append(
+                        f"{i_label}.variable is required when models is {models}: name the model variable that "
+                        "holds the choice, which its optimum pin reads."
+                    )
                 if "objective" not in item:
                     issues.append(f"{i_label}.objective is required when models is {models}: say what it optimizes.")
                 else:
@@ -612,13 +693,16 @@ def check_entry(
                 if not (external and isinstance(item.get("path"), str) and item["path"].endswith(".yaml")):
                     issues.append(
                         f"{t_label} pins optimum, so it must be another repository's YAML test case: "
-                        "tools/pin_runner.py reads the chosen option from the case's stated output."
+                        "tools/pin_runner.py reads the decision variable from the case's own simulation."
                     )
                 variable = item.get("variable")
                 if not (isinstance(variable, str) and VARIABLE_RE.fullmatch(variable)):
-                    issues.append(f"{t_label}.variable must name the model variable whose output shows the choice.")
+                    issues.append(
+                        f"{t_label}.variable must name the model variable that holds the choice; the runner reads it "
+                        "from the case's simulation, so the case need not assert it."
+                    )
                 if "chooses" not in item:
-                    issues.append(f"{t_label}.chooses is required with optimum: the option the case's output states.")
+                    issues.append(f"{t_label}.chooses is required with optimum: the option the model must compute.")
                 elif domain_ok and not in_domain(domain, item["chooses"]):
                     issues.append(f"{t_label}.chooses is not one of the domain's options{_VALUE_HINT}.")
                 elif isinstance(default, dict) and "value" in default and same_value(item["chooses"], default["value"]):
@@ -626,19 +710,33 @@ def check_entry(
                         f"{t_label}.chooses is the default, so the pin is vacuous: use a case where the optimum "
                         "and the default differ."
                     )
+                if "instances" in item:
+                    instances = item["instances"]
+                    if not (
+                        isinstance(instances, list)
+                        and instances
+                        and all(isinstance(each, str) and each.strip() and "\n" not in each for each in instances)
+                    ):
+                        issues.append(
+                            f"{t_label}.instances must be a non-empty list of the case's entity instance ids that "
+                            "must compute the chosen option."
+                        )
+                    elif len(set(instances)) != len(instances):
+                        issues.append(f"{t_label}.instances repeats an instance.")
             else:
-                for key in ("variable", "chooses"):
+                for key in ("variable", "chooses", "instances"):
                     if key in item:
                         issues.append(f"{t_label}.{key} is only for an optimum pin.")
             sc.check_repeated_test(item, path, name, label=t_label, seen=seen, issues=issues)
             if not external:
                 sc.check_local_test(path, name, label=t_label, ctx=ctx, issues=issues)
 
-    # Every implementation that models the choice is pinned: an optimizing one
-    # by an optimum case in its repository, a convention or input by a case
-    # showing it takes the default. One that does not model it needs none.
+    # Every implementation that models the choice is pinned at its own commit:
+    # an optimizing one by an optimum case on its decision variable, a
+    # convention or input by a case showing it takes the default. One that
+    # does not model it needs none.
     pinned = {
-        (repr(item.get("repo")), pin)
+        (repr(item.get("repo")), repr(item.get("commit")), pin, repr(item.get("variable")) if pin == "optimum" else None)
         for item in tests or []
         if isinstance(item, dict) and isinstance(item.get("pins"), list)
         for pin in item["pins"]
@@ -647,11 +745,14 @@ def check_entry(
     for i_index, item in enumerate(implementations or []):
         if not isinstance(item, dict) or item.get("models") not in MODELS or item["models"] == "absent":
             continue
-        needed = "optimum" if item["models"] in OPTIMIZING else "default"
-        if (repr(item.get("repo")), needed) not in pinned:
+        optimizing = item["models"] in OPTIMIZING
+        needed = "optimum" if optimizing else "default"
+        variable = repr(item.get("variable")) if optimizing else None
+        if (repr(item.get("repo")), repr(item.get("commit")), needed, variable) not in pinned:
+            on = (f" on {item['variable']}" if isinstance(item.get("variable"), str) else " on its decision variable") if optimizing else ""
             issues.append(
-                f"{label}.implementations[{i_index}] models {item['models']}, so a test in {item.get('repo')} "
-                f"must pin {needed}."
+                f"{label}.implementations[{i_index}] models {item['models']}, so a test in {item.get('repo')} at the "
+                f"same commit must pin {needed}{on}."
             )
 
     issues.extend(money_issues(list(_prose_fields(entry, label))))
@@ -758,7 +859,7 @@ def worklist(entry: Mapping[str, Any]) -> list[str]:
     where a cheap exact optimum is known, or that optimize a narrower
     objective than the entry's; a choice no implementation is recorded for;
     a choice that binds later years; and a choice with no Axiom input slot
-    yet."""
+    in the module that grants it, naming the slots other modules take it in."""
 
     items: list[str] = []
     optimization = entry.get("optimization") if isinstance(entry.get("optimization"), dict) else {}
@@ -782,8 +883,15 @@ def worklist(entry: Mapping[str, Any]) -> list[str]:
         items.append("no implementation recorded")
     if entry.get("multi_year") is True:
         items.append("binds later years or carries amounts forward; optimized one year at a time")
-    if not isinstance(entry.get("axiom"), dict):
-        items.append("no Axiom input slot yet")
+    axiom = entry.get("axiom") if isinstance(entry.get("axiom"), dict) else {}
+    if not axiom.get("input"):
+        consumers = [
+            f"{item.get('input')} ({item.get('polarity')})" for item in sc._as_list(axiom.get("consumers")) if isinstance(item, dict)
+        ]
+        line = "no Axiom input slot in the module that grants it yet"
+        if consumers:
+            line += f"; other modules take it as an input, so a caller sets them consistently: {', '.join(consumers)}"
+        items.append(line)
     return items
 
 
@@ -841,6 +949,12 @@ def verify_choices(
                 counts["implementations"] += 1
             if not item["cites_entry"]:
                 report.append(f"uncited: {i_label} ({item['repo']}:{item['path']}) does not cite {gid} yet")
+            variable = item.get("variable")
+            if isinstance(variable, str) and item["path"].endswith(".py"):
+                if not re.search(rf"^class\s+{re.escape(variable)}\s*\(", source, re.MULTILINE):
+                    issues.append(f"{i_label}: {item['path']} does not define `class {variable}(`.")
+            elif isinstance(variable, str):
+                report.append(f"unchecked: {i_label} names {variable}, but {item['path']} is not a Python file")
         for r_index, item in enumerate(entry.get("proposed") or []):
             report.append(
                 f"proposed: {label}.proposed[{r_index}] {item.get('pr')} would model it as {item.get('models')} in "

@@ -207,7 +207,7 @@ def base_entry(domain, default, chooses):
         "default": {"value": default, "basis": "convention", "note": "n"},
         "objective": {"measure": "net-income", "scope": "household"},
         "optimization": {"structure": "search", "candidates": "c"},
-        "implementations": [{"repo": "PolicyEngine/policyengine-us", "commit": "a" * 40, "path": "x.py",
+        "implementations": [{"repo": "PolicyEngine/policyengine-us", "commit": "a" * 40, "path": "x.py", "variable": "v",
                              "models": "candidate-min", "objective": {"measure": "net-income", "scope": "household"},
                              "cites_entry": False}],
         "tests": [{"repo": "PolicyEngine/policyengine-us", "commit": "a" * 40, "path": "tests/x.yaml", "name": "A case",

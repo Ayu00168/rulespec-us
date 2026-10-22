@@ -108,6 +108,7 @@ def entry(**overrides):
                 "repo": PE,
                 "commit": COMMIT,
                 "path": "policyengine_us/variables/tax_unit_itemizes.py",
+                "variable": "tax_unit_itemizes",
                 "models": "optimized",
                 "objective": {"measure": "federal-income-tax", "scope": "tax-unit"},
                 "cites_entry": False,
@@ -396,11 +397,14 @@ def test_every_modeling_implementation_is_pinned(tmp_path):
     ctx = make_repo(tmp_path)
     assert has(check(ctx, entry(tests=[])), "tests must be a non-empty list")
     no_tests = {k: v for k, v in entry().items() if k != "tests"}
-    assert has(check(ctx, no_tests), "models optimized, so a test in PolicyEngine/policyengine-us must pin optimum")
+    assert has(
+        check(ctx, no_tests),
+        "models optimized, so a test in PolicyEngine/policyengine-us at the same commit must pin optimum on tax_unit_itemizes",
+    )
     convention = {**entry()["implementations"][0], "models": "convention"}
     del convention["objective"]
     issues = check(ctx, entry(implementations=[convention]))
-    assert has(issues, "models convention, so a test in PolicyEngine/policyengine-us must pin default")
+    assert has(issues, "models convention, so a test in PolicyEngine/policyengine-us at the same commit must pin default")
     default_pin = {"repo": PE, "commit": COMMIT, "path": "policyengine_us/tests/policy/itemizes.yaml",
                    "name": "Takes the default", "pins": ["default"]}
     assert check(ctx, entry(implementations=[convention], tests=[default_pin])) == []
@@ -410,6 +414,68 @@ def test_every_modeling_implementation_is_pinned(tmp_path):
     # An implementation that does not model the choice needs no pin.
     absent = {k: v for k, v in convention.items()} | {"models": "absent"}
     assert check(ctx, {k: v for k, v in entry(implementations=[absent]).items() if k != "tests"}) == []
+    # #1844 review round 3 (P2, P3): the pin is at the implementation's own
+    # commit, and an optimum pin reads that implementation's decision variable.
+    other_commit = {**entry()["tests"][0], "commit": "b" * 40}
+    assert has(check(ctx, entry(tests=[other_commit])), "at the same commit must pin optimum on tax_unit_itemizes")
+    other_variable = {**entry()["tests"][0], "variable": "is_tax_unit_head"}
+    assert has(check(ctx, entry(tests=[other_variable])), "at the same commit must pin optimum on tax_unit_itemizes")
+    default_elsewhere = {**default_pin, "commit": "b" * 40}
+    assert has(check(ctx, entry(implementations=[convention], tests=[default_elsewhere])), "must pin default")
+    # Two optimizing implementations need a pin each.
+    second = {**entry()["implementations"][0], "path": "policyengine_us/variables/state_itemizes.py", "variable": "state_itemizes"}
+    issues = check(ctx, entry(implementations=[entry()["implementations"][0], second]))
+    assert [issue for issue in issues if "must pin optimum" in issue] == [
+        "Entry `itemized-deduction-election` (entries[0]).implementations[1] models optimized, so a test in "
+        "PolicyEngine/policyengine-us at the same commit must pin optimum on state_itemizes."
+    ]
+    state_pin = {**entry()["tests"][0], "name": "A state case", "variable": "state_itemizes"}
+    assert check(ctx, entry(implementations=[entry()["implementations"][0], second], tests=[entry()["tests"][0], state_pin])) == []
+
+
+@pytest.mark.parametrize(
+    ("change", "fragment"),
+    [
+        ({"variable": None}, "variable is required when models is optimized"),
+        ({"variable": "not a name"}, "implementations[0].variable must name the model variable"),
+        ({"variable": 3}, "implementations[0].variable must name the model variable"),
+    ],
+)
+def test_an_optimizing_implementation_names_its_variable(tmp_path, change, fragment):
+    impl = {**entry()["implementations"][0], **change}
+    if change.get("variable") is None:
+        del impl["variable"]
+    issues = check(make_repo(tmp_path), entry(implementations=[impl]))
+    assert has(issues, fragment), issues
+    # Without a variable, the coverage message doesn't print None.
+    assert not any("on None" in issue for issue in issues)
+
+
+@pytest.mark.parametrize(
+    ("change", "fragment"),
+    [
+        ({"instances": ["first"]}, None),
+        ({"instances": ["first", "second"]}, None),
+        ({"instances": []}, "instances must be a non-empty list"),
+        ({"instances": "first"}, "instances must be a non-empty list"),
+        ({"instances": [""]}, "instances must be a non-empty list"),
+        ({"instances": ["a\nb"]}, "instances must be a non-empty list"),
+        ({"instances": [3]}, "instances must be a non-empty list"),
+        ({"instances": ["first", "first"]}, "instances repeats an instance"),
+    ],
+)
+def test_an_optimum_pin_may_name_its_instances(tmp_path, change, fragment):
+    issues = check(make_repo(tmp_path), entry(tests=[{**entry()["tests"][0], **change}]))
+    assert (issues == []) if fragment is None else has(issues, fragment), issues
+
+
+def test_instances_are_only_for_an_optimum_pin(tmp_path):
+    convention = {**entry()["implementations"][0], "models": "convention"}
+    del convention["objective"]
+    default_pin = {"repo": PE, "commit": COMMIT, "path": "policyengine_us/tests/policy/itemizes.yaml",
+                   "name": "Takes the default", "pins": ["default"], "instances": ["first"]}
+    assert has(check(make_repo(tmp_path), entry(implementations=[convention], tests=[default_pin])),
+               "instances is only for an optimum pin")
 
 
 @pytest.mark.parametrize(
@@ -477,8 +543,85 @@ def test_axiom_input_names_a_slot_a_formula_reads(tmp_path, value, fragment):
     assert has(issues, fragment), issues
 
 
-def test_axiom_needs_its_input(tmp_path):
-    assert has(check(make_repo(tmp_path), child_entry(axiom={})), "axiom.input is required when axiom is present")
+def test_axiom_needs_an_input_or_consumers(tmp_path):
+    assert has(check(make_repo(tmp_path), child_entry(axiom={})), "axiom needs input, consumers or both")
+
+
+def write_module(ctx, relative, slot, *, inputs=None):
+    """A module at `relative` whose formula reads `slot`, optionally declaring inputs."""
+
+    path = ctx.root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    module = {"format": "rulespec/v1", "module": {"summary": "x"},
+              "rules": [{"name": "uses_it", "kind": "derived", "versions": [{"effective_from": "2020-01-01", "formula": f"{slot} or 0"}]}]}
+    if inputs is not None:
+        module["inputs"] = inputs
+    path.write_text(yaml.safe_dump(module, sort_keys=False))
+
+
+def consumers_entry(*consumers):
+    return entry(axiom={"consumers": list(consumers)})
+
+
+@pytest.mark.parametrize(
+    ("declared", "fragment"),
+    [
+        (None, None),  # undeclared: the formula screen alone
+        ([{"name": "itemizes", "entity": "TaxUnit", "dtype": "Boolean"}], None),
+        ([{"name": "itemizes", "entity": "TaxUnit", "dtype": "Judgment"}], None),
+        ([{"name": "other", "entity": "Person", "dtype": "Money"}], None),  # declares other inputs only
+        # #1844 review round 3 (P3): a declared slot must fit the domain.
+        ([{"name": "itemizes", "entity": "Household", "dtype": "Boolean"}], "declares `itemizes` on Household, not the domain's tax-unit"),
+        ([{"name": "itemizes", "entity": "Asset", "dtype": "Boolean"}], "declares `itemizes` on Asset"),
+        ([{"name": "itemizes", "entity": "TaxUnit", "dtype": "Money"}], "declares `itemizes` as Money, which can't hold a boolean choice"),
+    ],
+)
+def test_a_declared_input_must_fit_the_domain(tmp_path, declared, fragment):
+    ctx = make_repo(tmp_path)
+    write_module(ctx, "us/statutes/26/55.yaml", "itemizes", inputs=declared)
+    issues = check(ctx, consumers_entry({"input": "us:statutes/26/55#input.itemizes", "polarity": "same"}))
+    assert (issues == []) if fragment is None else has(issues, fragment), issues
+
+
+@pytest.mark.parametrize(
+    ("consumers", "fragment"),
+    [
+        ([{"input": "us:statutes/26/55#input.itemizes", "polarity": "same"},
+          {"input": "us:statutes/26/170/p#input.does_not_itemize", "polarity": "inverse"}], None),
+        ([], "axiom.consumers must be a non-empty list"),
+        ([{"input": "us:statutes/26/55#input.itemizes"}], "polarity must be same or inverse"),
+        ([{"input": "us:statutes/26/55#input.itemizes", "polarity": "opposite"}], "polarity must be same or inverse"),
+        ([{"input": "us:statutes/26/55#input.itemizes", "polarity": "same", "note": "x"}], "unknown key"),
+        ([{"input": "us:statutes/26/99#input.itemizes", "polarity": "same"}], "is not a RuleSpec module in this repository"),
+        ([{"input": "us:statutes/26/55#input.nothing", "polarity": "same"}], "no formula in us/statutes/26/55.yaml reads `nothing`"),
+        ([{"input": "us:statutes/26/55#input.itemizes", "polarity": "same"},
+          {"input": "us:statutes/26/55#input.itemizes", "polarity": "inverse"}], "repeats a consumer"),
+    ],
+)
+def test_axiom_consumers(tmp_path, consumers, fragment):
+    ctx = make_repo(tmp_path)
+    write_module(ctx, "us/statutes/26/55.yaml", "itemizes")
+    write_module(ctx, "us/statutes/26/170/p.yaml", "does_not_itemize")
+    issues = check(ctx, entry(axiom={"consumers": consumers}))
+    assert (issues == []) if fragment is None else has(issues, fragment), issues
+
+
+def test_the_granting_slot_is_screened_against_its_declaration_too(tmp_path):
+    ctx = make_repo(tmp_path)
+    write_module(ctx, "us/statutes/26/63/e.yaml", "itemizes", inputs=[{"name": "itemizes", "entity": "Person", "dtype": "Boolean"}])
+    issues = check(ctx, entry(axiom={"input": "us:statutes/26/63/e#input.itemizes"}))
+    assert has(issues, "declares `itemizes` on Person, not the domain's tax-unit"), issues
+
+
+def test_an_inverse_consumer_needs_a_boolean_and_is_not_the_input(tmp_path):
+    ctx = make_repo(tmp_path)
+    write_module(ctx, "us/statutes/26/55.yaml", "share_input")
+    share = entry(domain={"kind": "share", "per": "tax-unit", "bounds": ["0", "1"]}, default={"value": "0", "basis": "convention", "note": "n"},
+                  axiom={"consumers": [{"input": "us:statutes/26/55#input.share_input", "polarity": "inverse"}]})
+    assert has(check(ctx, share), "polarity inverse needs a boolean domain")
+    slot = f"us:statutes/26/152/c#input.{SLOT}"
+    same = child_entry(axiom={"input": slot, "consumers": [{"input": slot, "polarity": "same"}]})
+    assert has(check(ctx, same), "is axiom.input itself")
 
 
 def test_source_conflict_names_a_register_entry(tmp_path):
@@ -617,8 +760,16 @@ def test_worklist():
     itemize = entry()
     assert hc.worklist(itemize) == [
         "PolicyEngine/policyengine-us optimizes federal-income-tax over the tax-unit, narrower than net-income over the household",
-        "no Axiom input slot yet",
+        "no Axiom input slot in the module that grants it yet",
     ]
+    # #1844 review round 3 (P2): the consumers a caller must set consistently.
+    consumers = [{"input": "us:statutes/26/55#input.itemizes", "polarity": "same"},
+                 {"input": "us:statutes/26/170/p#input.does_not_itemize", "polarity": "inverse"}]
+    assert hc.worklist(entry(axiom={"consumers": consumers}))[-1] == (
+        "no Axiom input slot in the module that grants it yet; other modules take it as an input, so a caller sets "
+        "them consistently: us:statutes/26/55#input.itemizes (same), us:statutes/26/170/p#input.does_not_itemize (inverse)"
+    )
+    assert not any("Axiom" in line for line in hc.worklist(entry(axiom={"input": "x", "consumers": consumers})))
     impl = itemize["implementations"][0]
     broad = {**impl, "objective": {"measure": "net-income", "scope": "household"}}
     assert hc.worklist(entry(implementations=[broad], axiom={"input": "x"})) == []
@@ -671,7 +822,7 @@ def substring(source_text, excerpt):
     return excerpt in source_text
 
 
-def verified_inputs(source=b"def f():\n    pass\n"):
+def verified_inputs(source=b"class tax_unit_itemizes(Variable):\n    pass\n"):
     value = entry(proposed=[{"repo": PE, "pr": f"https://github.com/{PE}/pull/1", "path": "x.py", "models": "candidate-min"}])
     files = {
         (PE, COMMIT, value["implementations"][0]["path"]): source,
@@ -688,7 +839,26 @@ def test_verify_passes_and_reports_the_worklist():
     assert report[0] == "verified: 1 texts, 0 pending texts, 1 implementations, 1 tests"
     assert any(line.startswith("uncited: us:itemized-deduction-election") for line in report)
     assert any(line.startswith("proposed: ") and "would model it as candidate-min" in line for line in report)
-    assert "worklist: us:itemized-deduction-election: no Axiom input slot yet" in report
+    assert "worklist: us:itemized-deduction-election: no Axiom input slot in the module that grants it yet" in report
+
+
+def test_verify_checks_the_implementation_defines_its_variable():
+    # #1844 review round 3 (P2): the implementation file defines the variable
+    # its optimum pin reads.
+    choices, net, corpus = verified_inputs(source=b"class is_tax_unit_head(Variable):\n    pass\n")
+    issues, _ = hc.verify_choices(choices, fetch=net, matches=substring, resolve=corpus.get, on_default_branch=lambda r, c: True)
+    assert issues == [
+        "us:itemized-deduction-election (entries[0]).implementations[0]: policyengine_us/variables/tax_unit_itemizes.py "
+        "does not define `class tax_unit_itemizes(`."
+    ]
+    # A parameter file can't be checked that way: the report says so.
+    choices, net, corpus = verified_inputs()
+    implementation = choices["entries"][0]["implementations"][0]
+    implementation["path"] = "policyengine_us/parameters/itemizes.yaml"
+    net.files[(PE, COMMIT, implementation["path"])] = b"values: {}\n"
+    issues, report = hc.verify_choices(choices, fetch=net, matches=substring, resolve=corpus.get, on_default_branch=lambda r, c: True)
+    assert issues == []
+    assert any(line.startswith("unchecked: ") and "not a Python file" in line for line in report)
 
 
 def test_verify_findings():

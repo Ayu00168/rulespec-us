@@ -34,11 +34,15 @@ Invariants, for every oracle record:
    holds:
    - the chosen option is not the default (as the float32 numbers a model
      computes with);
-   - the model's choice could be read, and the decision variable is not among
-     the simulation's inputs;
+   - the record holds a choice for the pin's own variable, which names that
+     variable, could be read, and is not among the simulation's inputs (other
+     variables' records, which other pins on the case read, never count);
    - the case changes no parameter and applies no reform or extension;
-   - the model computed at least one value, and every value is the chosen
-     option (booleans by type, numbers as float32, enum options by name).
+   - the model computed at least one value, and every value at the instances
+     the pin names (every value when it names none, and none at an instance the
+     record lacks) is the chosen option, compared at the stored dtype:
+     integers exactly, float64 as float64, and otherwise booleans by type,
+     numbers as float32 and enum options by name.
 """
 
 from __future__ import annotations
@@ -372,43 +376,74 @@ def _ref_same(a, b):
     return isinstance(a, str) and isinstance(b, str) and a.upper().replace("-", "_") == b.upper().replace("-", "_")
 
 
-OPTION = st.sampled_from([True, False, "a", "b", "A", "0.5", "0.50", "1", 1, 0.5, "16777216", "16777217"])
-COMPUTED = st.lists(st.sampled_from([True, False, 0, 1, 0.5, 0.30000001192092896, "a", "A", "B", 16777216.0]), max_size=3)
-ITEMS = st.one_of(
-    st.none(),
+def _ref_same_stored(value, option, dtype):
+    if isinstance(dtype, str) and not isinstance(value, bool) and not isinstance(option, bool):
+        x, y = _ref_number(value), _ref_number(option)
+        if dtype in ("int16", "int32", "int64", "uint8"):
+            return x is not None and y is not None and x == y
+        if dtype == "float64":
+            return x is not None and y is not None and float(x) == float(y)
+    return _ref_same(value, option)
+
+
+OPTION = st.sampled_from([True, False, "a", "b", "A", "0.5", "0.50", "1", 1, 0.5, "16777216", "16777217", "0.1000000001"])
+COMPUTED = st.lists(
+    st.sampled_from([True, False, 0, 1, 0.5, 0.1, 0.30000001192092896, "a", "A", "B", 16777216.0, 16777217]), max_size=3
+)
+IDS = st.lists(st.sampled_from(["u0", "u1", "u2"]), max_size=3, unique=True)
+RECORD = st.one_of(
+    st.fixed_dictionaries({"variable": st.sampled_from(["v", "w"]), "error": st.just("KeyError: 'v'")}),
     st.fixed_dictionaries({
-        "case": st.fixed_dictionaries({
-            "parameters": st.lists(st.sampled_from(["gov.x.y", "gov.z"]), max_size=1),
-            "reforms": st.booleans(),
-            "extensions": st.booleans(),
-        }),
-        "choice": st.one_of(
-            st.fixed_dictionaries({"variable": st.just("v"), "error": st.just("KeyError: 'v'")}),
-            st.fixed_dictionaries({
-                "variable": st.just("v"),
-                "computed": COMPUTED,
-                "input_variables": st.lists(st.sampled_from(["v", "w", "age"]), max_size=2),
-            }),
-        ),
+        "variable": st.sampled_from(["v", "w"]),
+        "computed": COMPUTED,
+        "ids": IDS,
+        "dtype": st.sampled_from([None, "bool", "float32", "float64", "int64", "enum"]),
+        "input_variables": st.lists(st.sampled_from(["v", "w", "age"]), max_size=2),
     }),
 )
+ITEMS = st.one_of(
+    st.none(),
+    st.fixed_dictionaries(
+        {
+            "case": st.fixed_dictionaries({
+                "parameters": st.lists(st.sampled_from(["gov.x.y", "gov.z"]), max_size=1),
+                "reforms": st.booleans(),
+                "extensions": st.booleans(),
+            }),
+        },
+        optional={"choices": st.dictionaries(st.sampled_from(["v", "w"]), RECORD, max_size=2)},
+    ),
+)
+INSTANCES = st.one_of(st.none(), st.lists(st.sampled_from(["u0", "u1", "u9"]), min_size=1, max_size=2, unique=True).map(tuple))
 
 
 @SETTINGS
-@given(ITEMS, OPTION, OPTION)
-def test_optimum_shown_matches_a_reference(item, chooses, default):
+@given(ITEMS, OPTION, OPTION, INSTANCES)
+def test_optimum_shown_matches_a_reference(item, chooses, default, instances):
     case = (item or {}).get("case") or {}
-    choice = (item or {}).get("choice") or {}
-    computed = choice.get("computed") or []
+    choices = (item or {}).get("choices")
+    choice = choices.get("v") if isinstance(choices, dict) else None
+    computed = (choice or {}).get("computed") or []
+    ids = (choice or {}).get("ids")
+    if instances is None:
+        selected = computed
+    elif isinstance(ids, list) and len(ids) == len(computed) and all(each in ids for each in instances):
+        selected = [computed[ids.index(each)] for each in instances]
+    else:
+        selected = None
     expected = (
         item is not None
+        and isinstance(choices, dict)
         and not _ref_same(chooses, default)
+        and isinstance(choice, dict)
+        and choice.get("variable") == "v"
         and "error" not in choice
         and "v" not in choice.get("input_variables", [])
         and not case.get("parameters")
         and not case.get("reforms")
         and not case.get("extensions")
         and bool(computed)
-        and all(_ref_same(value, chooses) for value in computed)
+        and selected is not None
+        and all(_ref_same_stored(value, chooses, choice.get("dtype")) for value in selected)
     )
-    assert (runner.optimum_shown(item, ("v", chooses, default)) is None) is expected
+    assert (runner.optimum_shown(item, ("v", chooses, default, instances)) is None) is expected

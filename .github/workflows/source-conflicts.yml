@@ -44,6 +44,7 @@ on:
       - tests/test_household_choices_properties.py
       - tests/test_pin_runner.py
       - tests/test_pin_runner_properties.py
+      - tests/test_pin_oracle_core.py
       - .github/workflows/source-conflicts.yml
       - .axiom/toolchain.toml
       - .axiom/workflow-toolchain.toml
@@ -285,6 +286,18 @@ jobs:
         env:
           AXIOM_PIN_RUNNER_TESTS_REQUIRED: "1"
         run: python -m pytest -q -p no:cacheprovider tests/test_pin_runner.py tests/test_pin_runner_properties.py
+
+      - name: Test the oracle against policyengine-core
+        # The oracle reads choices through core's own YAML runner; this runs
+        # tests/test_pin_oracle_core.py's cases through it, in an environment
+        # of its own, so the runner's environment stays as it is.
+        working-directory: rulespec-us
+        env:
+          AXIOM_PIN_ORACLE_CORE_REQUIRED: "1"
+        run: >-
+          uv run -q --no-project --python 3.14 --with pytest==9.1.1 --with pyyaml==6.0.3
+          --with policyengine-core==3.33.12
+          python -m pytest -q -p no:cacheprovider tests/test_pin_oracle_core.py
 
       - name: Run the pinned tests
         run: |

@@ -30,10 +30,18 @@ entries:
       scope: household
     optimization:
       structure: two-way
+    axiom:
+      # 63(e) isn't encoded yet; these modules take the election as an input.
+      consumers:
+        - input: us:statutes/26/55#input.tax_unit_itemizes
+          polarity: same
+        - input: us:statutes/26/170/p#input.individual_does_not_elect_to_itemize_deductions_for_taxable_year
+          polarity: inverse
     implementations:
       - repo: PolicyEngine/policyengine-us
         commit: ce9377ee80157a17eb730fa1b8550b4d433c696c
         path: policyengine_us/variables/gov/irs/income/taxable_income/deductions/tax_unit_itemizes.py
+        variable: tax_unit_itemizes
         models: optimized
         objective:
           measure: federal-income-tax

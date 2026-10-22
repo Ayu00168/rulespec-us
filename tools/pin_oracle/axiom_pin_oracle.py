@@ -17,11 +17,14 @@ model did, for the runner to judge:
 - `case`: whether the case changes the model, as the YAML runner reads it.
   That means top-level dotted input keys (parameter overrides), and any
   reforms or extensions.
-- `choice`: after the case runs, the decision variable as the case's own
-  simulation computes it (`simulation.calculate(variable, period)`), and the
-  variables that simulation took as inputs (`simulation.input_variables`,
-  which counts direct inputs and axes). If the simulation can't be read, it
-  records the error instead.
+- `choices`: after the case runs, one record per decision variable pinned on
+  the case (two entries may pin one case on different variables). Each holds
+  the variable as the case's own simulation computes it at the case's period
+  (`simulation.calculate(variable, period)`, with an enum read by name), the
+  id of the entity instance each value belongs to, the dtype the model
+  stored it in, and the variables the simulation took as inputs
+  (`simulation.input_variables`, which counts direct inputs and axes). If
+  the simulation can't be read, the record holds the error instead.
 
 Environment (set by the runner):
 - AXIOM_PIN_ORACLE_OUT: where to write the JSON record.
@@ -29,7 +32,7 @@ Environment (set by the runner):
 - AXIOM_PIN_ORACLE_PINS: JSON list of [path, name] pairs, name being
   `function` or `Class::function` for a Python test, or a YAML case's `name`.
 - AXIOM_PIN_ORACLE_CHOICES (optional): JSON list of [path, name, variable]
-  for optimum pins: the decision variable to read after each case runs.
+  for optimum pins: the decision variables to read after each case runs.
 
 It imports nothing but pytest and the standard library.
 """
@@ -76,16 +79,38 @@ def _jsonable(value: object) -> object:
         return None
 
 
+def _read_choice(item: pytest.Item, variable: str) -> dict:
+    """What the case's own simulation computed for one decision variable."""
+
+    try:
+        simulation = item.simulation
+        values = simulation.calculate(variable, item.test.get("period"))
+        if hasattr(values, "decode_to_str"):  # an enum's values, by name
+            dtype = "enum"
+            values = values.decode_to_str()
+        else:
+            dtype = str(getattr(values, "dtype", "")) or None
+        ids = simulation.get_variable_population(variable).ids
+        return {
+            "variable": variable,
+            "computed": _jsonable(list(values.tolist() if hasattr(values, "tolist") else values)),
+            "ids": _jsonable([str(each) for each in (ids.tolist() if hasattr(ids, "tolist") else ids)]),
+            "dtype": dtype,
+            "input_variables": sorted(str(name) for name in simulation.input_variables),
+        }
+    except Exception as exc:  # noqa: BLE001 - recorded; the runner fails the pin
+        return {"variable": variable, "error": f"{type(exc).__name__}: {exc}"[:_MESSAGE_LIMIT]}
+
+
 class _Oracle:
     def __init__(self, config: pytest.Config) -> None:
         self.config = config
         self.root = Path(os.environ["AXIOM_PIN_ORACLE_ROOT"]).resolve()
         self.out = Path(os.environ["AXIOM_PIN_ORACLE_OUT"])
         self.wanted = {(path, name) for path, name in json.loads(os.environ["AXIOM_PIN_ORACLE_PINS"])}
-        self.choices = {
-            (path, name): variable
-            for path, name, variable in json.loads(os.environ.get("AXIOM_PIN_ORACLE_CHOICES") or "[]")
-        }
+        self.choices: dict[tuple[str, str], set[str]] = {}
+        for path, name, variable in json.loads(os.environ.get("AXIOM_PIN_ORACLE_CHOICES") or "[]"):
+            self.choices.setdefault((path, name), set()).add(variable)
         self.index: dict[int, int] = {}  # id(item) -> position in the collection
         self.current: int | None = None
         self.record: dict = {
@@ -183,23 +208,14 @@ class _Oracle:
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_call(self, item: pytest.Item):
         yield
-        # After the case ran: read the decision variable from its own
+        # After the case ran: read each pinned decision variable from its own
         # simulation. A pin that failed is failed anyway; this records what
         # the model computed when it passed.
-        variable = self.choices.get(self.key(item))
-        if variable is None or id(item) not in self.index:
+        variables = self.choices.get(self.key(item))
+        if not variables or id(item) not in self.index:
             return
         record = self.record["collected"][self.index[id(item)]]
-        try:
-            simulation = item.simulation
-            values = simulation.calculate(variable, item.test.get("period"))
-            if hasattr(values, "decode_to_str"):  # an enum's values, by name
-                values = values.decode_to_str()
-            computed = _jsonable(list(values.tolist() if hasattr(values, "tolist") else values))
-            inputs = sorted(str(name) for name in simulation.input_variables)
-            record["choice"] = {"variable": variable, "computed": computed, "input_variables": inputs}
-        except Exception as exc:  # noqa: BLE001 - recorded; the runner fails the pin
-            record["choice"] = {"variable": variable, "error": f"{type(exc).__name__}: {exc}"[:_MESSAGE_LIMIT]}
+        record["choices"] = {variable: _read_choice(item, variable) for variable in sorted(variables)}
 
     @pytest.hookimpl
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:

@@ -41,9 +41,11 @@ xpassed, and pytest's process exited 0, checked independently of the
 plugin's own record. A household choice's `optimum` pin must also be
 non-vacuous (`optimum_shown`), or it is `vacuous`. It must be a YAML case that
 runs the model as shipped, with no parameter override, reform or extension,
-and whose own simulation computed the chosen option (`chooses`) for the
-decision variable without taking that variable as an input. The chosen option
-must differ from the entry's default, even as a float32 number. Anything else is an
+and whose own simulation computed the chosen option (`chooses`) for the pin's
+own decision variable, at every entity instance the pin names (or at every
+one), without taking that variable as an input. The case need not assert the
+variable. The chosen option must differ from the entry's default, even as a
+float32 number. Anything else is an
 issue: an unshipped or unprovable commit, a fetch, venv or install failure, a
 collection error, a missing or deselected test, a module-level skip,
 `skipped`, `xfail`, `xpass`, `failed` or `error`, a per-commit timeout
@@ -148,8 +150,9 @@ class Pin:
     path: str
     name: str  # function, or Class::function; or a YAML case's name
     # A household choice's optimum pin: (decision variable, the option the
-    # case's output must state, the entry's default, which it must differ from).
-    expect: tuple[str, Any, Any] | None = None
+    # model must compute, the entry's default, which it must differ from, and
+    # the entity instances that must compute it, or None for every one).
+    expect: tuple[str, Any, Any, tuple[str, ...] | None] | None = None
 
     @property
     def id(self) -> str:
@@ -233,13 +236,15 @@ def _option(value: Any) -> bool:
     return isinstance(value, bool) or (isinstance(value, str) and bool(value.strip()))
 
 
-def _optimum_expectation(item: Mapping[str, Any], entry: Mapping[str, Any]) -> tuple[tuple[str, Any, Any] | None, str | None]:
+def _optimum_expectation(
+    item: Mapping[str, Any], entry: Mapping[str, Any]
+) -> tuple[tuple[str, Any, Any, tuple[str, ...] | None] | None, str | None]:
     """(expectation, None) for a well-formed optimum pin, else (None, why not)."""
 
     if not str(item.get("path")).endswith(YAML_SUFFIXES):
         return None, (
-            "is an optimum pin on a Python test; the runner can show the optimum differs from the default "
-            "only from a YAML case's stated output"
+            "is an optimum pin on a Python test; the runner reads the decision variable only from a YAML case's "
+            "simulation"
         )
     variable, chooses = item.get("variable"), item.get("chooses")
     default = entry.get("default").get("value") if isinstance(entry.get("default"), Mapping) else None
@@ -249,7 +254,15 @@ def _optimum_expectation(item: Mapping[str, Any], entry: Mapping[str, Any]) -> t
         return None, "is an optimum pin without a chosen option and a default; run `household_choices.py check`"
     if same_option(chooses, default):
         return None, "is an optimum pin whose chosen option is the default, so it shows nothing; run `household_choices.py check`"
-    return (variable, chooses, default), None
+    instances = item.get("instances")
+    if instances is not None and not (
+        isinstance(instances, list)
+        and instances
+        and all(isinstance(each, str) and each.strip() and "\n" not in each for each in instances)
+        and len(set(instances)) == len(instances)
+    ):
+        return None, "is an optimum pin with malformed instances; run `household_choices.py check`"
+    return (variable, chooses, default, tuple(instances) if instances is not None else None), None
 
 
 def collect_pins(payload: Any, choices: Any = None) -> tuple[dict[tuple[str, str], list[Pin]], list[dict[str, str]]]:
@@ -374,25 +387,47 @@ def same_option(a: Any, b: Any) -> bool:
     return isinstance(a, str) and isinstance(b, str) and option_name(a) == option_name(b)
 
 
-def optimum_shown(item: Any, expect: tuple[str, Any, Any]) -> str | None:
+def same_stored(value: Any, option: Any, dtype: Any) -> bool:
+    """Is a computed value the option, compared as the model stored it? An
+    integer exactly, a float64 as a float64, and anything else (a boolean, a
+    float32, an enum's name, or a value whose dtype is unknown) as
+    `same_option` compares it."""
+
+    if isinstance(dtype, str) and not isinstance(value, bool) and not isinstance(option, bool):
+        x, y = _number(value), _number(option)
+        if dtype.startswith(("int", "uint")):
+            return x is not None and y is not None and x == y
+        if dtype == "float64":
+            return x is not None and y is not None and float(x) == float(y)
+    return same_option(value, option)
+
+
+def optimum_shown(item: Any, expect: tuple[str, Any, Any, tuple[str, ...] | None]) -> str | None:
     """None when a pinned YAML case shows the model choosing the optimum,
     else why the pin is vacuous. The oracle's record of the case says:
     - `case`: whether it changes the model (parameter overrides, a reform or
       an extension);
-    - `choice`: what its own simulation computed for the decision variable,
-      and which variables it took as inputs, including through axes.
-    The model must compute the chosen option everywhere, without the variable
-    as an input, in a case that runs it as shipped, and the option must not be
-    the default. This shows the model choosing the non-default option, not
-    which rule chose it: a convention that agrees in this case passes too."""
+    - `choices`: for each decision variable pinned on the case, what its own
+      simulation computed, for which entity instances, in which dtype, and
+      which variables it took as inputs, including through axes.
+    The pin is judged on the record for its own variable only. The model must
+    compute the chosen option for every instance the pin names (every instance
+    when it names none), without the variable as an input, in a case that runs
+    it as shipped, and the option must not be the default. This shows the
+    model choosing the non-default option, not which rule chose it: a
+    convention that agrees in this case passes too, and so does a choice
+    forced through an input upstream of the variable."""
 
-    variable, chooses, default = expect
+    variable, chooses, default, instances = expect
     if same_option(chooses, default):
         return f"the chosen option {chooses!r} is the default (or the same number), so the case shows nothing"
     case = item.get("case") if isinstance(item, Mapping) else None
-    choice = item.get("choice") if isinstance(item, Mapping) else None
-    if not isinstance(case, Mapping) or not isinstance(choice, Mapping):
-        return "the YAML runner did not expose the case or the model's choice"
+    choices = item.get("choices") if isinstance(item, Mapping) else None
+    if not isinstance(case, Mapping) or not isinstance(choices, Mapping):
+        return "the YAML runner did not expose the case or the model's choices"
+    choice = choices.get(variable)
+    if not isinstance(choice, Mapping) or choice.get("variable") != variable:
+        return f"the YAML runner did not read {variable} from the case"
     if choice.get("error") is not None or not isinstance(choice.get("input_variables"), list):
         return f"the model's {variable} could not be read: {choice.get('error')}"
     if variable in choice["input_variables"]:
@@ -404,9 +439,21 @@ def optimum_shown(item: Any, expect: tuple[str, Any, Any]) -> str | None:
     computed = choice.get("computed")
     if not (isinstance(computed, list) and computed):
         return f"the model computed no value of {variable}"
-    wrong = [value for value in computed if not same_option(value, chooses)]
-    if wrong:
-        return f"the model computed {variable} = {wrong[0]!r}, not the chosen option {chooses!r}"
+    ids = choice.get("ids")
+    if instances is None:
+        values = [(None, value) for value in computed]
+    else:
+        if not (isinstance(ids, list) and len(ids) == len(computed)):
+            return f"the YAML runner did not record which instance computed each value of {variable}"
+        position = {str(each): index for index, each in enumerate(ids)}
+        missing = [each for each in instances if each not in position]
+        if missing:
+            return f"the case has no instance {missing[0]!r} of {variable}'s entity"
+        values = [(each, computed[position[each]]) for each in instances]
+    for instance, value in values:
+        if not same_stored(value, chooses, choice.get("dtype")):
+            where = f" for {instance}" if instance is not None else ""
+            return f"the model computed {variable} = {value!r}{where}, not the chosen option {chooses!r}"
     return None
 
 
@@ -773,7 +820,7 @@ def run_commit(repo: str, commit: str, pins: list[Pin], settings: Settings, *, k
                     module, extra = YAML_RUNNERS[repo]
                     run_env["PYTEST_ADDOPTS"] = f"-p {ORACLE_MODULE} -p no:cacheprovider --basetemp={work / 'basetemp-yaml'}"
                     run_env["AXIOM_PIN_ORACLE_CHOICES"] = json.dumps(
-                        sorted([pin.path, pin.name, pin.expect[0]] for pin in kind_pins if pin.expect is not None)
+                        sorted({(pin.path, pin.name, pin.expect[0]) for pin in kind_pins if pin.expect is not None})
                     )
                     argv = [str(python), "-m", module, "test", *files, *extra]
                 code, tail = timed(step, argv, cwd=tree, env=run_env)
