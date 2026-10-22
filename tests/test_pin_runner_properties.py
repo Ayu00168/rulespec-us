@@ -133,6 +133,9 @@ def reference_passes(record, pin, missing) -> bool:
     items = [item for item in record["collected"] if (item["path"], item["name"]) == (pin.path, pin.name)]
     if not items:
         return False
+    # A YAML case is named, not parametrized: its pin must name exactly one.
+    if pin.path.endswith((".yaml", ".yml")) and len(items) != 1:
+        return False
     for item in items:
         if item["index"] in record["deselected"]:
             return False

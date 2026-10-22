@@ -710,6 +710,14 @@ def test_test_path_and_name_shapes(tmp_path):
     assert any("relative .py or .test.yaml path" in issue for issue in check(make_repo(tmp_path), local))
 
 
+def test_a_test_path_has_no_pin_separator(tmp_path):
+    # #1843 review: `path::name` must split one way only.
+    value = entry()
+    value["tests"][0]["path"] = "tests/a.yaml::b.yaml"
+    value["tests"][0]["name"] = "c"
+    assert any("contains `::`, which separates a test file" in issue for issue in check(make_repo(tmp_path), value))
+
+
 def test_external_yaml_test_cases(tmp_path):
     # Another repository's YAML policy tests (PolicyEngine-US) are pinned by
     # repo, commit, path and case name; the case name is free text.

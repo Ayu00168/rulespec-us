@@ -122,7 +122,7 @@ PASSED = "passed"
 OUTCOMES = frozenset({
     PASSED, "failed", "error", "skipped", "xfail", "xpass", "not run", "deselected", "missing", "missing file",
     "not collected", "collection error", "untrusted commit", "fetch failed", "install failed", "timed out",
-    "runner error",
+    "runner error", "ambiguous",
 })
 # Worst first: a pin's outcome is the worst of its cases.
 CASE_SEVERITY = ("error", "failed", "xpass", "xfail", "skipped", "not run", PASSED)
@@ -139,7 +139,13 @@ class Pin:
 
     @property
     def id(self) -> str:
+        """For display only: a test's identity is `key`, the (path, name) pair."""
+
         return f"{self.path}::{self.name}"
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.path, self.name)
 
     @property
     def kind(self) -> str:
@@ -188,6 +194,8 @@ def _unrunnable(item: Any) -> str | None:
         return "has a malformed commit; run `source_conflicts.py check`"
     if not (isinstance(path, str) and sc._relative_path(path)):
         return "has a malformed path; run `source_conflicts.py check`"
+    if "::" in path:
+        return "has `::` in its path, which would make its id ambiguous; run `source_conflicts.py check`"
     if path.endswith(YAML_SUFFIXES):
         if repo not in YAML_RUNNERS:
             return f"is a YAML test case in {repo}, which has no YAML test runner here (YAML_RUNNERS)"
@@ -300,7 +308,9 @@ def classify(
     reports = oracle.get("reports") or {}
     results = []
     for pin in pins:
-        result: dict[str, Any] = {"entry": pin.entry, "label": pin.label, "id": pin.id, "cases": []}
+        result: dict[str, Any] = {
+            "entry": pin.entry, "label": pin.label, "id": pin.id, "path": pin.path, "name": pin.name, "cases": [],
+        }
         items = [item for item in collected if item.get("path") == pin.path and item.get("name") == pin.name]
         if pin.path in missing_files:
             result.update(outcome="missing file", detail=f"{pin.path} is not in the checkout")
@@ -315,6 +325,12 @@ def classify(
                 result.update(outcome="not collected", detail=f"pytest skipped {pin.path} at collection")
             else:
                 result.update(outcome="missing", detail=f"{pin.id} is not in pytest's collection")
+        elif pin.kind == "yaml" and len(items) > 1:
+            # A YAML case is named, not parametrized: a pin names exactly one.
+            result.update(
+                outcome="ambiguous",
+                detail=f"{len(items)} cases in {pin.path} are named {pin.name!r}; a YAML pin names exactly one case",
+            )
         elif any(item.get("index") in deselected for item in items):
             result.update(outcome="deselected", detail="the repository's own configuration deselects it")
         else:
@@ -352,8 +368,10 @@ def runner_version() -> str:
 
 
 def cache_key(repo: str, commit: str, pins: Iterable[Pin], version: str) -> str:
-    ids = sorted({pin.id for pin in pins})
-    blob = json.dumps({"repo": repo, "commit": commit, "ids": ids, "runner": version}, sort_keys=True)
+    # Each test as its (path, name) pair, never the joined display id, which
+    # two different pairs could share.
+    tests = sorted({pin.key for pin in pins})
+    blob = json.dumps({"repo": repo, "commit": commit, "tests": tests, "runner": version}, sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
@@ -649,7 +667,10 @@ def run_commit(repo: str, commit: str, pins: list[Pin], settings: Settings, *, k
 
 
 def _failed(pin: Pin, outcome: str, detail: str) -> dict[str, Any]:
-    return {"entry": pin.entry, "label": pin.label, "id": pin.id, "cases": [], "outcome": outcome, "detail": detail}
+    return {
+        "entry": pin.entry, "label": pin.label, "id": pin.id, "path": pin.path, "name": pin.name, "cases": [],
+        "outcome": outcome, "detail": detail,
+    }
 
 
 def _case_list_passed(cases: Any) -> bool:
@@ -695,11 +716,13 @@ def _cached(settings: Settings, key: str, repo: str, commit: str, pins: list[Pin
         and commit_passed(data)
     ):
         return None
-    by_id = {result.get("id"): result for result in data["pins"]}
-    if set(by_id) != {pin.id for pin in pins} or len(data["pins"]) != len(by_id):
+    by_key = {
+        (result.get("path"), result.get("name")): result for result in data["pins"] if isinstance(result, Mapping)
+    }
+    if set(by_key) != {pin.key for pin in pins} or len(data["pins"]) != len(by_key):
         return None
     # A result belongs to a test, not to the entries that pin it today.
-    data["pins"] = [{**by_id[pin.id], "entry": pin.entry, "label": pin.label} for pin in pins]
+    data["pins"] = [{**by_key[pin.key], "entry": pin.entry, "label": pin.label} for pin in pins]
     data["cached"] = True
     return data
 

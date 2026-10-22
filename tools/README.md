@@ -324,7 +324,7 @@ and a scratch `--basetemp`. Its YAML items have no name until they run, so
 every case in a file shares the node id `path::`. The oracle therefore keys a
 YAML item by its case's `name` (`item.test["name"]`), and records each report
 against the item `pytest_runtest_protocol` is running, by its position in the
-collection. Two cases with the pinned name both have to pass. The YAML run's
+collection. A YAML pin names exactly one case: two cases with the pinned name are `ambiguous`, which fails, even if both pass. The YAML run's
 process exit and session status are checked on their own, like pytest's.
 The install check fails closed if the repository's install does not provide
 the runner's package. Running in-repo companion tests is future work.

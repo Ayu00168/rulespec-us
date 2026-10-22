@@ -146,6 +146,54 @@ def test_classify_passes_only_every_case_passing():
     assert results[0]["outcome"] == "not run"  # a collected case that never reported
 
 
+def test_a_yaml_pin_names_exactly_one_case():
+    # #1843 review: two passing cases with one name used to pass the pin.
+    path = "policyengine_us/tests/a.yaml"
+    items = [("policyengine_us/tests/a.yaml::", path, "Twice"), ("policyengine_us/tests/a.yaml::", path, "Twice")]
+    record = oracle(items, reports={})
+    record["reports"] = {"0": phases(), "1": phases()}
+    yaml_pin = runner.Pin("us:fixture", "entries[0].tests[0]", "PolicyEngine/policyengine-us", COMMIT, path, "Twice")
+    results, _ = runner.classify(record, [yaml_pin], process_exit=0)
+    assert results[0]["outcome"] == "ambiguous" and results[0]["cases"] == []
+    record["reports"]["1"] = phases(call="failed")
+    assert runner.classify(record, [yaml_pin], process_exit=0)[0][0]["outcome"] == "ambiguous"
+    # A Python test's parametrized cases are still one pin, all of which must pass.
+    one, two = "tests/test_main.py::test_p[1]", "tests/test_main.py::test_p[2]"
+    py = [(one, "tests/test_main.py", "test_p"), (two, "tests/test_main.py", "test_p")]
+    assert runner.classify(oracle(py, reports={one: phases(), two: phases()}), [pin("test_p")], process_exit=0)[0][0]["outcome"] == "passed"
+
+
+def test_two_pins_that_join_to_one_id_never_share_a_cached_pass(tmp_path):
+    # #1843 review: (tests/a.yaml, "b.yaml::c") and (tests/a.yaml::b.yaml, "c")
+    # both display as tests/a.yaml::b.yaml::c. A path with `::` can't run at
+    # all now, and the cache matches on the (path, name) pair, never the id.
+    first = runner.Pin("us:x", "entries[0].tests[0]", "PolicyEngine/a", COMMIT, "tests/a.yaml", "b.yaml::c")
+    second = runner.Pin("us:x", "entries[0].tests[1]", "PolicyEngine/a", COMMIT, "tests/a.yaml::b.yaml", "c")
+    assert first.id == second.id and first.key != second.key
+    assert runner.cache_key("PolicyEngine/a", COMMIT, [first], "v") != runner.cache_key("PolicyEngine/a", COMMIT, [second], "v")
+    groups, unrun = runner.collect_pins(register(
+        {"repo": "PolicyEngine/policyengine-us", "commit": COMMIT, "path": "tests/a.yaml::b.yaml", "name": "c", "pins": ["reading"]},
+    ))
+    assert groups == {} and "has `::` in its path" in unrun[0]["reason"]
+    # A stored pass of the first, forged under the second's key, is not reused for the second.
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    key = runner.cache_key("PolicyEngine/a", COMMIT, [second], "v")
+    passed_case = [{"nodeid": "tests/a.yaml::", "index": 0, "outcome": "passed"}]
+    stored = {
+        "key": key, "repo": "PolicyEngine/a", "commit": COMMIT, "issues": [], "pytest_exit": 0,
+        "pins": [{**runner._failed(first, "passed", ""), "cases": passed_case}],
+    }
+    stored["pins"][0].pop("detail")
+    (cache / f"{key}.json").write_text(json.dumps(stored))
+    settings_ = runner.Settings(uv="uv", git="git", work=tmp_path, cache_dir=cache)
+    assert runner._cached(settings_, key, "PolicyEngine/a", COMMIT, [second]) is None
+    # The same record does serve the pin it belongs to.
+    stored["key"] = runner.cache_key("PolicyEngine/a", COMMIT, [first], "v")
+    (cache / f"{stored['key']}.json").write_text(json.dumps(stored))
+    assert runner._cached(settings_, stored["key"], "PolicyEngine/a", COMMIT, [first]) is not None
+
+
 def test_classify_matches_by_path_and_name_not_node_id():
     # The node id is relative to the rootdir, which need not be the checkout root.
     item = ("sub/tests/test_main.py::TestK::test_m", "tests/test_main.py", "TestK::test_m")
@@ -330,7 +378,8 @@ def test_the_cache_holds_and_returns_only_passing_commits(tmp_path):
     def result(*outcomes, issues=(), exit_code=0, cases=case, **extra):
         return {
             "repo": repo, "commit": COMMIT, "issues": list(issues), "logs": {"pytest": "x"}, "pytest_exit": exit_code,
-            "pins": [{"entry": "us:old", "label": "entries[9].tests[9]", "id": p.id, "outcome": o, "cases": cases}
+            "pins": [{"entry": "us:old", "label": "entries[9].tests[9]", "id": p.id, "path": p.path, "name": p.name,
+                      "outcome": o, "cases": cases}
                      for p, o in zip(pins, outcomes, strict=True)],
             **extra,
         }
@@ -938,6 +987,10 @@ YAML_CASES = textwrap.dedent(
       output: ok
     - name: Twice
       output: bad
+    - name: Both pass
+      output: ok
+    - name: Both pass
+      output: ok
     """
 )
 
@@ -1273,8 +1326,10 @@ YAML_EXPECTED = {
     "tests/policy/cases.yaml::A case that passes (2024)": "passed",
     "tests/policy/cases.yaml::A case that fails": "failed",
     "tests/policy/cases.yaml::A skipped case": "skipped",
-    # Two cases share the name; the one that fails fails the pin.
-    "tests/policy/cases.yaml::Twice": "failed",
+    # #1843 review: a YAML pin names exactly one case. Two cases sharing the
+    # name are ambiguous, whether one fails or both pass.
+    "tests/policy/cases.yaml::Twice": "ambiguous",
+    "tests/policy/cases.yaml::Both pass": "ambiguous",
     "tests/policy/cases.yaml::No such case": "missing",
     "tests/policy/missing.yaml::Anything": "missing file",
     # A Python pin at the same commit runs under pytest, separately.
@@ -1297,10 +1352,7 @@ def test_yaml_cases_run_through_the_repositorys_own_yaml_runner(tmp_path, fixtur
     assert result["pytest_exit"] == 1
     assert "the YAML test runner's process exited 1" in result["issues"]
     by_id = {pin["id"]: pin for pin in result["pins"]}
-    twice = by_id["tests/policy/cases.yaml::Twice"]["cases"]
-    assert [case["outcome"] for case in twice] == ["passed", "failed"]
-    # Every case in a file shares one node id; only the index tells them apart.
-    assert len({case["nodeid"] for case in twice}) == 1 and len({case["index"] for case in twice}) == 2
+    assert "2 cases in tests/policy/cases.yaml are named 'Both pass'" in by_id["tests/policy/cases.yaml::Both pass"]["detail"]
 
 
 @needs_tools
