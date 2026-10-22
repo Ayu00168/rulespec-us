@@ -118,7 +118,7 @@ Register-only fields:
 | `jurisdiction`, `program` | A jurisdiction directory of this repository, and a kebab-case program slug. |
 | `pending_texts` | Provisions the pinned corpus release lacks. Each gives `citation`, its `kind` (see below), `url`, an `excerpt`, and a `snapshot`: repo, commit, path and sha256 of a captured copy (`.txt`, `.md`, `.html`, `.htm` or `.xml`). An entry that a module adopts cannot have any; ingest them first. |
 | `text_kinds` | Optional. Narrows the kind of a corpus text, as `{corpus citation path: kind}`. A text's kind is otherwise the first kind its document class allows (below). The kind must be one its path's class allows, so a `/statute/` path is always `statute`. |
-| `unpublished_sources` | Sources with no public text, such as an agency's correspondence: `kind`, `description` and `date`. They are described, never quoted: a description holds no `@` and at most four words in quotation marks, counted across all its quoted spans. A span runs from an opening mark to its closing mark. A double quote, straight or curly, that is never closed quotes the rest of the description. A single quote, straight or curly, opens only at the start of a word and closes only at its end, so an apostrophe ("county's", "we’ll") or an elision ("the '90s") is neither. Verify cannot check them and lists them as unverifiable. |
+| `unpublished_sources` | Sources with no public text, such as an agency's correspondence: `kind`, `description` and `date`. They are described, never quoted: a description holds no `@` and at most four words in quotation marks, counted across all its quoted spans. A span runs from an opening mark to its closing mark. A double quote, straight or curly, that is never closed quotes the rest of the description. A single quote, straight or curly, opens only at the start of a word and closes only at its end, so an apostrophe ("county's", "we’ll") or an elision ("the '90s") is neither. It opens when a letter follows it and it starts the description or follows whitespace (any Unicode space, a no-break space too), a slash, an opening bracket, a dash or an opening quotation mark. It closes when it follows a non-space and no letter or digit follows it; an unclosed single quote is an apostrophe. The count has two limits: a quotation that starts with a digit ('30 days …') is not counted, and nor is one that directly follows other punctuation (wrote:'…'). Those are left to the publication rules reviewed by hand (below), which include that nothing private is quoted. Verify cannot check them and lists them as unverifiable. |
 | `years` | Optional. The years the sources disagree: `from`, and optionally `to` (both inclusive; no `to` means still running). `type` says which year: `calendar`, `tax`, `federal-fiscal`, `state-fiscal` or `program`. `program` also needs `note`, saying what the program year is. |
 | `conflict`, `resolution` | `conflict` is `live` (the default) or `resolved`. `resolved` means a legislature or agency has closed the disagreement. It needs a `resolution` (`by`: `legislation` or `agency`; `effective`, a date; `record`, a public https URL) and `years.to`, the last year the sources disagree. A `live` entry has no `resolution`. |
 | `outcome` | `computed` or `refused`: whether the adopted reading computes the contested cases or refuses them. For a refusal, `reading` says what is refused and the substantive readings go in `alternatives`. |
@@ -366,7 +366,11 @@ holds nothing worth taking:
 
 Its result leaves only as the JSON artifact. The alarm job reads that artifact
 with main's `pin_runner.py --summarize`, which checks every field's type and
-prints only fields that match fixed patterns. A missing or malformed artifact,
+prints only fields that match fixed patterns. The one free text it prints is a
+YAML case's name, inside its pin id in a code span, and only when the name has
+no backtick, `@` or angle bracket and no control, format or separator
+character but a space ("Café" and "A case!" print; a line break or a
+bidirectional override makes the pin malformed). A missing or malformed artifact,
 including one without the `commits`, `unrun` and `issues` lists or a commit
 without its `pins` and `issues` lists (the runner always writes them),
 becomes its own alarm line ("pinned-tests artifact malformed"); the summary

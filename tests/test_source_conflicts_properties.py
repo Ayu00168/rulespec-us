@@ -53,6 +53,12 @@ Invariants, for every input:
 16. Shipped commits: verify reports an external commit (snapshot,
     implementation or test) exactly when it is not reachable from its
     repository's default branch.
+17. Quoted spans, differentially: `quoted_spans` returns exactly the spans an
+    independently written reference finds. The reference rescans the rest of
+    the text for each single opener (quadratic), and states the opening and
+    closing rules again without the implementation's helpers. The spans
+    together are no longer than the text, and `quoted_words` counts exactly
+    the words in them.
 
 Hypothesis is not installed in the shared validate workflow's pytest leg, so
 these skip there; the source-conflicts workflow installs it and runs them.
@@ -64,6 +70,7 @@ import copy
 import importlib.util
 import string
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -706,3 +713,52 @@ def test_verify_flags_exactly_the_unshipped_commits(value, data):
 @given(source=st.one_of(st.text(max_size=200), st.binary(max_size=200)), name=st.one_of(st.sampled_from(CANDIDATES), st.text(max_size=20)))
 def test_screen_is_total(source, name):
     assert sc.python_test_exists(source, name) in (True, False)
+
+
+# An alphabet that reaches every branch of the quote scanner: letters, a digit,
+# ASCII and Unicode spaces, both kinds of each quotation mark, opening
+# brackets and dashes, and other punctuation.
+QUOTE_ALPHABET = "ab1 \u00a0\u3000'\u2018\u2019\"\u201c\u201d([-\u2014/:.\u00ab"
+
+
+def _reference_spans(text):
+    def opens(i):
+        if i + 1 >= len(text) or not text[i + 1].isalpha():
+            return False
+        if i == 0:
+            return True
+        before = text[i - 1]
+        return before.isspace() or before == "/" or unicodedata.category(before) in ("Ps", "Pd", "Pi")
+
+    def closes(i):
+        return i > 0 and not text[i - 1].isspace() and (i + 1 == len(text) or not text[i + 1].isalnum())
+
+    spans, i = [], 0
+    while i < len(text):
+        if text[i] in "\"\u201c":
+            closer = "\"" if text[i] == "\"" else "\u201d"
+            j = i + 1
+            while j < len(text) and text[j] != closer:
+                j += 1
+            spans.append(text[i + 1 : j])
+            i = j + 1
+            continue
+        if text[i] in "'\u2018" and opens(i):
+            j = i + 1
+            while j < len(text) and not (text[j] in "'\u2019" and closes(j)):
+                j += 1
+            if j < len(text):
+                spans.append(text[i + 1 : j])
+                i = j + 1
+                continue
+        i += 1
+    return spans
+
+
+@settings(max_examples=2000, deadline=None)
+@given(text=st.text(alphabet=QUOTE_ALPHABET, max_size=60))
+def test_quoted_spans_agree_with_a_reference(text):
+    spans = sc.quoted_spans(text)
+    assert spans == _reference_spans(text)
+    assert sum(len(span) for span in spans) <= len(text)
+    assert sc.quoted_words(text) == sum(len(span.split()) for span in spans)

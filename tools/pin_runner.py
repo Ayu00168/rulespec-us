@@ -89,6 +89,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from decimal import Decimal
 from pathlib import Path
@@ -1038,13 +1039,33 @@ def render(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-# A Python pin id, or a YAML case's (`path.yaml::Case name (2024)`): no
-# backtick, @, angle bracket or line break, so nothing in it can format,
-# mention or link in the alarm issue.
-_SAFE_ID_RE = re.compile(
-    r"[A-Za-z0-9_./-]+::[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)?"
-    r"|[A-Za-z0-9_./-]+\.ya?ml::[A-Za-z0-9][A-Za-z0-9 ,.;:()'%$&+/_#-]*"
-)
+# A Python pin id (`path.py::test` or `path.py::Class::test`), or a YAML
+# case's (`path.yaml::Case name (2024)`). The alarm prints an id inside an
+# inline code span, so a YAML case name, which is free text, is printed only
+# when it holds no backtick (which would end the span), no @ or angle
+# bracket, and no control, format or separator character other than a space
+# (no line break, and no bidirectional override that could disguise the
+# rest). Any other letter or punctuation is fine: "Café", "A case!".
+_SAFE_PYTHON_ID_RE = re.compile(r"[A-Za-z0-9_./-]+::[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)?")
+_SAFE_YAML_PATH_RE = re.compile(r"[A-Za-z0-9_./-]+\.ya?ml")
+_UNSAFE_IN_NAME = frozenset("`@<>")
+
+
+def _safe_id(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    if _SAFE_PYTHON_ID_RE.fullmatch(value):
+        return True
+    path, separator, name = value.partition("::")
+    return (
+        bool(separator)
+        and _SAFE_YAML_PATH_RE.fullmatch(path) is not None
+        and name != ""
+        and name == name.strip()
+        and all(char == " " or (char not in _UNSAFE_IN_NAME and unicodedata.category(char)[0] not in "CZ") for char in name)
+    )
+
+
 _SAFE_ENTRY_RE = re.compile(r"[a-z0-9-]+:[a-z0-9-]+")
 _SAFE_LABEL_RE = re.compile(r"(?:choices\.)?entries\[[0-9]+\]\.tests\[[0-9]+\]")
 _SUMMARY_LIMIT = 100
@@ -1084,7 +1105,7 @@ def _summary_lines(report: Mapping[str, Any]) -> list[str]:
                 isinstance(pin, Mapping)
                 and _safe(pin.get("entry"), _SAFE_ENTRY_RE)
                 and _safe(pin.get("label"), _SAFE_LABEL_RE)
-                and _safe(pin.get("id"), _SAFE_ID_RE)
+                and _safe_id(pin.get("id"))
                 and isinstance(outcome, str)
                 and outcome in OUTCOMES
             ):

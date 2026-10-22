@@ -22,7 +22,9 @@ Invariants, for every oracle record:
    component.
 6. `summarize` prints, from any report, only text that fixed patterns allow:
    every backticked span is an entry id, a commit reference or a pin id, and
-   no line carries free text from the run. For any JSON artifact, any field
+   the only free text from the run is a YAML case's name inside its pin id,
+   which holds no backtick, @ or angle bracket and no control, format or
+   separator character but a space. For any JSON artifact, any field
    of any type, `--summarize` exits 0 and prints either a valid summary or
    the malformed-artifact alarm.
 7. Provenance: for any answers GitHub's API could give, `commit_provenance`
@@ -57,6 +59,7 @@ import io
 import json
 import re
 import sys
+import unicodedata
 import urllib.error
 from fractions import Fraction
 from pathlib import Path
@@ -243,10 +246,23 @@ SAFE_SPANS = (
     re.compile(r"[a-z0-9-]+:[a-z0-9-]+"),
     re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+@[0-9a-f]{12}(:[A-Za-z0-9_./-]+::[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)?)?"),
     re.compile(r"pinned-tests"),
-    # A YAML case id: a free-text case name, but no backtick, @, angle
-    # bracket or line break.
-    re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+@[0-9a-f]{12}:[A-Za-z0-9_./-]+\.ya?ml::[A-Za-z0-9][A-Za-z0-9 ,.;:()'%$&+/_#-]*"),
 )
+YAML_CASE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+@[0-9a-f]{12}:[A-Za-z0-9_./-]+\.ya?ml::(.+)", re.DOTALL)
+
+
+def _safe_span(span):
+    """A span the alarm may print: a fixed pattern, or a YAML case reference
+    whose name can't end the code span, mention, link or hide text."""
+
+    if any(pattern.fullmatch(span) for pattern in SAFE_SPANS):
+        return True
+    match = YAML_CASE_REF.fullmatch(span)
+    if match is None:
+        return False
+    name = match.group(1)
+    return name == name.strip() and not any(
+        char in "`@<>" or (char != " " and unicodedata.category(char)[:1] in ("C", "Z")) for char in name
+    )
 FIXED_TEXT = re.compile(
     r"- (`[^`]*` entries\[[0-9]+\]\.tests\[[0-9]+\]: (`[^`]*` [a-z ]+|the runner can't execute this pin\.)"
     r"|`[^`]*`: the run of this commit reported an issue\."
@@ -261,7 +277,11 @@ FIXED_TEXT = re.compile(
 text = st.one_of(
     st.text(max_size=20),
     st.sampled_from(["us:x", "PolicyEngine/a", COMMIT, "tests/test_a.py::test_x", "skipped", "entries[0].tests[1]",
-                     "policyengine_us/tests/cases.yaml::A case (2024)", "policyengine_us/tests/cases.yaml::x `@team`"]),
+                     "policyengine_us/tests/cases.yaml::A case (2024)", "policyengine_us/tests/cases.yaml::x `@team`",
+                     "policyengine_us/tests/cases.yaml::Café", "policyengine_us/tests/cases.yaml::A case!",
+                     "policyengine_us/tests/cases.yaml::a\u202eb", "policyengine_us/tests/cases.yaml::a\u00a0b",
+                     "policyengine_us/tests/cases.yaml::a\u2028b", "policyengine_us/tests/cases.yaml:: a"]),
+    st.builds(lambda name: f"policyengine_us/tests/cases.yaml::{name}", st.text(max_size=12)),
     json_values,
 )
 pin_dicts = st.fixed_dictionaries({"entry": text, "label": text, "id": text, "outcome": st.one_of(text, st.sampled_from(sorted(runner.OUTCOMES)))})
@@ -288,7 +308,7 @@ def test_summarize_prints_only_fixed_text(tmp_path_factory, report):
         assert "\n" not in line
         assert FIXED_TEXT.fullmatch(line), line
         for span in BACKTICKED.findall(line):
-            assert any(pattern.fullmatch(span) for pattern in SAFE_SPANS), (span, line)
+            assert _safe_span(span), (span, line)
 
 
 @SETTINGS

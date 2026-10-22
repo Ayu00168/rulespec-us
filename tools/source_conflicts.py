@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import bisect
 import contextlib
 import datetime as dt
 import hashlib
@@ -59,6 +60,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -157,17 +159,28 @@ MAX_QUOTED_WORDS = 4
 _DOUBLE_CLOSERS = {'"': '"', "\u201c": "\u201d"}
 _SINGLE_OPENERS = ("'", "\u2018")
 _SINGLE_CLOSERS = ("'", "\u2019")
-_BEFORE_OPENER = frozenset(" \t\n\r([{\u2014\u2013-/")
+# Unicode categories a single opening mark may directly follow, besides
+# whitespace and a slash: opening brackets (Ps), dashes (Pd) and opening
+# quotation marks (Pi).
+_BEFORE_OPENER_CATEGORIES = frozenset({"Ps", "Pd", "Pi"})
 
 
 def _opens_single(text: str, index: int) -> bool:
-    """A single quotation mark opens a quotation when it starts the text or
-    follows a space or an opening bracket or dash, and a letter follows it.
-    So the apostrophe in "agency's" opens nothing, and neither does the elision
-    in "the '90s"."""
+    """A single quotation mark opens a quotation when a letter follows it and
+    it starts the text or follows whitespace (any Unicode space, such as a
+    no-break space), a slash, an opening bracket, a dash or an opening
+    quotation mark. So the apostrophe in "agency's" opens nothing, and neither
+    does the elision in "the '90s". Two limits follow, both documented in
+    tools/README.md: a quotation whose first character is not a letter
+    ('30 days') is not counted, and nor is one that directly follows other
+    punctuation (wrote:'one')."""
 
-    before_ok = index == 0 or text[index - 1] in _BEFORE_OPENER
-    return before_ok and index + 1 < len(text) and text[index + 1].isalpha()
+    if index + 1 >= len(text) or not text[index + 1].isalpha():
+        return False
+    if index == 0:
+        return True
+    before = text[index - 1]
+    return before.isspace() or before == "/" or unicodedata.category(before) in _BEFORE_OPENER_CATEGORIES
 
 
 def _closes_single(text: str, index: int) -> bool:
@@ -188,8 +201,13 @@ def quoted_spans(text: str) -> list[str]:
     unclosed one quotes the rest of the text, failing closed. Single quotes
     (straight or curly) open and close only at word edges (_opens_single,
     _closes_single), so apostrophes and elisions inside a span or a word are
-    neither; an unclosed single quote is read as an apostrophe."""
+    neither; an unclosed single quote is read as an apostrophe.
 
+    Whether a mark closes depends only on its neighbours, so the closers are
+    found once, and each opener takes the first one after it: the scan is
+    O(n log n) however many openers go unclosed."""
+
+    closers = [position for position, mark in enumerate(text) if mark in _SINGLE_CLOSERS and _closes_single(text, position)]
     spans: list[str] = []
     index = 0
     while index < len(text):
@@ -201,15 +219,9 @@ def quoted_spans(text: str) -> list[str]:
             index = close + 1
             continue
         if mark in _SINGLE_OPENERS and _opens_single(text, index):
-            close = next(
-                (
-                    position
-                    for position in range(index + 1, len(text))
-                    if text[position] in _SINGLE_CLOSERS and _closes_single(text, position)
-                ),
-                None,
-            )
-            if close is not None:
+            following = bisect.bisect_right(closers, index)
+            if following < len(closers):
+                close = closers[following]
                 spans.append(text[index + 1 : close])
                 index = close + 1
                 continue

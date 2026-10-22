@@ -1058,6 +1058,74 @@ def test_unpublished_sources_shape(tmp_path):
     assert any("unpublished_sources[0].date is required" in issue for issue in check(ctx, entry(unpublished_sources=[missing])))
 
 
+@pytest.mark.parametrize(
+    ("text", "spans"),
+    [
+        # #1825 round-3 review (P3): a single quote opens after any Unicode
+        # whitespace, not only an ASCII space.
+        *[(f"It wrote:{space}'one two three'", ["one two three"]) for space in ("\u00a0", "\u202f", "\u2009", "\u3000", "\u2003", "\t", "\n")],
+        # After an opening bracket, a dash, a slash or an opening quotation mark.
+        *[(f"x{before}'one two'", ["one two"]) for before in ("(", "[", "{", "\u2014", "\u2013", "-", "/", "\u00ab", "\u300c")],
+        # The text's first character.
+        ("'one two three' said the agency.", ["one two three"]),
+        ("\u2018one two\u2019 it said", ["one two"]),
+        # Documented limits: other punctuation or a letter before the mark,
+        # or anything but a letter after it, opens nothing.
+        ("It wrote:'one two'", []),
+        ("It wrote.'one two'", []),
+        ("x'one two'", []),
+        ("the '90s and 'old' days", ["old"]),
+        ("a '30 day limit' it set", []),
+        ("x ' one two'", []),
+        # A mark at either end of the text.
+        ("ends with '", []),
+        ("'", []),
+        ("x '", []),
+        ("'a b'", ["a b"]),
+        # Each opener takes the first closer after it.
+        ("'one' and 'two'", ["one", "two"]),
+        # A closer follows a non-space and precedes no letter or digit.
+        ("the 'one two 6'7 tall", []),
+        ("the 'one two's end", []),
+        ("the 'one two'.", ["one two"]),
+        ("the 'one two', then", ["one two"]),
+        # An unclosed single quote is an apostrophe; an unclosed double
+        # quote runs to the end.
+        ("the 'one two three four five", []),
+        ('the "one two', ["one two"]),
+        # Each double opener pairs with its own closer only.
+        ('\u201ca\u201d x "b c d e f"', ["a", "b c d e f"]),
+        ('"a\u201d b c"', ["a\u201d b c"]),
+        ('\u201ca" b\u201d', ['a" b']),
+        ("\u201ca\u201d", ["a"]),
+        ('""', [""]),
+    ],
+)
+def test_quoted_spans(text, spans):
+    assert sc.quoted_spans(text) == spans
+
+
+def test_a_mark_at_text_start_closes_nothing():
+    # No opener can precede it, so quoted_spans never pairs it; the helper
+    # still must not read the text's last character as the one before it.
+    assert sc._closes_single("' x", 0) is False
+    assert sc._closes_single("x' y", 1) is True
+
+
+def test_quoted_spans_finds_each_closer_once(monkeypatch):
+    # #1825 round-3 review (P3): unclosed openers made the scan quadratic
+    # (24,000 characters took 6 s). Each mark is now tested as a closer once.
+    calls = []
+    real = sc._closes_single
+    monkeypatch.setattr(sc, "_closes_single", lambda text, index: calls.append(index) or real(text, index))
+    text = "'a " * 20_000 + "end'"
+    assert sc.quoted_spans(text) == [text[1:-1]]  # the first opener takes the one closer
+    assert len(calls) == text.count("'")
+    calls.clear()
+    assert sc.quoted_spans("'a " * 20_000) == []
+    assert len(calls) == 20_000
+
+
 # ---------------------------------------------------------------------------
 # Adopting modules and the reverse scan
 

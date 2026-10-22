@@ -864,21 +864,25 @@ def test_summarize_never_raises(tmp_path, monkeypatch, capsys):
 
 
 def test_summarize_prints_yaml_case_ids_but_nothing_that_formats(tmp_path):
-    # A YAML case name is free text, so only names without a backtick, @,
-    # angle bracket or line break are printed; anything else is malformed.
+    # A YAML case name is free text. It is printed inside a code span when it
+    # holds no backtick, @, angle bracket, or control, format or separator
+    # character but a space; anything else is malformed. #1843 round-2 review
+    # (P3): "Café" and "A case!" were malformed though the rule allows them.
+    printable = ("A farm loss (2024), $3,000", "Café", "A case!", "Ein Fall für 2024 [ü]", "(2024) a case", "a :: b")
+    unsafe = ("x `@team`", "<img src=x>", "@everyone", "two\nlines", "tab\there", "\u202ereversed", "zero\u200dwidth",
+              "line\u2028separator", "no\u00a0break", " leading", "trailing ", "")
     pins = [
-        {"entry": "us-md:x", "label": "entries[0].tests[0]", "id": "policyengine_us/tests/a.yaml::A farm loss (2024), $3,000", "outcome": "failed"},
-        {"entry": "us-md:x", "label": "entries[0].tests[1]", "id": "policyengine_us/tests/a.yaml::x `@team`", "outcome": "failed"},
-        {"entry": "us-md:x", "label": "entries[0].tests[2]", "id": "policyengine_us/tests/a.yaml::<img src=x>", "outcome": "failed"},
-        {"entry": "us-md:x", "label": "entries[0].tests[3]", "id": "policyengine_us/tests/a.yaml::@everyone", "outcome": "failed"},
+        {"entry": "us-md:x", "label": f"entries[0].tests[{index}]", "id": f"policyengine_us/tests/a.yaml::{name}", "outcome": "failed"}
+        for index, name in enumerate(printable + unsafe)
     ]
+    pins.append({"entry": "us-md:x", "label": "entries[0].tests[99]", "id": "policyengine_us/tests/a.py::Café", "outcome": "failed"})
     path = tmp_path / "report.json"
     path.write_text(json.dumps({"commits": [{"repo": "PolicyEngine/policyengine-us", "commit": COMMIT, "issues": [], "pins": pins}],
                                 "unrun": [], "issues": []}))
     assert runner.summarize(path) == [
-        "- `us-md:x` entries[0].tests[0]: `PolicyEngine/policyengine-us@cccccccccccc:policyengine_us/tests/a.yaml::A farm loss (2024), $3,000` failed",
-        "- pinned-tests artifact malformed (3 item(s)); the `pinned-tests` job's log has the details.",
-    ]
+        f"- `us-md:x` entries[0].tests[{index}]: `PolicyEngine/policyengine-us@cccccccccccc:policyengine_us/tests/a.yaml::{name}` failed"
+        for index, name in enumerate(printable)
+    ] + [f"- pinned-tests artifact malformed ({len(unsafe) + 1} item(s)); the `pinned-tests` job's log has the details."]
 
 
 def test_summarize_without_a_report(tmp_path):
