@@ -22,7 +22,9 @@ model did, for the runner to judge:
   the variable as the case's own simulation computes it at the case's period
   (`simulation.calculate(variable, period)`, with an enum read by name), the
   id of the entity instance each value belongs to, the dtype the model
-  stored it in, and the variables the simulation took as inputs
+  stored it in, the variable's definition period and the unit and size of
+  the period it was read at (core sums, divides or picks a month or year
+  when they differ), and the variables the simulation took as inputs
   (`simulation.input_variables`, which counts direct inputs and axes). If
   the simulation can't be read, the record holds the error instead.
 
@@ -34,13 +36,16 @@ Environment (set by the runner):
 - AXIOM_PIN_ORACLE_CHOICES (optional): JSON list of [path, name, variable]
   for optimum pins: the decision variables to read after each case runs.
 
-It imports nothing but pytest and the standard library.
+It imports nothing but pytest and the standard library. It parses a period
+with the `periods` module of the simulation's own package, so it needs no
+import of policyengine-core.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -79,12 +84,25 @@ def _jsonable(value: object) -> object:
         return None
 
 
+def _period(simulation: object, raw: object) -> object:
+    """The period `simulation.calculate` reads for `raw` (the case's period,
+    or the simulation's default), parsed by the simulation's own package."""
+
+    for cls in type(simulation).__mro__:
+        periods = getattr(sys.modules.get(cls.__module__), "periods", None)
+        if callable(getattr(periods, "period", None)):
+            return periods.period(raw if raw is not None else simulation.default_calculation_period)
+    raise LookupError("the simulation's package has no periods.period")
+
+
 def _read_choice(item: pytest.Item, variable: str) -> dict:
     """What the case's own simulation computed for one decision variable."""
 
     try:
         simulation = item.simulation
-        values = simulation.calculate(variable, item.test.get("period"))
+        period = _period(simulation, item.test.get("period"))
+        definition = simulation.tax_benefit_system.get_variable(variable, check_existence=True).definition_period
+        values = simulation.calculate(variable, period)
         if hasattr(values, "decode_to_str"):  # an enum's values, by name
             dtype = "enum"
             values = values.decode_to_str()
@@ -96,6 +114,10 @@ def _read_choice(item: pytest.Item, variable: str) -> dict:
             "computed": _jsonable(list(values.tolist() if hasattr(values, "tolist") else values)),
             "ids": _jsonable([str(each) for each in (ids.tolist() if hasattr(ids, "tolist") else ids)]),
             "dtype": dtype,
+            "definition_period": str(definition),
+            "period": str(period),
+            "period_unit": str(period.unit),
+            "period_size": int(period.size),
             "input_variables": sorted(str(name) for name in simulation.input_variables),
         }
     except Exception as exc:  # noqa: BLE001 - recorded; the runner fails the pin

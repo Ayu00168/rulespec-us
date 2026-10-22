@@ -1,8 +1,8 @@
 """The optimum check against policyengine-core's own YAML runner.
 
 tests/test_pin_runner.py drives the oracle with a stand-in for core's YAML
-items. This file runs the real thing where policyengine-core is installed (it
-is not in this repository's CI, so there it skips): a minimal model, cases
+items. This file runs the real thing where policyengine-core is installed (the
+dependency-light test environment skips it): a minimal model, cases
 that force, imitate or override a choice, core's `OpenFiscaPlugin`, the
 oracle, and `optimum_shown` on what the oracle recorded. Each case is one the
 #1844 reviews executed against core, or the legitimate case next to it.
@@ -114,6 +114,33 @@ MODEL = textwrap.dedent(
             return person("income", period.this_year) * 0 + 0.3
 
 
+    class monthly_rate(Variable):
+        # Always the default (0.0625) in every month; twelve of them sum to 0.75.
+        value_type = float
+        entity = Person
+        definition_period = MONTH
+        label = "monthly rate"
+
+        def formula(person, period, parameters):
+            return person("income", period.this_year) * 0 + 0.0625
+
+
+    NumericStatus = Enum("NumericStatus", {"0": "Zero", "16777219": "One", "16777220": "Two"})
+
+
+    class numeric_status(Variable):
+        # An enum whose member names are digits, past float32's precision.
+        value_type = Enum
+        possible_values = NumericStatus
+        default_value = NumericStatus["0"]
+        entity = Person
+        definition_period = YEAR
+        label = "numeric status"
+
+        def formula(person, period, parameters):
+            return where(person("income", period) > -1, NumericStatus["16777220"], NumericStatus["0"])
+
+
     class share(Variable):
         value_type = float
         entity = Person
@@ -139,7 +166,8 @@ MODEL = textwrap.dedent(
     class MiniSystem(TaxBenefitSystem):
         def __init__(self):
             super().__init__([Person, Household])
-            for variable in (income, elects, checked, p0, always_true, count, monthly_share, share, filing_status):
+            for variable in (income, elects, checked, p0, always_true, count, monthly_share, monthly_rate, numeric_status,
+                             share, filing_status):
                 self.add_variable(variable)
             self.parameters = ParameterNode("", data={"gov": {"flag": {"values": {"2000-01-01": True}}}})
     """
@@ -184,9 +212,14 @@ CASES = {
     },
     # Round 3 (P3): an integer is compared exactly, not as float32.
     "an integer past float32": {"input": {"income": 0}, "output": {"count": 16777220}},
-    # Round 3 (P3): a monthly variable read at a yearly case period is its
-    # sum over the year, so the pin fails closed.
+    # Round 4 (P1): a monthly variable read at a yearly case period is a sum,
+    # not a choice, whether the sum differs from the option or, as twelve
+    # defaults do here, equals another option.
     "a monthly choice at a yearly period": {"input": {"income": 0}, "output": {"monthly_share": 3.6}},
+    "twelve monthly defaults sum to another option": {"input": {"income": 0}, "output": {"monthly_rate": 0.75}},
+    "a monthly choice at a monthly period": {"period": "2026-01", "input": {"income": 0}, "output": {"monthly_share": 0.3}},
+    # Round 4 (P1): an enum whose names are digits compares by name.
+    "an enum with numeric names": {"input": {"income": 0}, "output": {"numeric_status": "16777220"}},
 }
 
 # Cases whose test outcome depends on the numpy under core: each must either
@@ -216,6 +249,10 @@ PINS = [
     ("an integer past float32", ("count", "16777219", "0", None), False),
     ("an integer past float32", ("count", "16777220", "0", None), True),
     ("a monthly choice at a yearly period", ("monthly_share", "0.3", "0.5", None), False),
+    ("twelve monthly defaults sum to another option", ("monthly_rate", "0.75", "0.0625", None), False),
+    ("a monthly choice at a monthly period", ("monthly_share", "0.3", "0.5", None), True),
+    ("an enum with numeric names", ("numeric_status", "16777219", "0", None), False),
+    ("an enum with numeric names", ("numeric_status", "16777220", "0", None), True),
 ]
 
 DRIVER = textwrap.dedent(
@@ -244,7 +281,7 @@ def _load_runner():
 
 def test_the_oracle_reads_what_core_computed(tmp_path):
     runner = _load_runner()
-    cases = [{"name": name, "period": 2026, **case} for name, case in CASES.items()]
+    cases = [{"name": name, "period": 2026, **case} for name, case in CASES.items()]  # a case may give its own period
     (tmp_path / "minimodel.py").write_text(MODEL)
     (tmp_path / "driver.py").write_text(DRIVER)
     (tmp_path / "cases.yaml").write_text(json.dumps(cases))  # JSON is YAML
@@ -292,4 +329,9 @@ def test_the_oracle_reads_what_core_computed(tmp_path):
     assert "computed elects = False for poor" in detail[("two people, one chooses", "elects", True, ("poor",))]
     assert "has no instance 'nobody'" in detail[("two people, one chooses", "elects", True, ("nobody",))]
     assert "computed count = 16777220" in detail[("an integer past float32", "count", '16777219', None)]
-    assert "computed monthly_share = 3.59999" in detail[("a monthly choice at a yearly period", "monthly_share", '0.3', None)]
+    assert "defined by month, over 2026" in detail[("a monthly choice at a yearly period", "monthly_share", '0.3', None)]
+    assert "defined by month, over 2026" in detail[("twelve monthly defaults sum to another option", "monthly_rate", '0.75', None)]
+    assert "computed numeric_status = '16777220'" in detail[("an enum with numeric names", "numeric_status", '16777219', None)]
+    # The record says what it read: the definition period and the period's unit and size.
+    yearly = items["a monthly choice at a yearly period"]["choices"]["monthly_share"]
+    assert (yearly["definition_period"], yearly["period_unit"], yearly["period_size"]) == ("month", "year", 1)

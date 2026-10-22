@@ -387,12 +387,20 @@ def same_option(a: Any, b: Any) -> bool:
     return isinstance(a, str) and isinstance(b, str) and option_name(a) == option_name(b)
 
 
+# The dtypes of values that are names, never numbers: an enum (read by
+# name), a numpy string, or Python objects (core's str variables).
+_NAME_DTYPES = ("enum", "object", "str")
+
+
 def same_stored(value: Any, option: Any, dtype: Any) -> bool:
     """Is a computed value the option, compared as the model stored it? An
-    integer exactly, a float64 as a float64, and anything else (a boolean, a
-    float32, an enum's name, or a value whose dtype is unknown) as
+    enum or a string by name, however numeric it looks ("16777219" is not
+    "16777220"); an integer exactly; a float64 as a float64; and anything else
+    (a boolean, a float32, or a value whose dtype is unknown) as
     `same_option` compares it."""
 
+    if isinstance(dtype, str) and (dtype in _NAME_DTYPES or dtype.startswith(("<U", ">U", "|U", "<S", "|S"))):
+        return isinstance(value, str) and isinstance(option, str) and option_name(value) == option_name(option)
     if isinstance(dtype, str) and not isinstance(value, bool) and not isinstance(option, bool):
         x, y = _number(value), _number(option)
         if dtype.startswith(("int", "uint")):
@@ -412,8 +420,10 @@ def optimum_shown(item: Any, expect: tuple[str, Any, Any, tuple[str, ...] | None
       which variables it took as inputs, including through axes.
     The pin is judged on the record for its own variable only. The model must
     compute the chosen option for every instance the pin names (every instance
-    when it names none), without the variable as an input, in a case that runs
-    it as shipped, and the option must not be the default. This shows the
+    when it names none), at one of the variable's own periods (a monthly
+    variable read over a year is a sum, not a choice), without the variable
+    as an input, in a case that runs it as shipped, and the option must not be
+    the default. This shows the
     model choosing the non-default option, not which rule chose it: a
     convention that agrees in this case passes too, and so does a choice
     forced through an input upstream of the variable."""
@@ -432,6 +442,14 @@ def optimum_shown(item: Any, expect: tuple[str, Any, Any, tuple[str, ...] | None
         return f"the model's {variable} could not be read: {choice.get('error')}"
     if variable in choice["input_variables"]:
         return f"the case sets {variable} as an input (directly or through axes), so the model did not choose it"
+    definition, unit, size = (choice.get(key) for key in ("definition_period", "period_unit", "period_size"))
+    if not (isinstance(definition, str) and isinstance(unit, str) and isinstance(size, int)):
+        return f"the YAML runner did not record the period it read {variable} at"
+    if definition != "eternity" and (unit != definition or size != 1):
+        return (
+            f"the case reads {variable}, which is defined by {definition}, over {choice.get('period')}; core sums, "
+            f"divides or picks a period to get that value, so it isn't one choice: pin a case for one {definition}"
+        )
     overrides = case.get("parameters") if isinstance(case.get("parameters"), list) else []
     if overrides or case.get("reforms") or case.get("extensions"):
         changed = ", ".join(str(key) for key in overrides) or "a reform or extension"

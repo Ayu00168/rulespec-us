@@ -49,8 +49,9 @@ entries:
         basis: >-
           When gov.simulation.branch_to_determine_itemization is true, it
           compares the tax unit's federal income tax with and without
-          itemizing and takes the lower; on a tie it itemizes when itemized
-          deductions exceed the standard deduction.
+          itemizing and takes the lower. Liabilities within the formula's
+          floating-point tolerance count as a tie, and on a tie it itemizes
+          when itemized deductions exceed the standard deduction.
         cites_entry: false
     tests:
       - repo: PolicyEngine/policyengine-us

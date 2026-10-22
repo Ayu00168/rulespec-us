@@ -606,6 +606,30 @@ def test_axiom_consumers(tmp_path, consumers, fragment):
     assert (issues == []) if fragment is None else has(issues, fragment), issues
 
 
+def test_declared_input_screens_are_total_on_malformed_shapes(tmp_path):
+    # #1844 review round 4 (P2): an unhashable domain kind or declared entity
+    # crashed the declared-input screen. A deterministic sweep: every malformed
+    # domain field, and every malformed declaration, through a declared
+    # granting slot and a declared consumer.
+    ctx = make_repo(tmp_path)
+    shapes = ([], {}, None, 3, "", "x", True)
+    declared = [{"name": "itemizes", "entity": "TaxUnit", "dtype": "Boolean"}]
+    write_module(ctx, "us/statutes/26/55.yaml", "itemizes", inputs=declared)
+    axiom = {"input": "us:statutes/26/55#input.itemizes", "consumers": [{"input": "us:statutes/26/55#input.itemizes", "polarity": "same"}]}
+    for field in ("kind", "per"):
+        for shape in shapes:
+            value = entry(domain={"kind": "boolean", "per": "tax-unit", field: shape}, axiom=axiom)
+            issues = check(ctx, value)
+            assert isinstance(issues, list) and all(isinstance(issue, str) for issue in issues), (field, shape)
+            assert issues, (field, shape)  # the malformed domain itself is reported
+    for key in ("entity", "dtype"):
+        for shape in shapes:
+            write_module(ctx, "us/statutes/26/55.yaml", "itemizes", inputs=[{**declared[0], key: shape}])
+            issues = check(ctx, entry(axiom={"consumers": axiom["consumers"]}))
+            assert isinstance(issues, list) and all(isinstance(issue, str) for issue in issues), (key, shape)
+            assert has(issues, f"declares `itemizes` {'on' if key == 'entity' else 'as'} {shape}"), (key, shape, issues)
+
+
 def test_the_granting_slot_is_screened_against_its_declaration_too(tmp_path):
     ctx = make_repo(tmp_path)
     write_module(ctx, "us/statutes/26/63/e.yaml", "itemizes", inputs=[{"name": "itemizes", "entity": "Person", "dtype": "Boolean"}])
@@ -856,6 +880,25 @@ def test_verify_passes_and_reports_the_worklist():
     assert "worklist: us:itemized-deduction-election: no Axiom input slot in the module that grants it yet" in report
 
 
+@pytest.mark.parametrize(
+    ("source", "issue"),
+    [
+        (b"class tax_unit_itemizes(Variable):\n    pass\n", None),
+        (b"import x\n\nclass tax_unit_itemizes(x.Variable):\n    value_type = bool\n", None),
+        # #1844 review round 4 (P2): class-shaped text that defines nothing.
+        (b'DOC = """\nclass tax_unit_itemizes(Variable):\n    pass\n"""\n', "does not define `class tax_unit_itemizes` at module level"),
+        (b"# class tax_unit_itemizes(Variable):\nx = 1\n", "does not define `class tax_unit_itemizes` at module level"),
+        (b"def f():\n    class tax_unit_itemizes(Variable):\n        pass\n", "does not define `class tax_unit_itemizes` at module level"),
+        (b"class tax_unit_itemizes_other(Variable):\n    pass\n", "does not define `class tax_unit_itemizes` at module level"),
+        (b"class tax_unit_itemizes(Variable:\n", "does not parse as Python"),
+    ],
+)
+def test_verify_parses_the_class_definition(source, issue):
+    choices, net, corpus = verified_inputs(source=source)
+    issues, _ = hc.verify_choices(choices, fetch=net, matches=substring, resolve=corpus.get, on_default_branch=lambda r, c: True)
+    assert (issues == []) if issue is None else (len(issues) == 1 and issue in issues[0]), issues
+
+
 def test_verify_checks_the_implementation_defines_its_variable():
     # #1844 review round 3 (P2): the implementation file defines the variable
     # its optimum pin reads.
@@ -863,7 +906,7 @@ def test_verify_checks_the_implementation_defines_its_variable():
     issues, _ = hc.verify_choices(choices, fetch=net, matches=substring, resolve=corpus.get, on_default_branch=lambda r, c: True)
     assert issues == [
         "us:itemized-deduction-election (entries[0]).implementations[0]: policyengine_us/variables/tax_unit_itemizes.py "
-        "does not define `class tax_unit_itemizes(`."
+        "does not define `class tax_unit_itemizes` at module level."
     ]
     # A parameter file can't be checked that way: the report says so.
     choices, net, corpus = verified_inputs()

@@ -416,7 +416,7 @@ fails closed. The fixtures cover:
 
 `tests/test_pin_oracle_core.py` runs the oracle through the real
 policyengine-core YAML runner, with a minimal model. The cases are the
-reviews' counterexamples and the legitimate case next to each, 21 pins on 16
+reviews' counterexamples and the legitimate case next to each, 25 pins on 19
 cases. The `pinned-tests` job runs it in an environment of its own with
 policyengine-core 3.33.12; elsewhere it skips when policyengine-core isn't
 installed.
@@ -499,7 +499,7 @@ register's rules exactly.
 | `multi_year` | Optional, `true` only. The choice binds later years or carries amounts forward, and is optimized one year at a time for now. |
 | `optimization` | `structure`, how an optimum can be found: `two-way` (a boolean or a two-option enum), `finite` (a boolean or an enum), `piecewise-linear` (a share or an amount, exact at the endpoints and kinks) or `search`. It may add `candidates`, a description of a cheap candidate set. |
 | `axiom` | `input`: the input key of the choice's slot in the module that encodes the provision granting the choice, `<jurisdiction>:<module path>#input.<slot>`. `consumers`: other input slots that take the same choice, each with its `polarity`, `same` or `inverse` (true there means the other option). Consumers are only for a boolean choice: a mapping between other kinds of slot values isn't defined, so `check` refuses them rather than guess. A consumer may sit in the granting module, as a different slot. It may give either or both. `check` screens every slot: the module exists in this repository, the slot is not one of its rules or imports, and some formula in it reads the slot as a whole word. When the module declares the slot under `inputs:`, its entity and dtype must fit the domain: `per` is the declared entity (`TaxUnit` is `tax-unit`), and the dtype can hold the kind (`Boolean` or `Judgment` for a boolean, `Money` for an amount, `Rate`, `Decimal` or `Number` for a share, `Text`, `String` or `Integer` for an enum). A consumer is not `input` itself and is listed once. Axiom modules carry no marker, because they are encoder output; this field is the only link from Axiom. |
-| `implementations` | Code outside RuleSpec that models the choice: `repo`, `commit`, `path`, `models`, `cites_entry` and `variable`, the model variable that holds the choice. `variable` is required when the implementation optimizes, and `verify` checks that a Python `path` defines `class <variable>(`. `models` is one of:<br>• `optimized`: the exact optimum. This includes an implementation that evaluates the structure's whole exact set: both branches, every option, or every endpoint and listed kink of a piecewise-linear choice.<br>• `candidate-min`: the best of a cheap subset of that set, which may miss the optimum.<br>• `convention`: a fixed, documented rule.<br>• `input`: the user supplies it, with the default.<br>• `absent`: not modeled.<br>So the worklist's "uses candidate-min where a … comparison finds the exact optimum" always names a real gap. An implementation that optimizes states its own `objective`, which may be narrower than the entry's, such as `federal-income-tax` over the `tax-unit`. Its measures are `net-income`, `total-tax`, `federal-income-tax` and `state-income-tax`. `optimized` needs a structure other than `search`, and `candidate-min` needs `candidates`. `basis` may say how the code decides. |
+| `implementations` | Code outside RuleSpec that models the choice: `repo`, `commit`, `path`, `models`, `cites_entry` and `variable`, the model variable that holds the choice. `variable` is required when the implementation optimizes, and `verify` parses a Python `path` and checks that it defines `class <variable>` at module level (a class in a docstring, a comment or a function body doesn't count). `models` is one of:<br>• `optimized`: the exact optimum. This includes an implementation that evaluates the structure's whole exact set: both branches, every option, or every endpoint and listed kink of a piecewise-linear choice.<br>• `candidate-min`: the best of a cheap subset of that set, which may miss the optimum.<br>• `convention`: a fixed, documented rule.<br>• `input`: the user supplies it, with the default.<br>• `absent`: not modeled.<br>So the worklist's "uses candidate-min where a … comparison finds the exact optimum" always names a real gap. An implementation that optimizes states its own `objective`, which may be narrower than the entry's, such as `federal-income-tax` over the `tax-unit`. Its measures are `net-income`, `total-tax`, `federal-income-tax` and `state-income-tax`. `optimized` needs a structure other than `search`, and `candidate-min` needs `candidates`. `basis` may say how the code decides. |
 | `proposed` | Unmerged changes: `repo`, `pr`, `path` and `models`, listed by verify and never counted. |
 | `tests` | Tests that pin a consumer: `pins` is `[default]` or `[optimum]`. Each implementation that models the choice is pinned in its repository at its own commit: one that optimizes by an `optimum` pin on its `variable`, so two optimizing implementations need a pin each, and a `convention` or `input` one by a `default` pin. An `absent` one needs none. An `optimum` pin is another repository's YAML test case. It names the decision `variable`, which the runner reads from the case's own simulation (the case need not assert it), and the option the model `chooses`, which must be an option of the domain and not the default. Its optional `instances` lists the case's entity instance ids that must compute that option (for a case where only some tax units or people choose it); without it, every instance must. |
 | `source_conflict` | Optional: the global id of a register entry this choice meets, such as a form that forbids an allocation a regulation allows. The conflict entry settles which options the law grants; this entry records which one models assume. |
@@ -556,8 +556,9 @@ non-vacuous, or it is `vacuous`. The runner hands the oracle each optimum
 pin's decision variable; two entries can pin one case on different
 variables. After the case runs, the oracle reads each of those variables from
 the case's own simulation at the case's period (`simulation.calculate`), with
-the id of the entity instance each value belongs to and the dtype the model
-stored it in, and the variables the simulation took as inputs
+the id of the entity instance each value belongs to, the dtype the model
+stored it in, the variable's definition period and the unit and size of the
+period it was read at, and the variables the simulation took as inputs
 (`simulation.input_variables`, which counts direct inputs and axes). It also
 records whether the case changes the model: a top-level dotted input key (a
 parameter override, as the YAML runner reads it), a reform or an extension.
@@ -567,6 +568,12 @@ requires:
 - the case runs the model as shipped: no parameter override, reform or
   extension;
 - the decision variable is not among the simulation's inputs;
+- the variable was read at one of its own periods: a period of its definition
+  period's unit and of size 1, or any period for a variable defined for
+  eternity. Core otherwise sums a monthly variable over a year (or takes its
+  last month, for a stock) and divides a yearly one into months, and twelve
+  monthly defaults can sum to another option. So a monthly choice needs a
+  case for one month;
 - the model computed at least one value, and the value at every instance the
   pin's `instances` names (at every instance, if it names none) is the chosen
   option;
@@ -578,26 +585,23 @@ implicit tolerance, an entity instance named like the variable, or another
 entry's pin on the same case can't stand in for the choice.
 
 Computed values compare as the model stored them:
+- An enum or string value compares by name and never as a number:
+  `head-of-household` matches PolicyEngine-US's `HEAD_OF_HOUSEHOLD`, and an
+  enum member named `16777219` is not one named `16777220`.
 - A boolean must be a boolean: 1 is not true.
-- An integer compares exactly, and a float64 as a float64.
+- An integer, signed or unsigned, compares exactly, and a float64 as a float64.
 - A float32, and a number whose dtype the oracle couldn't record, compare as
   float32 numbers.
-- An enum option compares by name, so `head-of-household` matches
-  PolicyEngine-US's `HEAD_OF_HOUSEHOLD`.
 
 Whether the chosen option is the default is judged before the case runs, as
 float32 numbers whatever the dtype: `16777217` and `16777216` are one option,
 so neither shows the other, and `check` refuses such a `chooses` too. That
 fails closed.
 
-Two more limits, both documented here rather than checked:
-- A choice forced through an input upstream of the variable (an input the
-  variable's formula reads, which makes it compute the option whatever the
-  household's circumstances) is not seen. The variable is not itself an
-  input, so the pin passes.
-- The oracle reads the variable at the case's period, as core's `calculate`
-  does. A variable defined by month in a case for a year is read as its sum
-  over the year, so such a pin fails closed; give it a case for the month.
+One more limit, documented here rather than checked: a choice forced through
+an input upstream of the variable (an input the variable's formula reads,
+which makes it compute the option whatever the household's circumstances) is
+not seen. The variable is not itself an input, so the pin passes.
 
 So each `optimum` pin shows the model choosing something other than the
 default. It does not show which rule chose it: a convention that picks the

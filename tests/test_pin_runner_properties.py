@@ -38,11 +38,14 @@ Invariants, for every oracle record:
      variable, could be read, and is not among the simulation's inputs (other
      variables' records, which other pins on the case read, never count);
    - the case changes no parameter and applies no reform or extension;
+   - the value was read at one of the variable's own periods (any period for
+     an eternity variable): a period of the definition's unit and size 1;
    - the model computed at least one value, and every value at the instances
      the pin names (every value when it names none, and none at an instance the
-     record lacks) is the chosen option, compared at the stored dtype:
-     integers exactly, float64 as float64, and otherwise booleans by type,
-     numbers as float32 and enum options by name.
+     record lacks) is the chosen option, compared at the stored dtype: enum
+     and string values by name, never as numbers; integers exactly; float64
+     as float64; and otherwise booleans by type, numbers as float32 and
+     options by name.
 """
 
 from __future__ import annotations
@@ -377,6 +380,8 @@ def _ref_same(a, b):
 
 
 def _ref_same_stored(value, option, dtype):
+    if dtype in ("enum", "object", "<U5"):
+        return isinstance(value, str) and isinstance(option, str) and value.upper().replace("-", "_") == option.upper().replace("-", "_")
     if isinstance(dtype, str) and not isinstance(value, bool) and not isinstance(option, bool):
         x, y = _ref_number(value), _ref_number(option)
         if dtype in ("int16", "int32", "int64", "uint8"):
@@ -386,9 +391,9 @@ def _ref_same_stored(value, option, dtype):
     return _ref_same(value, option)
 
 
-OPTION = st.sampled_from([True, False, "a", "b", "A", "0.5", "0.50", "1", 1, 0.5, "16777216", "16777217", "0.1000000001"])
+OPTION = st.sampled_from([True, False, "a", "b", "A", "0.5", "0.50", "1", 1, 0.5, "16777216", "16777217", "0.1000000001", "16777219"])
 COMPUTED = st.lists(
-    st.sampled_from([True, False, 0, 1, 0.5, 0.1, 0.30000001192092896, "a", "A", "B", 16777216.0, 16777217]), max_size=3
+    st.sampled_from([True, False, 0, 1, 3, 0.5, 0.1, 0.30000001192092896, "a", "A", "B", "16777220", 16777216.0, 16777217]), max_size=3
 )
 IDS = st.lists(st.sampled_from(["u0", "u1", "u2"]), max_size=3, unique=True)
 RECORD = st.one_of(
@@ -397,7 +402,10 @@ RECORD = st.one_of(
         "variable": st.sampled_from(["v", "w"]),
         "computed": COMPUTED,
         "ids": IDS,
-        "dtype": st.sampled_from([None, "bool", "float32", "float64", "int64", "enum"]),
+        "dtype": st.sampled_from([None, "bool", "float32", "float64", "int64", "uint8", "enum", "object", "<U5"]),
+        "definition_period": st.sampled_from(["year", "month", "eternity", None]),
+        "period_unit": st.sampled_from(["year", "month"]),
+        "period_size": st.sampled_from([1, 1, 2]),
         "input_variables": st.lists(st.sampled_from(["v", "w", "age"]), max_size=2),
     }),
 )
@@ -439,6 +447,9 @@ def test_optimum_shown_matches_a_reference(item, chooses, default, instances):
         and choice.get("variable") == "v"
         and "error" not in choice
         and "v" not in choice.get("input_variables", [])
+        and isinstance(choice.get("definition_period"), str)
+        and (choice["definition_period"] == "eternity"
+             or (choice.get("period_unit") == choice["definition_period"] and choice.get("period_size") == 1))
         and not case.get("parameters")
         and not case.get("reforms")
         and not case.get("extensions")

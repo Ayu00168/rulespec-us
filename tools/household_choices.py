@@ -54,6 +54,7 @@ See tools/README.md ("Household choices").
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import json
 import os
@@ -377,9 +378,11 @@ def axiom_input_issues(value: Any, *, label: str, ctx: sc.RepoContext, domain: A
         return [f"{label}: no formula in {relative} reads `{slot}`."]
     declared = _declared_inputs(ctx.root / relative).get(slot)
     issues: list[str] = []
+    # `domain` is None unless the entry's domain is valid (check_entry reports
+    # an invalid one), so its per and kind are known strings here.
     if declared is not None and isinstance(domain, dict):
         entity, dtype = declared.get("entity"), declared.get("dtype")
-        if "entity" in declared and RULESPEC_ENTITIES.get(entity) != domain.get("per"):
+        if "entity" in declared and (not isinstance(entity, str) or RULESPEC_ENTITIES.get(entity) != domain.get("per")):
             issues.append(f"{label}: {relative} declares `{slot}` on {entity}, not the domain's {domain.get('per')}.")
         if "dtype" in declared and dtype not in KIND_DTYPES.get(domain.get("kind"), ()):
             issues.append(f"{label}: {relative} declares `{slot}` as {dtype}, which can't hold a {domain.get('kind')} choice.")
@@ -589,9 +592,13 @@ def check_entry(
             if "input" not in axiom and "consumers" not in axiom:
                 issues.append(f"{label}.axiom needs input, consumers or both.")
             if "input" in axiom:
-                issues.extend(axiom_input_issues(axiom.get("input"), label=f"{label}.axiom.input", ctx=ctx, domain=domain))
+                issues.extend(
+                    axiom_input_issues(axiom.get("input"), label=f"{label}.axiom.input", ctx=ctx, domain=domain if domain_ok else None)
+                )
             if "consumers" in axiom:
-                issues.extend(_consumer_issues(axiom, label=f"{label}.axiom.consumers", ctx=ctx, domain=domain))
+                issues.extend(
+                    _consumer_issues(axiom, label=f"{label}.axiom.consumers", ctx=ctx, domain=domain if domain_ok else None)
+                )
     if "source_conflict" in entry:
         value = entry["source_conflict"]
         if not (isinstance(value, str) and value in conflict_ids):
@@ -906,6 +913,18 @@ def worklist(entry: Mapping[str, Any]) -> list[str]:
 # verify (network)
 
 
+def defines_class(source: str, name: str) -> bool | None:
+    """Does the Python source define `class <name>` at module level, as a
+    model variable is defined? A class in a docstring, a comment or a function
+    body doesn't count. None when the source doesn't parse."""
+
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    return any(isinstance(node, ast.ClassDef) and node.name == name for node in tree.body)
+
+
 def cites(source: str, gid: str) -> bool:
     """Does the file carry `# Household choice <gid>`, with nothing more of
     an id after it (us:a never matches a cite of us:a-b)?"""
@@ -958,8 +977,11 @@ def verify_choices(
                 report.append(f"uncited: {i_label} ({item['repo']}:{item['path']}) does not cite {gid} yet")
             variable = item.get("variable")
             if isinstance(variable, str) and item["path"].endswith(".py"):
-                if not re.search(rf"^class\s+{re.escape(variable)}\s*\(", source, re.MULTILINE):
-                    issues.append(f"{i_label}: {item['path']} does not define `class {variable}(`.")
+                defined = defines_class(source, variable)
+                if defined is None:
+                    issues.append(f"{i_label}: {item['path']} does not parse as Python, so its `class {variable}` can't be found.")
+                elif not defined:
+                    issues.append(f"{i_label}: {item['path']} does not define `class {variable}` at module level.")
             elif isinstance(variable, str):
                 report.append(f"unchecked: {i_label} names {variable}, but {item['path']} is not a Python file")
         for r_index, item in enumerate(entry.get("proposed") or []):

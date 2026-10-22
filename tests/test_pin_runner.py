@@ -422,8 +422,8 @@ def record(*computed, variable="tax_unit_itemizes", inputs=("age", "employment_i
     """One decision variable's record, as the oracle writes it."""
 
     ids = list(ids) if ids is not None else [f"unit_{index}" for index in range(len(computed))]
-    return {"variable": variable, "computed": list(computed), "ids": ids, "dtype": dtype, "input_variables": list(inputs),
-            **extra}
+    return {"variable": variable, "computed": list(computed), "ids": ids, "dtype": dtype, "definition_period": "year",
+            "period": "2026", "period_unit": "year", "period_size": 1, "input_variables": list(inputs), **extra}
 
 
 def chose(*computed, inputs=("age", "employment_income"), **case):
@@ -467,6 +467,30 @@ def chose(*computed, inputs=("age", "employment_income"), **case):
 )
 def test_optimum_shown(item, reason):
     found = runner.optimum_shown(item, EXPECT)
+    assert (found is None) if reason is None else (found is not None and reason in found), found
+
+
+@pytest.mark.parametrize(
+    ("periods", "reason"),
+    [
+        ({}, None),
+        ({"definition_period": "eternity", "period": "2026", "period_unit": "year", "period_size": 1}, None),
+        ({"definition_period": "eternity", "period": "2026-01", "period_unit": "month", "period_size": 1}, None),
+        ({"definition_period": "month", "period": "2026-01", "period_unit": "month", "period_size": 1}, None),
+        # #1844 review round 4 (P1): core sums a monthly variable over a year (or
+        # picks its last month), and divides a yearly one into months, so the
+        # value isn't one choice: a sum of defaults can look like an optimum.
+        ({"definition_period": "month"}, "defined by month, over 2026"),
+        ({"definition_period": "year", "period": "2026-01", "period_unit": "month"}, "defined by year, over 2026-01"),
+        ({"period": "year:2026:2", "period_size": 2}, "defined by year, over year:2026:2"),
+        ({"definition_period": None}, "did not record the period"),
+        ({"period_unit": 3}, "did not record the period"),
+        ({"period_size": "1"}, "did not record the period"),
+    ],
+)
+def test_an_optimum_pin_reads_one_of_the_variables_own_periods(periods, reason):
+    choice = {**record(True), **periods}
+    found = runner.optimum_shown({"case": AS_SHIPPED, "choices": {"tax_unit_itemizes": choice}}, EXPECT)
     assert (found is None) if reason is None else (found is not None and reason in found), found
 
 
@@ -523,6 +547,11 @@ def test_numbers_and_enums_compare_as_the_model_stores_them(computed, chooses, d
         (3, "3", "int64", True), (3, "3.0", "int64", True), (3, "3.5", "int64", False), (3, "x", "int64", False),
         (0.1, "0.1", "float64", True), (0.1, "0.1000000001", "float64", False),
         (0.1, "0.1000000001", "float32", True), ("SEPARATE", "separate", "enum", True),
+        # Round 4 (P1): an enum or string value is a name, however numeric.
+        ("16777220", "16777219", "enum", False), ("16777220", "16777220", "enum", True), ("0", 0, "enum", False),
+        ("16777220", "16777219", "object", False), ("a", "A", "object", True), ("12", "12.0", "<U2", False),
+        # An unsigned integer compares exactly too.
+        (3, "3", "uint8", True), (3, "3.5", "uint8", False), (16777220, "16777219", "uint32", False),
     ],
 )
 def test_same_stored(value, option, dtype, same):
@@ -1228,6 +1257,37 @@ FIXTURE_CORE = textwrap.dedent(
             self.ids = ids
 
 
+    class Period(str):
+        # core's Period, as far as the oracle reads it: a year or a month.
+        @property
+        def unit(self):
+            return "month" if len(self.split("-")) == 2 else "year"
+
+        @property
+        def size(self):
+            return 1
+
+
+    class periods:
+        # The simulation's own package's periods module, as core has one.
+        @staticmethod
+        def period(raw):
+            return Period(str(raw))
+
+
+    class Definition:
+        def __init__(self, definition_period):
+            self.definition_period = definition_period
+
+
+    class TaxBenefitSystem:
+        def __init__(self, definitions):
+            self.definitions = definitions
+
+        def get_variable(self, name, check_existence=False):
+            return Definition(self.definitions.get(name, "year"))
+
+
     class Simulation:
         # policyengine-core's simulation, as the oracle reads it: inputs
         # (direct, or named by axes) and calculate(). Values come from the
@@ -1239,6 +1299,8 @@ FIXTURE_CORE = textwrap.dedent(
             self.input_variables = [key for key in case_input if "." not in key and key != "axes"] + axes
             self.computed = test.get("computed") or {}
             self.ids = test.get("ids") or {}
+            self.default_calculation_period = "2024"
+            self.tax_benefit_system = TaxBenefitSystem(test.get("definition_periods") or {})
 
         def calculate(self, variable, period):
             values = self.computed[variable]
@@ -1379,6 +1441,18 @@ CHOICE_CASES = textwrap.dedent(
       input: {income: 1}
       computed: {itemizes: [true, false]}
       ids: {itemizes: [first, second]}
+      output: {status: ok}
+    - name: A monthly choice read over a year
+      period: 2024
+      input: {income: 1}
+      computed: {itemizes: [true]}
+      definition_periods: {itemizes: month}
+      output: {status: ok}
+    - name: A monthly choice read over a month
+      period: 2024-01
+      input: {income: 1}
+      computed: {itemizes: [true]}
+      definition_periods: {itemizes: month}
       output: {status: ok}
     """
 )
@@ -1911,3 +1985,11 @@ def test_an_optimum_pin_passes_only_when_its_case_shows_the_model_choosing(tmp_p
     assert by_label["choices.entries[0].tests[1]"] == ("passed", "")
     assert by_label["choices.entries[1].tests[1]"][0] == "vacuous"
     assert "computed itemizes = False for" not in by_label["choices.entries[1].tests[1]"][1]
+    # Round 4 (P1): a monthly variable read over a year isn't one choice.
+    yearly = {**tests[0], "name": "A monthly choice read over a year"}
+    monthly = {**tests[0], "name": "A monthly choice read over a month"}
+    report = runner.run_register(register(), settings(tmp_path, base), choices(yearly, monthly))
+    by_label = {pin["label"]: (pin["outcome"], pin.get("detail", "")) for pin in report["commits"][0]["pins"]}
+    assert by_label["choices.entries[0].tests[0]"][0] == "vacuous"
+    assert "defined by month, over 2024" in by_label["choices.entries[0].tests[0]"][1]
+    assert by_label["choices.entries[0].tests[1]"] == ("passed", "")
