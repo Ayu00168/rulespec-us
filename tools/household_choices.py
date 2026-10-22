@@ -432,12 +432,19 @@ def _cites_kind(entry: Mapping[str, Any], kinds: tuple[str, ...]) -> bool:
 
 
 def _consumer_issues(axiom: Mapping[str, Any], *, label: str, ctx: sc.RepoContext, domain: Any) -> list[str]:
-    """`axiom.consumers`: input slots in other modules that take the same
-    choice, each with its polarity (`inverse`: true means the other option,
-    so a boolean only)."""
+    """`axiom.consumers`: input slots that take the same choice, each with its
+    polarity (`same`, or `inverse`: true means the other option). Booleans
+    only: a consumer of another kind would need a mapping between the slots'
+    values, which isn't defined, so it is refused rather than guessed. A
+    consumer may sit in the granting module, as a different slot."""
 
     issues: list[str] = []
     consumers = axiom.get("consumers")
+    if isinstance(domain, dict) and domain.get("kind") != "boolean":
+        issues.append(
+            f"{label} is only for a boolean choice: no mapping between other kinds of slot values is defined, so "
+            "list none."
+        )
     if not sc._nonempty_list(consumers, label=label, issues=issues):
         return issues
     seen: set[str] = set()
@@ -453,11 +460,8 @@ def _consumer_issues(axiom: Mapping[str, Any], *, label: str, ctx: sc.RepoContex
             if slot in seen:
                 issues.append(f"{c_label}.input repeats a consumer.")
             seen.add(slot)
-        polarity = item.get("polarity")
-        if polarity not in POLARITIES:
+        if item.get("polarity") not in POLARITIES:
             issues.append(f"{c_label}.polarity must be same or inverse.")
-        elif polarity == "inverse" and not (isinstance(domain, dict) and domain.get("kind") == "boolean"):
-            issues.append(f"{c_label}.polarity inverse needs a boolean domain.")
     return issues
 
 
@@ -890,7 +894,10 @@ def worklist(entry: Mapping[str, Any]) -> list[str]:
         ]
         line = "no Axiom input slot in the module that grants it yet"
         if consumers:
-            line += f"; other modules take it as an input, so a caller sets them consistently: {', '.join(consumers)}"
+            line += (
+                "; other slots take it as an input, so a caller sets them consistently (this lists them; it doesn't "
+                f"check that their encodings agree): {', '.join(consumers)}"
+            )
         items.append(line)
     return items
 

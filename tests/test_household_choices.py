@@ -613,15 +613,28 @@ def test_the_granting_slot_is_screened_against_its_declaration_too(tmp_path):
     assert has(issues, "declares `itemizes` on Person, not the domain's tax-unit"), issues
 
 
-def test_an_inverse_consumer_needs_a_boolean_and_is_not_the_input(tmp_path):
+@pytest.mark.parametrize("polarity", ["same", "inverse"])
+def test_consumers_are_only_for_a_boolean_choice(tmp_path, polarity):
+    # Eng hub condition 3: no mapping between other kinds of slot values is
+    # defined, so a non-boolean choice lists no consumers, whatever the polarity.
     ctx = make_repo(tmp_path)
     write_module(ctx, "us/statutes/26/55.yaml", "share_input")
     share = entry(domain={"kind": "share", "per": "tax-unit", "bounds": ["0", "1"]}, default={"value": "0", "basis": "convention", "note": "n"},
-                  axiom={"consumers": [{"input": "us:statutes/26/55#input.share_input", "polarity": "inverse"}]})
-    assert has(check(ctx, share), "polarity inverse needs a boolean domain")
+                  axiom={"consumers": [{"input": "us:statutes/26/55#input.share_input", "polarity": polarity}]})
+    assert has(check(ctx, share), "axiom.consumers is only for a boolean choice")
+    enum = entry(domain={"kind": "enum", "per": "tax-unit", "options": ["a", "b"]}, default={"value": "a", "basis": "convention", "note": "n"},
+                 axiom={"consumers": [{"input": "us:statutes/26/55#input.share_input", "polarity": polarity}]})
+    assert has(check(ctx, enum), "axiom.consumers is only for a boolean choice")
+
+
+def test_a_consumer_is_not_the_input_but_may_share_its_module(tmp_path):
+    ctx = make_repo(tmp_path)
     slot = f"us:statutes/26/152/c#input.{SLOT}"
     same = child_entry(axiom={"input": slot, "consumers": [{"input": slot, "polarity": "same"}]})
     assert has(check(ctx, same), "is axiom.input itself")
+    # Another slot of the granting module is a consumer like any other.
+    other = child_entry(axiom={"input": slot, "consumers": [{"input": "us:statutes/26/152/c#input.other_input", "polarity": "inverse"}]})
+    assert check(ctx, other) == []
 
 
 def test_source_conflict_names_a_register_entry(tmp_path):
@@ -766,8 +779,9 @@ def test_worklist():
     consumers = [{"input": "us:statutes/26/55#input.itemizes", "polarity": "same"},
                  {"input": "us:statutes/26/170/p#input.does_not_itemize", "polarity": "inverse"}]
     assert hc.worklist(entry(axiom={"consumers": consumers}))[-1] == (
-        "no Axiom input slot in the module that grants it yet; other modules take it as an input, so a caller sets "
-        "them consistently: us:statutes/26/55#input.itemizes (same), us:statutes/26/170/p#input.does_not_itemize (inverse)"
+        "no Axiom input slot in the module that grants it yet; other slots take it as an input, so a caller sets "
+        "them consistently (this lists them; it doesn't check that their encodings agree): "
+        "us:statutes/26/55#input.itemizes (same), us:statutes/26/170/p#input.does_not_itemize (inverse)"
     )
     assert not any("Axiom" in line for line in hc.worklist(entry(axiom={"input": "x", "consumers": consumers})))
     impl = itemize["implementations"][0]
