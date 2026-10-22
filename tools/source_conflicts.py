@@ -310,6 +310,8 @@ def load_register(path: Path) -> Any:
         raise RegisterError(f"{path} must be a regular file")
     try:
         return yaml.load(path.read_text(encoding="utf-8"), Loader=_NoAliasLoader)  # a SafeLoader subclass
+    except OSError as exc:
+        raise RegisterError(f"{path} cannot be read: {exc}") from exc
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
         raise RegisterError(f"{path} is not valid UTF-8 YAML without anchors: {exc}") from exc
     except RecursionError:

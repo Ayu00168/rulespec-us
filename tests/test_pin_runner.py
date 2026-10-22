@@ -422,6 +422,17 @@ def test_collect_pins_reads_household_choices():
         ({"input_keys": [], "output": {"tax_unit_itemizes": [True, False]}}, "gives tax_unit_itemizes = False"),
         ({"input_keys": [], "output": {"tax_unit_itemizes": 1}}, "gives tax_unit_itemizes = 1"),  # 1 is not true
         ({"input_keys": [], "output": None}, "does not state tax_unit_itemizes"),
+        # #1844 review: a case that changes the model doesn't show it choosing as shipped.
+        ({"input_keys": ["gov.simulation.branch_to_determine_itemization"], "output": {"tax_unit_itemizes": True}},
+         "changes the model (gov.simulation.branch_to_determine_itemization)"),
+        ({"input_keys": [], "reforms": True, "output": {"tax_unit_itemizes": True}}, "changes the model (a reform or extension)"),
+        ({"input_keys": [], "extensions": True, "output": {"tax_unit_itemizes": True}}, "changes the model (a reform or extension)"),
+        # #1844 review (P1): a margin of 1 passes false as true, so the pin shows nothing.
+        ({"input_keys": [], "absolute_error_margin": 1, "output": {"tax_unit_itemizes": True}}, "error margin (1) would also pass"),
+        ({"input_keys": [], "absolute_error_margin": 0.99, "output": {"tax_unit_itemizes": True}}, None),
+        ({"input_keys": [], "relative_error_margin": 1, "output": {"tax_unit_itemizes": True}}, "error margin (1) would also pass"),
+        ({"input_keys": [], "relative_error_margin": 1, "absolute_error_margin": 0.01, "output": {"tax_unit_itemizes": True}}, None),
+        ({"input_keys": [], "absolute_error_margin": "wide", "output": {"tax_unit_itemizes": True}}, "error margin (Infinity)"),
         (None, "did not expose the case's input and output"),
         ({"output": {"tax_unit_itemizes": True}}, "did not expose the case's input and output"),
     ],
@@ -429,6 +440,17 @@ def test_collect_pins_reads_household_choices():
 def test_optimum_shown(case, reason):
     found = runner.optimum_shown(case, EXPECT)
     assert (found is None) if reason is None else (found is not None and reason in found), found
+
+
+@pytest.mark.parametrize(
+    ("margins", "vacuous"),
+    [({"absolute_error_margin": 0.25}, True), ({"absolute_error_margin": 0.2}, False),
+     ({"relative_error_margin": 0.5}, True), ({"relative_error_margin": 0.4}, False), ({}, False)],
+)
+def test_a_share_margin_must_be_narrower_than_the_gap_to_the_default(margins, vacuous):
+    # Chosen 0.5, default 0.25: the gap is 0.25, and a relative margin scales with 0.5.
+    case = {"input_keys": [], "output": {"share": 0.5}, **margins}
+    assert (runner.optimum_shown(case, ("share", "0.5", "0.25")) is not None) is vacuous
 
 
 def test_an_optimum_that_is_the_default_shows_nothing():
@@ -443,6 +465,8 @@ def test_an_optimum_that_is_the_default_shows_nothing():
         (True, True, True), (True, 1, False), (False, 0, False), ("a", "a", True), ("a", "b", False),
         ("0.5", 0.5, True), ("0.5", "0.50", True), (1, 1.0, True), ("1", "1.5", False), ("inf", float("inf"), False),
         ("true", True, False), (None, None, False),
+        # #1844 review (P2): an enum option matches the model's name for it.
+        ("separate", "SEPARATE", True), ("head-of-household", "HEAD_OF_HOUSEHOLD", True), ("separate", "JOINT", False),
     ],
 )
 def test_same_option(a, b, same):
@@ -1165,6 +1189,13 @@ CHOICE_CASES = textwrap.dedent(
     - name: Silent on the choice
       input: {income: 1}
       output: {status: ok}
+    - name: Chooses within a wide margin
+      absolute_error_margin: 1
+      input: {income: 1}
+      output: {status: ok, itemizes: true}
+    - name: Chooses under a parameter override
+      input: {gov.itemizing.compare_tax: false, income: 1}
+      output: {status: ok, itemizes: true}
     """
 )
 
@@ -1647,7 +1678,8 @@ def test_an_optimum_pin_passes_only_when_its_case_shows_the_model_choosing(tmp_p
     # choice, of an option other than the default.
     base, commits = fixtures
     monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-yaml", ("fixture_core.cli", ()))
-    names = ("Chooses to itemize", "Told to itemize", "Does not itemize", "Silent on the choice")
+    names = ("Chooses to itemize", "Told to itemize", "Does not itemize", "Silent on the choice",
+             "Chooses within a wide margin", "Chooses under a parameter override")
     tests = [
         {"repo": "PolicyEngine/fixture-yaml", "commit": commits["yaml"], "path": "tests/policy/choices.yaml", "name": name,
          "pins": ["optimum"], "variable": "itemizes", "chooses": True}
@@ -1659,11 +1691,15 @@ def test_an_optimum_pin_passes_only_when_its_case_shows_the_model_choosing(tmp_p
         "tests/policy/choices.yaml::Told to itemize": "vacuous",
         "tests/policy/choices.yaml::Does not itemize": "vacuous",
         "tests/policy/choices.yaml::Silent on the choice": "vacuous",
+        "tests/policy/choices.yaml::Chooses within a wide margin": "vacuous",
+        "tests/policy/choices.yaml::Chooses under a parameter override": "vacuous",
     }
     details = {pin["id"].split("::")[1]: pin.get("detail", "") for pin in report["commits"][0]["pins"]}
     assert "sets itemizes as an input" in details["Told to itemize"]
     assert "gives itemizes = False" in details["Does not itemize"]
     assert "does not state itemizes" in details["Silent on the choice"]
+    assert "error margin (1) would also pass" in details["Chooses within a wide margin"]
+    assert "changes the model (gov.itemizing.compare_tax)" in details["Chooses under a parameter override"]
     # The YAML run itself passed: vacuity is the runner's finding, not pytest's.
     assert report["commits"][0]["pytest_exit"] == 0
     # A pass is cached for its expectation only.

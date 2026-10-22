@@ -10,8 +10,9 @@ because a case's name is set only when it runs. A report belongs to the item
 `pytest_runtest_protocol` is running when it arrives. tools/pin_runner.py classifies the record; nothing here
 decides whether a pin passed. Items the register does not pin are dropped
 after the repository's own selection has run, so only pinned tests execute.
-For a pinned YAML case it also records the case's own input keys and stated
-output (`case`), from which the runner checks a household choice's optimum.
+For a pinned YAML case it also records the case's own input keys, stated
+output, reforms, extensions and error margins (`case`), from which the runner
+checks a household choice's optimum.
 
 Environment (set by the runner):
 - AXIOM_PIN_ORACLE_OUT: where to write the JSON record.
@@ -127,7 +128,16 @@ class _Oracle:
         collected = {"index": self.index[id(item)], "nodeid": item.nodeid, "path": path, "name": name}
         case = getattr(item, "test", None)
         if isinstance(case, dict) and not isinstance(item, pytest.Function) and (path, name) in self.wanted:
-            collected["case"] = {"input_keys": _input_keys(case.get("input")), "output": _jsonable(case.get("output"))}
+            collected["case"] = {
+                "input_keys": _input_keys(case.get("input")),
+                "output": _jsonable(case.get("output")),
+                # What else decides whether the case shows the model choosing:
+                # a reform or extension, and the error margins it allows.
+                "reforms": bool(case.get("reforms")),
+                "extensions": bool(case.get("extensions")),
+                "absolute_error_margin": _jsonable(case.get("absolute_error_margin")),
+                "relative_error_margin": _jsonable(case.get("relative_error_margin")),
+            }
         self.record["collected"].append(collected)
 
     @pytest.hookimpl

@@ -783,3 +783,94 @@ def test_aggregate_cli_writes_the_same_bytes_twice(tmp_path, capsys):
         outputs.append(out.read_bytes())
     assert outputs[0] == outputs[1]
     assert json.loads(outputs[0])["entries"][0]["worklist"]
+
+
+# ---------------------------------------------------------------------------
+# #1844 review: guards no test caught
+
+
+def test_agency_defaults_may_rest_on_practice_or_rulemaking(tmp_path):
+    for kind in ("agency-practice", "rulemaking"):
+        pending = [{"citation": "Agency letter", "kind": kind, "url": "https://x.example", "excerpt": "e",
+                    "snapshot": {"repo": PE, "commit": COMMIT, "path": "s.html", "sha256": "b" * 64}}]
+        value = entry(texts=[], pending_texts=pending, default={"value": False, "basis": "agency"})
+        assert not has(check(make_repo(tmp_path), value), "must cite a text of kind"), kind
+
+
+def test_a_state_agency_entry_proposes_and_pins_no_optimum(tmp_path):
+    agency = {k: v for k, v in entry(actor="state-agency").items() if k not in ("optimization", "implementations")}
+    agency["proposed"] = [{"repo": PE, "pr": f"https://github.com/{PE}/pull/1", "path": "x.py", "models": "optimized"}]
+    issues = check(make_repo(tmp_path), agency)
+    assert has(issues, "proposed[0].models must be one of convention, input, absent: the State agency decides")
+    assert has(issues, "tests[0] pins optimum, but the State agency decides")
+
+
+def test_an_unreadable_sibling_file_is_an_issue_not_a_crash(tmp_path):
+    ctx = make_repo(tmp_path, register={"version": 1, "entries": []})
+    register = tmp_path / sc.REGISTER_FILENAME
+    register.chmod(0)
+    try:
+        try:
+            register.read_bytes()
+            pytest.skip("this user can read a mode-000 file (root?)")
+        except PermissionError:
+            pass
+        issues = check(ctx, entry())
+        assert has(issues, "cannot read known-source-conflicts.yaml to check source_conflict links")
+        assert has(issues, "cannot read known-source-conflicts.yaml to check that no global id is in both files")
+    finally:
+        register.chmod(0o644)
+
+
+def test_an_unparseable_or_too_deep_module_is_an_issue(tmp_path):
+    ctx = make_repo(tmp_path)
+    module = tmp_path / "us" / "statutes" / "26" / "152" / "c.yaml"
+    for text in ("rules: [", "rules: " + "[" * 20000 + "]" * 20000):
+        module.write_text(text)
+        assert has(check(ctx, child_entry()), "us/statutes/26/152/c.yaml is not readable YAML")
+
+
+def test_coupled_with_repeats_an_entry(tmp_path):
+    a = entry(domain={"kind": "boolean", "per": "tax-unit",
+                      "coupled_with": ["us:qualifying-child-claim-by-non-parent", "us:qualifying-child-claim-by-non-parent"]})
+    b = child_entry(domain={"kind": "boolean", "per": "person", "coupled_with": ["us:itemized-deduction-election"]})
+    assert has(check(make_repo(tmp_path), a, b), "domain.coupled_with repeats an entry")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [("full_optimization",), ("default", "note"), ("optimization", "candidates"), ("years", "note"),
+     ("implementations", 0, "basis")],
+)
+def test_every_prose_field_states_no_money(tmp_path, path):
+    value = entry(full_optimization="x", years={"from": 2020, "type": "program", "note": "x"})
+    value["optimization"]["candidates"] = "x"
+    value["implementations"][0]["basis"] = "x"
+    target = value
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = "It saves $5 a year."
+    label = ".".join(str(part) for part in path).replace(".0.", "[0].")
+    assert has(check(make_repo(tmp_path), value), f"{label} states $5"), label
+
+
+def test_statutory_notes_state_no_money(tmp_path):
+    item = {"jurisdiction": "us-mt", "citation": "MCA", "note": "Split equally, $5 each."}
+    assert has(check(make_repo(tmp_path), entry(), statutory=[item]), "statutory_not_choice[0].note states $5")
+
+
+@pytest.mark.parametrize(
+    ("change", "fragment"),
+    [
+        ({"repo": "not a repo"}, "proposed[0].repo must be owner/name"),
+        ({"pr": "PolicyEngine/policyengine-us#1"}, "proposed[0].pr must be a github.com pull request URL"),
+        ({"pr": "https://github.com/PolicyEngine/policyengine-uk/pull/1"}, "is a pull request in PolicyEngine/policyengine-uk"),
+        ({"path": "/abs.py"}, "proposed[0].path must be a relative path"),
+        ({"models": "best"}, "proposed[0].models must be one of"),
+        ({"follows": "reading"}, "proposed[0] has unknown key `follows`"),
+    ],
+)
+def test_proposed_changes(tmp_path, change, fragment):
+    proposal = {"repo": PE, "pr": f"https://github.com/{PE}/pull/1", "path": "x.py", "models": "candidate-min", **change}
+    assert has(check(make_repo(tmp_path), entry(proposed=[proposal])), fragment)
+    assert has(check(make_repo(tmp_path), entry(proposed=[])), "proposed must be a non-empty list")

@@ -108,7 +108,10 @@ DEFAULT_BASES = ("statute", "regulation", "agency", "convention")
 BASIS_KINDS: dict[str, tuple[str, ...]] = {
     "statute": ("statute",),
     "regulation": ("regulation",),
-    "agency": ("form", "instructions", "worksheet", "manual", "guidance", "policy", "plan", "calculator"),
+    "agency": (
+        "form", "instructions", "worksheet", "manual", "guidance", "policy", "plan", "calculator", "rulemaking",
+        "agency-practice",
+    ),
 }
 STRUCTURES = ("two-way", "finite", "piecewise-linear", "search")
 # Structures whose exact optimum is cheap: compare both branches, enumerate
@@ -287,7 +290,7 @@ def _module_rules(path: Path) -> tuple[set[str], set[str], list[str]] | None:
 
     try:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError):
         return None
     if not isinstance(payload, dict):
         return None
@@ -570,6 +573,8 @@ def check_entry(
                     issues.append(f"{p_label}.path must be a relative path inside the repository.")
                 if item.get("models") not in MODELS:
                     issues.append(f"{p_label}.models must be one of {', '.join(MODELS)}.")
+                elif actor in AGENCY_ACTORS and item["models"] not in AGENCY_MODELS:
+                    issues.append(f"{p_label}.models must be one of {', '.join(AGENCY_MODELS)}: the State agency decides.")
 
     tests = entry.get("tests", [])
     if "tests" in entry:
@@ -593,6 +598,8 @@ def check_entry(
             elif set(pins) == set(PINS):
                 issues.append(f"{t_label} pins both default and optimum; a case showing the optimum differs from the default.")
             if "optimum" in pins:
+                if actor in AGENCY_ACTORS:
+                    issues.append(f"{t_label} pins optimum, but the State agency decides, so nothing is optimized.")
                 if not (external and isinstance(item.get("path"), str) and item["path"].endswith(".yaml")):
                     issues.append(
                         f"{t_label} pins optimum, so it must be another repository's YAML test case: "

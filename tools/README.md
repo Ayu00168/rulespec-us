@@ -480,10 +480,10 @@ register's rules exactly.
 |---|---|
 | `id`, `jurisdiction`, `program` | As in the register. The global id is `<jurisdiction>:<id>`. It shares the register's namespace: `check` on either file refuses an id the other file uses. One function, `id_collision_issues`, does this for both. |
 | `question` | The choice, as a question. |
-| `actor` | Who the law lets choose: `taxpayer`, `spouses-jointly`, `either-spouse`, `eligible-claimants` (the taxpayers who could each claim a person), `household`, `provider-household` or `state-agency`. `provider-household` and `state-agency` are the unit-derivation RFC's terms (axiom-rules-engine `docs/unit-derivation.md`, section 4.3). Where the State agency decides, the household optimizes nothing. Such an entry has no `optimization`, and its implementations model `convention`, `input` or `absent`. |
+| `actor` | Who the law lets choose: `taxpayer`, `spouses-jointly`, `either-spouse`, `eligible-claimants` (the taxpayers who could each claim a person), `household`, `provider-household` or `state-agency`. `provider-household` and `state-agency` are the unit-derivation RFC's terms (axiom-rules-engine `docs/unit-derivation.md`, section 4.3). Where the State agency decides, the household optimizes nothing. Such an entry has no `optimization`, its implementations and proposals model `convention`, `input` or `absent`, and it pins no optimum. |
 | `texts`, `pending_texts`, `text_kinds`, `years` | The provision that grants the choice, and when, checked as in the register. At least one text is required. |
 | `domain` | `kind` (`boolean`, `enum`, `share` or `amount`) and `per`, the entity each value belongs to (`person`, `marital-unit`, `tax-unit`, `family`, `spm-unit`, `household` or `benefit-unit`). An enum lists at least two kebab-case `options`. A share or amount has `bounds`, two quoted decimal strings, low then high; a share lies within 0 and 1, and an amount gives its `currency`. An optional `coupled_with` lists other entries in the file that must be chosen together, and each must list this one back. |
-| `default` | `value`, an option of the domain, and its `basis`: `statute`, `regulation`, `agency` or `convention`. A basis other than `convention` needs a cited text of that kind. Agency kinds are forms, instructions, worksheets, manuals, guidance, policies, plans and calculators. A convention needs a `note` saying what it is. A statute that sets its own default ("unless the taxpayer elects") is already encoded as the statutory branch keyed on the election input, with "no election" as `false`. So a statutory default is just the value a caller supplies. |
+| `default` | `value`, an option of the domain, and its `basis`: `statute`, `regulation`, `agency` or `convention`. A basis other than `convention` needs a cited text of that kind. Agency kinds are forms, instructions, worksheets, manuals, guidance, policies, plans, calculators, rulemaking and agency practice. A convention needs a `note` saying what it is. A statute that sets its own default ("unless the taxpayer elects") is already encoded as the statutory branch keyed on the election input, with "no election" as `false`. So a statutory default is just the value a caller supplies. |
 | `objective` | What a household would pursue: `measure` (`net-income`, the standard, or `total-tax` for a choice that moves only tax, which is the same choice) and `scope` (`tax-unit` or `household`). A choice that can move more than one tax unit takes the household as its scope. That is any choice whose actor is `eligible-claimants`, `household` or `provider-household`, or whose entity is a family, SPM unit, household or benefit unit. `tax-unit` means the model's tax unit with every member's liability combined. For a filing-status choice between spouses, such as filing jointly or separately, or Montana's separate filing on one form, that is both spouses' liability together. PolicyEngine-US keeps the spouses in one tax unit there, so the choice needs no narrower scope. |
 | `multi_year` | Optional, `true` only. The choice binds later years or carries amounts forward, and is optimized one year at a time for now. |
 | `optimization` | `structure`, how an optimum can be found: `two-way` (a boolean or a two-option enum), `finite` (a boolean or an enum), `piecewise-linear` (a share or an amount, exact at the endpoints and kinks) or `search`. It may add `candidates`, a description of a cheap candidate set. |
@@ -539,20 +539,42 @@ the same way. The report adds the worklist:
 `tools/pin_runner.py` runs the household choices' pins with the register's,
 labelled `choices.entries[i].tests[j]`. An `optimum` pin must pass and also be
 non-vacuous, or it is `vacuous`. For each pinned YAML case, the oracle records
-the case's input keys and stated output as the YAML runner collected it. The
-runner then requires three things:
+the case's input keys, stated output, reforms, extensions and error margins as
+the YAML runner collected them. The runner then requires:
 
-- the case's input does not set the decision variable;
+- the case runs the model as shipped: no parameter override (a dotted input
+  key), reform or extension;
+- its input does not set the decision variable;
 - its output states the variable;
 - every stated value is the chosen option, and that option is not the
-  default.
+  default;
+- its error margin could not pass the default instead. policyengine-core
+  compares a boolean as 0 or 1 within `absolute_error_margin`, and within
+  `relative_error_margin` times the stated value, so a margin at least as
+  wide as the gap between the option and the default would pass either.
+
+Options compare as the model writes them:
+- A boolean must be stated as a boolean. A case that states `1` for `true`
+  passes in policyengine-core but counts as vacuous here, which fails closed.
+- An enum option compares by name, so `head-of-household` matches
+  PolicyEngine-US's `HEAD_OF_HOUSEHOLD`.
+- Shares and amounts compare by value.
 
 So each `optimum` pin shows the model choosing something other than the
-default. That `optimum` pin is an example test. The property it samples is
-that an optimizing implementation's choice is no worse, on its objective,
-than every listed candidate, or any point of the domain for an exact
-structure. Testing that property is the implementing repository's job, for
-example with Hypothesis over households, forcing each option on a branch.
+default. It does not show which rule chose it: a convention that picks the
+same option in that case passes too. For itemizing, every PolicyEngine-US case
+(at main, 2026-10-22) that states `tax_unit_itemizes` without changing the
+model also agrees with the deduction comparison, or doesn't state the
+deductions. So none of them tells the two apart, and the entry's `basis`
+records the code that compares tax.
+
+A `default` pin is checked only to pass; its reviewers check what it asserts.
+
+An `optimum` pin is an example test. The property it samples is that an
+optimizing implementation's choice is no worse, on its objective, than every
+listed candidate, or any point of the domain for an exact structure. Testing
+that property is the implementing repository's job, for example with
+Hypothesis over households, forcing each option on a branch.
 
 `aggregate` collects every rulespec repository's file into one JSON or
 Markdown view: each entry once, as it is in its file, with its repository,

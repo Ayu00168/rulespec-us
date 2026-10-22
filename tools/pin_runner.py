@@ -2,8 +2,9 @@
 
 A register entry's `tests` pin readings to tests in other repositories at
 fixed commits, and a household choice's `tests` pin a consumer's default or
-optimum (household-choices.yaml, beside the register; tools/household_choices.py). `source_conflicts.py check` only screens a pin's syntax: the
-file is a test_*.py file and defines the named function. Whether pytest
+optimum (household-choices.yaml, beside the register;
+tools/household_choices.py). `source_conflicts.py check` only screens a pin's
+syntax: the file is a test_*.py file and defines the named function. Whether pytest
 collects and passes that test depends on import-time code, conftest files,
 plugins and ini settings, which no static check can decide. This runner asks
 pytest.
@@ -38,14 +39,15 @@ Only the outcome `passed` passes: every collected case of the pinned function
 passed its setup, call and teardown, none was deselected, skipped, xfailed or
 xpassed, and pytest's process exited 0, checked independently of the
 plugin's own record. A household choice's `optimum` pin must also be
-non-vacuous (`optimum_shown`): it is a YAML case whose own stated output gives
-the decision variable as the chosen option (`chooses`), which differs from
-the entry's default, and whose input does not set that variable, so the
-model chose it. Otherwise the pin is `vacuous`. Anything else is an issue: an unshipped or unprovable
-commit, a fetch, venv or
-install failure, a collection error, a missing or deselected test, a
-module-level skip, `skipped`, `xfail`, `xpass`, `failed` or `error`, a
-per-commit timeout (DEFAULT_TIMEOUT), and any exception in the runner itself.
+non-vacuous (`optimum_shown`), or it is `vacuous`: a YAML case that runs the
+model as shipped (no parameter override, reform or extension), whose input
+does not set the decision variable, whose stated output gives it as the chosen
+option (`chooses`) everywhere, which differs from the entry's default, and
+whose error margin could not pass the default instead. Anything else is an
+issue: an unshipped or unprovable commit, a fetch, venv or install failure, a
+collection error, a missing or deselected test, a module-level skip,
+`skipped`, `xfail`, `xpass`, `failed` or `error`, a per-commit timeout
+(DEFAULT_TIMEOUT), and any exception in the runner itself.
 Pins this runner cannot execute fail too: a pin in a repository outside
 ALLOWED_OWNERS (matched exactly), a pin in this repository (no pinned
 commit), and a YAML test case in a repository with no YAML_RUNNERS entry.
@@ -336,16 +338,53 @@ def _number(value: Any) -> Decimal | None:
     return None
 
 
+def option_name(value: str) -> str:
+    """An enum option's name as a model writes it: the file's kebab-case
+    `head-of-household` is PolicyEngine's `HEAD_OF_HOUSEHOLD`."""
+
+    return value.upper().replace("-", "_")
+
+
 def same_option(a: Any, b: Any) -> bool:
-    """One option of a choice: booleans by value and type; numbers and
-    decimal strings by value ("0.5" is 0.5 is "0.50"); other strings exactly."""
+    """One option of a choice: booleans by value and type (1 is not true);
+    numbers and decimal strings by value ("0.5" is 0.5 is "0.50"); other
+    strings by option name (`separate` is `SEPARATE`)."""
 
     if isinstance(a, bool) or isinstance(b, bool):
         return type(a) is type(b) and a == b
     x, y = _number(a), _number(b)
     if x is not None or y is not None:
         return x is not None and y is not None and x == y
-    return isinstance(a, str) and isinstance(b, str) and a == b
+    return isinstance(a, str) and isinstance(b, str) and option_name(a) == option_name(b)
+
+
+def _magnitude(value: Any) -> Decimal | None:
+    """A boolean or number as the number a YAML runner compares (true is 1)."""
+
+    return Decimal(int(value)) if isinstance(value, bool) else _number(value)
+
+
+def margin_admits_default(case: Mapping[str, Any], chooses: Any, default: Any) -> Decimal | None:
+    """The margin, when the case's error margin would also pass the default.
+
+    policyengine-core compares a stated number or boolean (as 0 or 1) within
+    `absolute_error_margin`, and within `relative_error_margin` times the
+    stated value; with neither, exactly. Both, when given, must hold. A margin
+    at least as wide as the gap between the chosen option and the default lets
+    the default pass in its place. Enum options compare exactly."""
+
+    target, other = _magnitude(chooses), _magnitude(default)
+    if target is None or other is None:
+        return None
+    allowed: list[Decimal] = []
+    for key, scale in (("absolute_error_margin", Decimal(1)), ("relative_error_margin", abs(target))):
+        value = _number(case.get(key)) if not isinstance(case.get(key), bool) else None
+        if case.get(key) is not None:
+            if value is None:
+                return Decimal("Infinity")  # an unreadable margin fails closed
+            allowed.append(abs(value) * scale)
+    margin = min(allowed) if allowed else Decimal(0)
+    return margin if margin >= abs(target - other) else None
 
 
 def _stated(output: Any, variable: str) -> list[Any]:
@@ -370,10 +409,14 @@ def _stated(output: Any, variable: str) -> list[Any]:
 
 
 def optimum_shown(case: Any, expect: tuple[str, Any, Any]) -> str | None:
-    """None when a YAML case shows the model choosing the optimum: its input
-    does not set the decision variable, its output states the variable, and
-    every stated value is the chosen option, which is not the default.
-    Otherwise why the pin is vacuous."""
+    """None when a YAML case shows the model choosing the optimum: it runs the
+    model as shipped (no parameter override, reform or extension), its input
+    does not set the decision variable, its output states the variable, every
+    stated value is the chosen option, which is not the default, and its
+    error margin could not pass the default instead. Otherwise why the pin is
+    vacuous. It shows the model choosing the non-default option, not which
+    rule chose it: a convention that agrees with the optimum in this case
+    passes too."""
 
     variable, chooses, default = expect
     if same_option(chooses, default):
@@ -382,6 +425,13 @@ def optimum_shown(case: Any, expect: tuple[str, Any, Any]) -> str | None:
         return "the YAML runner did not expose the case's input and output"
     if variable in case["input_keys"]:
         return f"the case sets {variable} as an input, so the model did not choose it"
+    overrides = sorted(key for key in case["input_keys"] if isinstance(key, str) and "." in key)
+    if overrides or case.get("reforms") or case.get("extensions"):
+        changed = ", ".join(overrides) or "a reform or extension"
+        return f"the case changes the model ({changed}), so it does not show the model choosing as shipped"
+    margin = margin_admits_default(case, chooses, default)
+    if margin is not None:
+        return f"the case's error margin ({margin}) would also pass the default {default!r}"
     values = _stated(case.get("output"), variable)
     if not values:
         return f"the case's output does not state {variable}"

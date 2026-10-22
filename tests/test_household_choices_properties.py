@@ -14,7 +14,11 @@ Invariants, each for every input Hypothesis draws:
 4. Vacuity: an optimum pin whose `chooses` is in the domain is reported as
    vacuous exactly when it is the default's option.
 5. Differential: the check's notion of one option (`same_value`) agrees with
-   the runner's (`pin_runner.same_option`) on every domain value.
+   the runner's (`pin_runner.same_option`) on every value a domain can hold
+   (booleans, kebab-case options and decimal strings). They differ only off
+   the domain: the runner also matches a YAML number to a decimal string and
+   an enum option to the model's upper-case name, which test_pin_runner.py
+   covers.
 6. Scope: an objective scoped to the tax unit is accepted exactly when
    neither the actor nor the entity spans tax units.
 7. Worklist: an optimizing implementation is listed as narrower exactly when
@@ -28,8 +32,10 @@ from __future__ import annotations
 import copy
 import importlib.util
 import itertools
+import re
 import sys
 import tempfile
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -203,6 +209,19 @@ def base_entry(domain, default, chooses):
     }
 
 
+def _same_reference(a, b) -> bool:
+    """One option, written independently of the tool: booleans only equal
+    booleans; two decimal strings are the same number; anything else is the
+    same string."""
+
+    if type(a) is bool or type(b) is bool:
+        return type(a) is type(b) and a is b
+    number = re.compile(r"(0|[1-9][0-9]*)(\.[0-9]+)?")
+    if isinstance(a, str) and isinstance(b, str) and number.fullmatch(a) and number.fullmatch(b):
+        return Fraction(a) == Fraction(b)
+    return isinstance(a, str) and isinstance(b, str) and a == b
+
+
 @PROPERTY
 @given(optimum_cases())
 def test_an_optimum_pin_is_vacuous_exactly_when_it_is_the_default(case):
@@ -210,7 +229,7 @@ def test_an_optimum_pin_is_vacuous_exactly_when_it_is_the_default(case):
     with tempfile.TemporaryDirectory() as directory:
         issues = hc.check_choices({"version": 1, "entries": [base_entry(domain, default, chooses)]}, _repo(directory))
     vacuous = any("so the pin is vacuous" in issue for issue in issues)
-    assert vacuous == hc.same_value(chooses, default)
+    assert vacuous == _same_reference(chooses, default)
     assert [issue for issue in issues if "vacuous" not in issue] == []
 
 
@@ -234,7 +253,10 @@ def test_tax_unit_scope_is_accepted_exactly_when_nothing_spans_tax_units(actor, 
     with tempfile.TemporaryDirectory() as directory:
         issues = hc.check_choices({"version": 1, "entries": [value]}, _repo(directory))
     refused = any("objective.scope must be household" in issue for issue in issues)
-    assert refused == (actor in hc.HOUSEHOLD_ACTORS or per in hc.HOUSEHOLD_ENTITIES)
+    # Written out here, not read from the tool: who and what can move more than one tax unit.
+    spanning_actors = {"eligible-claimants", "household", "provider-household"}
+    spanning_entities = {"family", "spm-unit", "household", "benefit-unit"}
+    assert refused == (actor in spanning_actors or per in spanning_entities)
     assert [issue for issue in issues if "objective.scope" not in issue] == []
 
 
