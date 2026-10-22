@@ -78,7 +78,6 @@ JURISDICTION_RE = re.compile(r"[a-z]{2}(-[a-z0-9]+)*")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 REPO_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+")
-READING_REF_RE = re.compile(r"reading|alternatives\[(0|[1-9][0-9]*)\]")
 DECIMAL_RE = re.compile(r"(0|[1-9][0-9]*)(\.[0-9]+)?")
 CURRENCY_RE = re.compile(r"[A-Z]{3}")
 DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -96,6 +95,126 @@ INLINE_TAG_RE = re.compile(
 PERIODS = ("once", "week", "month", "year")
 STATUSES = ("open", "ruled", "confirmed", "contradicted")
 OUTCOMES = ("computed", "refused")
+# A reading reference (`follows`, `adopts`, `pins`) is `reading` (the entry's
+# adopted reading) or the `id` of one of its alternatives. Positions are never
+# used: inserting or reordering an alternative must not flip a consumer's pick.
+ADOPTED_READING = "reading"
+
+# What kind of source a text is. Corpus `texts` take their kind from the
+# document class in their citation path (DOCUMENT_CLASS_KINDS); `text_kinds`
+# may narrow it to another kind that class allows. `pending_texts` and
+# `unpublished_sources` state theirs.
+SOURCE_KINDS = (
+    "statute",
+    "regulation",
+    "rulemaking",
+    "form",
+    "instructions",
+    "worksheet",
+    "manual",
+    "guidance",
+    "policy",
+    "plan",
+    "calculator",
+    "agency-practice",
+)
+# Corpus document class (the second segment of a citation path) -> the kinds a
+# text in that class may be; the first is the kind derived when `text_kinds`
+# names none. A class without a row fails closed: a text citing it is a
+# finding until the class gets a row here, so a new class never silently
+# allows every kind. tests/test_source_conflicts.py checks every class the
+# corpus uses has a row.
+DOCUMENT_CLASS_KINDS: dict[str, tuple[str, ...]] = {
+    "statute": ("statute",),
+    "regulation": ("regulation",),
+    "rulemaking": ("rulemaking",),
+    "form": ("form", "instructions", "worksheet"),
+    "guidance": ("guidance", "instructions", "calculator", "plan"),
+    "manual": ("manual",),
+    "policy": ("policy", "manual", "guidance", "plan"),
+    "district-plan": ("plan",),
+}
+# `years.type`: which year the bounds count. `program` needs `years.note`
+# saying what the program year is (SNAP's federal fiscal year, a LIHEAP
+# program year from October, ...).
+YEAR_TYPES = ("calendar", "tax", "federal-fiscal", "state-fiscal", "program")
+MIN_YEAR, MAX_YEAR = 1900, 2100
+# `conflict`: whether the sources still disagree. `resolved` needs a
+# `resolution` (who closed it, when, and a public record) and `years.to`;
+# `live` (the default) forbids a `resolution`.
+CONFLICT_STATES = ("live", "resolved")
+RESOLVERS = ("legislation", "agency")
+# An unpublished source (correspondence, a call) is described, never quoted:
+# a description may hold at most this many words inside quotation marks, in
+# all its quoted spans together (quoted_spans says what a span is).
+MAX_QUOTED_WORDS = 4
+_DOUBLE_CLOSERS = {'"': '"', "\u201c": "\u201d"}
+_SINGLE_OPENERS = ("'", "\u2018")
+_SINGLE_CLOSERS = ("'", "\u2019")
+_BEFORE_OPENER = frozenset(" \t\n\r([{\u2014\u2013-/")
+
+
+def _opens_single(text: str, index: int) -> bool:
+    """A single quotation mark opens a quotation when it starts the text or
+    follows a space or an opening bracket or dash, and a letter follows it.
+    So the apostrophe in "agency's" opens nothing, and neither does the elision
+    in "the '90s"."""
+
+    before_ok = index == 0 or text[index - 1] in _BEFORE_OPENER
+    return before_ok and index + 1 < len(text) and text[index + 1].isalpha()
+
+
+def _closes_single(text: str, index: int) -> bool:
+    """A single quotation mark closes a quotation when it follows a non-space
+    and no letter or digit follows it, so the apostrophe in "county's" or
+    "we\u2019ll" closes nothing."""
+
+    return (
+        index > 0
+        and not text[index - 1].isspace()
+        and (index + 1 == len(text) or not text[index + 1].isalnum())
+    )
+
+
+def quoted_spans(text: str) -> list[str]:
+    """The quoted spans of a text, each opening mark paired with its closing
+    mark. Double quotes (straight or curly) pair with their own closer; an
+    unclosed one quotes the rest of the text, failing closed. Single quotes
+    (straight or curly) open and close only at word edges (_opens_single,
+    _closes_single), so apostrophes and elisions inside a span or a word are
+    neither; an unclosed single quote is read as an apostrophe."""
+
+    spans: list[str] = []
+    index = 0
+    while index < len(text):
+        mark = text[index]
+        if mark in _DOUBLE_CLOSERS:
+            close = text.find(_DOUBLE_CLOSERS[mark], index + 1)
+            close = len(text) if close == -1 else close
+            spans.append(text[index + 1 : close])
+            index = close + 1
+            continue
+        if mark in _SINGLE_OPENERS and _opens_single(text, index):
+            close = next(
+                (
+                    position
+                    for position in range(index + 1, len(text))
+                    if text[position] in _SINGLE_CLOSERS and _closes_single(text, position)
+                ),
+                None,
+            )
+            if close is not None:
+                spans.append(text[index + 1 : close])
+                index = close + 1
+                continue
+        index += 1
+    return spans
+
+
+def quoted_words(text: str) -> int:
+    """How many words a text holds inside quotation marks, across all spans."""
+
+    return sum(len(span.split()) for span in quoted_spans(text))
 
 # The interpretation core: compared field by field with a module's
 # `module.interpretations` entry, and the only fields a module may carry
@@ -123,8 +242,17 @@ ENTRY_KEYS = frozenset(
         "implementations",
         "tests",
         "money_case",
+        "years",
+        "conflict",
+        "resolution",
+        "text_kinds",
+        "unpublished_sources",
+        "proposed",
     }
 )
+# A pull request URL on github.com: proposed implementations name the PR that
+# would add the reading, before it merges.
+PR_URL_RE = re.compile(r"https://github\.com/(?P<repo>[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+)/pull/[1-9][0-9]*")
 REQUIRED_ENTRY_KEYS = (
     "id",
     "jurisdiction",
@@ -201,13 +329,33 @@ def global_id(entry: Mapping[str, Any]) -> str:
     return f"{entry.get('jurisdiction')}:{entry.get('id')}"
 
 
-def reading_index(ref: str) -> int | None:
-    """`reading` -> None, `alternatives[N]` -> N."""
+def alternative_ids(alternatives: Any) -> list[str]:
+    """The ids of an entry's alternatives, in order (non-strings skipped)."""
 
-    match = READING_REF_RE.fullmatch(ref)
-    if match is None:
-        raise ValueError(f"not a reading reference: {ref!r}")
-    return None if match.group(1) is None else int(match.group(1))
+    if not isinstance(alternatives, list):
+        return []
+    return [
+        alternative["id"]
+        for alternative in alternatives
+        if isinstance(alternative, dict) and isinstance(alternative.get("id"), str)
+    ]
+
+
+def document_class(corpus_citation_path: str) -> str:
+    """us/statute/42/403/a/5 -> statute."""
+
+    return corpus_citation_path.split("/")[1]
+
+
+def text_kind(entry: Mapping[str, Any], corpus_citation_path: str) -> str | None:
+    """The kind of a corpus text: its `text_kinds` override, else its class's
+    default; None for a class without a DOCUMENT_CLASS_KINDS row."""
+
+    overrides = entry.get("text_kinds")
+    if isinstance(overrides, dict) and isinstance(overrides.get(corpus_citation_path), str):
+        return overrides[corpus_citation_path]
+    allowed = DOCUMENT_CLASS_KINDS.get(document_class(corpus_citation_path))
+    return allowed[0] if allowed else None
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +473,19 @@ def _prose_fields(entry: Mapping[str, Any], label: str) -> Iterator[tuple[str, s
             for key in ("reading", "effect"):
                 if isinstance(alternative.get(key), str):
                     yield f"{label}.alternatives[{index}].{key}", alternative[key]
+    # Consumer fields: an implementation's basis, the years' note, an
+    # unpublished source's description.
+    implementations = entry.get("implementations")
+    for index, item in enumerate(implementations if isinstance(implementations, list) else []):
+        if isinstance(item, dict) and isinstance(item.get("basis"), str):
+            yield f"{label}.implementations[{index}].basis", item["basis"]
+    years = entry.get("years")
+    if isinstance(years, dict) and isinstance(years.get("note"), str):
+        yield f"{label}.years.note", years["note"]
+    sources = entry.get("unpublished_sources")
+    for index, item in enumerate(sources if isinstance(sources, list) else []):
+        if isinstance(item, dict) and isinstance(item.get("description"), str):
+            yield f"{label}.unpublished_sources[{index}].description", item["description"]
 
 
 def check_interpretation_core(entry: Mapping[str, Any], *, label: str, require_texts: bool) -> list[str]:
@@ -352,10 +513,22 @@ def check_interpretation_core(entry: Mapping[str, Any], *, label: str, require_t
             _string(text.get("excerpt"), label=f"{text_label}.excerpt", issues=issues)
     alternatives = entry.get("alternatives")
     if _nonempty_list(alternatives, label=f"{label}.alternatives", issues=issues):
+        seen_ids: set[str] = set()
         for index, alternative in enumerate(alternatives):
             alt_label = f"{label}.alternatives[{index}]"
-            if not _mapping(alternative, label=alt_label, allowed={"reading", "effect"}, issues=issues):
+            if not _mapping(alternative, label=alt_label, allowed={"id", "reading", "effect"}, issues=issues):
                 continue
+            alternative_id = alternative.get("id")
+            if "id" not in alternative:
+                issues.append(f"{alt_label}.id is required; references name an alternative by id, never by position.")
+            elif not (isinstance(alternative_id, str) and KEBAB_RE.fullmatch(alternative_id)):
+                issues.append(f"{alt_label}.id must match [a-z0-9]+(-[a-z0-9]+)*.")
+            elif alternative_id == ADOPTED_READING:
+                issues.append(f"{alt_label}.id must not be `{ADOPTED_READING}`, which names the adopted reading.")
+            elif alternative_id in seen_ids:
+                issues.append(f"{alt_label}.id `{alternative_id}` repeats an earlier alternative's id.")
+            else:
+                seen_ids.add(alternative_id)
             _string(alternative.get("reading"), label=f"{alt_label}.reading", issues=issues)
             if "effect" in alternative:
                 _string(alternative.get("effect"), label=f"{alt_label}.effect", issues=issues)
@@ -495,15 +668,17 @@ def _scope_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
     """Statements in this scope, including those inside compound statements
     such as if, try, with, loops and match, but not inside defs or classes."""
 
-    for node in body:
+    stack = list(reversed(body))
+    while stack:
+        node = stack.pop()
         yield node
         if isinstance(node, _BLOCKS):
-            for field in ("body", "orelse", "finalbody"):
-                yield from _scope_statements(getattr(node, field, None) or [])
-            for handler in getattr(node, "handlers", None) or []:
-                yield from _scope_statements(handler.body)
-            for case in getattr(node, "cases", None) or []:
-                yield from _scope_statements(case.body)
+            nested = [
+                *(statement for field in ("body", "orelse", "finalbody") for statement in getattr(node, field, None) or []),
+                *(statement for handler in getattr(node, "handlers", None) or [] for statement in handler.body),
+                *(statement for case in getattr(node, "cases", None) or [] for statement in case.body),
+            ]
+            stack.extend(reversed(nested))
 
 
 def python_test_exists(source: str | bytes, name: str) -> bool:
@@ -515,7 +690,9 @@ def python_test_exists(source: str | bytes, name: str) -> bool:
         return False
     try:
         tree = ast.parse(source)  # bytes honour a PEP 263 coding cookie
-    except (SyntaxError, ValueError, UnicodeDecodeError):
+    except (SyntaxError, ValueError, UnicodeDecodeError, MemoryError, RecursionError):
+        # CPython's parser raises MemoryError ("source too complex") and
+        # RecursionError on deep input; either way the screen fails.
         return False
     body = tree.body
     scope = match.group("scope")
@@ -531,14 +708,17 @@ def missing_test(name: str, where: str) -> str:
     """Why a test reference does not resolve, worded for its kind of file."""
 
     if where.endswith(".py"):
-        return f"{name} is not a test function defined in {where} (see tools/README.md, Test references)."
+        return (
+            f"{name} is not a test function defined in {where}, or the file does not parse "
+            "(see tools/README.md, Test references)."
+        )
     return f"{name} is not a test case in {where}."
 
 
 def test_exists(path: str, name: str, data: bytes) -> bool:
     if path.endswith(".py"):
         return python_test_file(path) and python_test_exists(data, name)
-    if path.endswith(".test.yaml"):
+    if path.endswith(".yaml"):  # a companion .test.yaml, or another repository's YAML tests
         try:
             return name in yaml_test_case_names(data.decode("utf-8"))
         except UnicodeDecodeError:
@@ -578,13 +758,58 @@ def hygiene_issues(payload: Any) -> list[str]:
     return issues
 
 
-def _check_reading_ref(value: Any, *, label: str, alternatives: Any, issues: list[str]) -> None:
-    if not isinstance(value, str) or READING_REF_RE.fullmatch(value) is None:
-        issues.append(f"{label} must be `reading` or `alternatives[N]`.")
+def _check_reading_ref(value: Any, *, label: str, alternatives: Any, issues: list[str]) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        issues.append(f"{label} must be `{ADOPTED_READING}` or the id of one of this entry's alternatives.")
+        return False
+    if value != ADOPTED_READING and value not in alternative_ids(alternatives):
+        issues.append(
+            f"{label} names `{value}`, which is neither `{ADOPTED_READING}` nor the id of one of this "
+            "entry's alternatives."
+        )
+        return False
+    return True
+
+
+def _check_years(years: Any, *, label: str, issues: list[str]) -> None:
+    if not _mapping(years, label=label, allowed={"from", "to", "type", "note"}, issues=issues):
         return
-    index = reading_index(value)
-    if index is not None and not (isinstance(alternatives, list) and index < len(alternatives)):
-        issues.append(f"{label} names {value}, which this entry does not have.")
+    start, end = years.get("from"), years.get("to")
+    for key, value, required in (("from", start, True), ("to", end, False)):
+        if value is None and not required and key not in years:
+            continue
+        if type(value) is not int or not MIN_YEAR <= value <= MAX_YEAR:
+            issues.append(f"{label}.{key} must be a whole year from {MIN_YEAR} to {MAX_YEAR}.")
+    if type(start) is int and type(end) is int and end < start:
+        issues.append(f"{label}.to ({end}) is before {label}.from ({start}); both bounds are inclusive.")
+    year_type = years.get("type")
+    if year_type not in YEAR_TYPES:
+        issues.append(f"{label}.type must be one of {', '.join(YEAR_TYPES)}.")
+    if "note" in years:
+        _string(years.get("note"), label=f"{label}.note", issues=issues)
+    elif year_type == "program":
+        issues.append(f"{label}.note is required when type is `program`: say what the program year is.")
+
+
+def _check_unpublished_source(item: Any, *, label: str, issues: list[str]) -> None:
+    if not _mapping(item, label=label, allowed={"kind", "description", "date"}, issues=issues):
+        return
+    for key in ("kind", "description", "date"):
+        if key not in item:
+            issues.append(f"{label}.{key} is required.")
+    if "kind" in item and item["kind"] not in SOURCE_KINDS:
+        issues.append(f"{label}.kind must be one of {', '.join(SOURCE_KINDS)}.")
+    if "date" in item and not _real_date(item["date"]):
+        issues.append(f"{label}.date must be a real YYYY-MM-DD date.")
+    description = item.get("description")
+    if "description" in item and _string(description, label=f"{label}.description", issues=issues):
+        if "@" in description:
+            issues.append(f"{label}.description contains `@`; describe the source, never give an address.")
+        if quoted_words(description) > MAX_QUOTED_WORDS:
+            issues.append(
+                f"{label}.description quotes more than {MAX_QUOTED_WORDS} words in all; an unpublished "
+                "source is described, never quoted."
+            )
 
 
 def _check_snapshot(snapshot: Any, *, label: str, issues: list[str]) -> None:
@@ -655,13 +880,97 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
             pending = []
         for p_index, item in enumerate(pending):
             p_label = f"{label}.pending_texts[{p_index}]"
-            if not _mapping(item, label=p_label, allowed={"citation", "url", "snapshot", "excerpt"}, issues=issues):
+            if not _mapping(item, label=p_label, allowed={"citation", "kind", "url", "snapshot", "excerpt"}, issues=issues):
                 continue
             _string(item.get("citation"), label=f"{p_label}.citation", issues=issues)
+            if item.get("kind") not in SOURCE_KINDS:
+                issues.append(f"{p_label}.kind must be one of {', '.join(SOURCE_KINDS)}.")
             _string(item.get("excerpt"), label=f"{p_label}.excerpt", issues=issues)
             if not _https_url(item.get("url")):
                 issues.append(f"{p_label}.url must be an https URL.")
             _check_snapshot(item.get("snapshot"), label=f"{p_label}.snapshot", issues=issues)
+
+    texts = entry.get("texts") if isinstance(entry.get("texts"), list) else []
+    cited_paths = [
+        text["corpus_citation_path"]
+        for text in texts
+        if isinstance(text, dict)
+        and isinstance(text.get("corpus_citation_path"), str)
+        and CORPUS_PATH_RE.fullmatch(text["corpus_citation_path"])
+    ]
+    for path in dict.fromkeys(cited_paths):
+        if document_class(path) not in DOCUMENT_CLASS_KINDS:
+            issues.append(
+                f"{label}.texts cites {path}, whose document class `{document_class(path)}` has no "
+                "DOCUMENT_CLASS_KINDS row; add one rather than leave its kind open."
+            )
+    if "text_kinds" in entry:
+        overrides = entry["text_kinds"]
+        if not isinstance(overrides, dict) or not overrides:
+            issues.append(f"{label}.text_kinds must be a non-empty mapping of corpus citation path to kind.")
+        else:
+            for path, kind in overrides.items():
+                k_label = f"{label}.text_kinds[{path}]"
+                if path not in cited_paths:
+                    issues.append(f"{k_label} names a path that is not one of this entry's texts.")
+                    continue
+                allowed = DOCUMENT_CLASS_KINDS.get(document_class(path))
+                if kind not in SOURCE_KINDS:
+                    issues.append(f"{k_label} must be one of {', '.join(SOURCE_KINDS)}.")
+                elif allowed is not None and kind not in allowed:
+                    issues.append(
+                        f"{k_label} is `{kind}`, but a `{document_class(path)}` path can only be "
+                        f"{', '.join(allowed)}."
+                    )
+
+    years = entry.get("years")
+    if "years" in entry:
+        _check_years(years, label=f"{label}.years", issues=issues)
+    conflict = entry.get("conflict", "live")
+    if conflict not in CONFLICT_STATES:
+        issues.append(f"{label}.conflict must be live or resolved.")
+    elif conflict == "resolved":
+        if "resolution" not in entry:
+            issues.append(f"{label}.resolution is required when conflict is `resolved`.")
+        if not (isinstance(years, dict) and "to" in years):
+            issues.append(f"{label}.years.to is required when conflict is `resolved`: the last year the sources disagree.")
+    elif "resolution" in entry:
+        issues.append(f"{label}.resolution must be absent while conflict is `live`; set conflict: resolved.")
+    if "resolution" in entry:
+        resolution = entry["resolution"]
+        r_label = f"{label}.resolution"
+        if _mapping(resolution, label=r_label, allowed={"by", "effective", "record"}, issues=issues):
+            if resolution.get("by") not in RESOLVERS:
+                issues.append(f"{r_label}.by must be legislation or agency.")
+            if not _real_date(resolution.get("effective")):
+                issues.append(f"{r_label}.effective must be a real YYYY-MM-DD date.")
+            if not _https_url(resolution.get("record")):
+                issues.append(f"{r_label}.record must be an https URL to a public record.")
+    if "unpublished_sources" in entry:
+        unpublished = entry["unpublished_sources"]
+        if _nonempty_list(unpublished, label=f"{label}.unpublished_sources", issues=issues):
+            for u_index, item in enumerate(unpublished):
+                _check_unpublished_source(item, label=f"{label}.unpublished_sources[{u_index}]", issues=issues)
+
+    if "proposed" in entry:
+        proposed = entry["proposed"]
+        if _nonempty_list(proposed, label=f"{label}.proposed", issues=issues):
+            for p_index, item in enumerate(proposed):
+                p_label = f"{label}.proposed[{p_index}]"
+                if not _mapping(item, label=p_label, allowed={"repo", "pr", "path", "follows"}, issues=issues):
+                    continue
+                repo = item.get("repo")
+                if not (isinstance(repo, str) and REPO_RE.fullmatch(repo)):
+                    issues.append(f"{p_label}.repo must be owner/name.")
+                pr = item.get("pr")
+                match = PR_URL_RE.fullmatch(pr) if isinstance(pr, str) else None
+                if match is None:
+                    issues.append(f"{p_label}.pr must be a github.com pull request URL.")
+                elif isinstance(repo, str) and match.group("repo") != repo:
+                    issues.append(f"{p_label}.pr is a pull request in {match.group('repo')}, not {repo}.")
+                if not _relative_path(item.get("path")):
+                    issues.append(f"{p_label}.path must be a relative path inside the repository.")
+                _check_reading_ref(item.get("follows"), label=f"{p_label}.follows", alternatives=entry.get("alternatives"), issues=issues)
 
     outcome = entry.get("outcome")
     if "outcome" in entry and outcome not in OUTCOMES:
@@ -703,7 +1012,12 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
             implementations = []
         for i_index, item in enumerate(implementations):
             i_label = f"{label}.implementations[{i_index}]"
-            if not _mapping(item, label=i_label, allowed={"repo", "commit", "path", "follows", "cites_entry"}, issues=issues):
+            if not _mapping(
+                item,
+                label=i_label,
+                allowed={"repo", "commit", "path", "follows", "adopts", "basis", "ruling", "cites_entry"},
+                issues=issues,
+            ):
                 continue
             if "repo" not in item:
                 issues.append(f"{i_label}.repo is required; a RuleSpec module in this repository goes in adopted_by.")
@@ -712,6 +1026,17 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
             if not _relative_path(item.get("path")):
                 issues.append(f"{i_label}.path must be a relative path inside the repository.")
             _check_reading_ref(item.get("follows"), label=f"{i_label}.follows", alternatives=alternatives, issues=issues)
+            # A consumer may adopt a different reading from the entry's own
+            # (PolicyEngine-US follows the statute where the entry adopts an
+            # agency's practice); it says why, and may cite its own ruling.
+            if "adopts" in item:
+                _check_reading_ref(item.get("adopts"), label=f"{i_label}.adopts", alternatives=alternatives, issues=issues)
+            if "basis" in item:
+                _string(item.get("basis"), label=f"{i_label}.basis", issues=issues)
+            elif "adopts" in item or "ruling" in item:
+                issues.append(f"{i_label}.basis is required with adopts or ruling: say why this consumer adopts that reading.")
+            if "ruling" in item:
+                _check_record(item["ruling"], label=f"{i_label}.ruling", confirmation=False, issues=issues)
             if not isinstance(item.get("cites_entry"), bool):
                 issues.append(f"{i_label}.cites_entry must be true or false.")
 
@@ -726,15 +1051,32 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
             external = _check_external_ref(item, label=t_label, ctx=ctx, issues=issues)
             path = item.get("path")
             name = item.get("name")
-            if not _relative_path(path) or not str(path).endswith((".py", ".test.yaml")):
-                issues.append(f"{t_label}.path must be a relative .py or .test.yaml path.")
+            # Another repository's YAML test cases (PolicyEngine-US's
+            # policy tests) count, pinned like any external test; here, a
+            # companion test is always .test.yaml.
+            suffixes = (".py", ".yaml") if external else (".py", ".test.yaml")
+            if not _relative_path(path) or not str(path).endswith(suffixes):
+                issues.append(
+                    f"{t_label}.path must be a relative "
+                    + (".py or .yaml path." if external else ".py or .test.yaml path.")
+                )
                 path = None
             elif str(path).endswith(".py") and not python_test_file(path):
                 issues.append(
                     f"{t_label}.path {path} is not a test file (test_*.py); only a test can pin a reading."
                 )
                 path = None
-            if isinstance(name, str) and "[" in name:
+            elif external and str(path).endswith(".yaml") and "tests" not in PurePosixPath(path).parts[:-1]:
+                issues.append(
+                    f"{t_label}.path {path} is not under a tests directory; another repository's YAML test "
+                    "file must be one of its tests."
+                )
+                path = None
+            if isinstance(path, str) and path.endswith(".yaml"):
+                if not (isinstance(name, str) and name.strip() and "\n" not in name and name == name.strip()):
+                    issues.append(f"{t_label}.name must be a YAML test case's name, on one line.")
+                    name = None
+            elif isinstance(name, str) and "[" in name:
                 issues.append(
                     f"{t_label}.name {name} names a parametrized case; pin the whole test function "
                     "(pytest builds case ids from more than the file shows)."
@@ -745,7 +1087,7 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
                 name = None
             pins = item.get("pins")
             if not (isinstance(pins, list) and pins):
-                issues.append(f"{t_label}.pins must be a non-empty list of `reading` or `alternatives[N]`.")
+                issues.append(f"{t_label}.pins must be a non-empty list of `reading` or alternative ids.")
             else:
                 for p_index, ref in enumerate(pins):
                     _check_reading_ref(ref, label=f"{t_label}.pins[{p_index}]", alternatives=alternatives, issues=issues)
@@ -774,12 +1116,16 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
         issues.append(f"{label} is adopted by a module, so at least one test must pin `reading`.")
     for i_index, item in enumerate(implementations or []):
         follows = item.get("follows") if isinstance(item, dict) else None
-        if isinstance(follows, str) and READING_REF_RE.fullmatch(follows) and follows not in pinned:
+        if isinstance(follows, str) and (follows == ADOPTED_READING or follows in alternative_ids(alternatives)) and follows not in pinned:
             issues.append(f"{label}.implementations[{i_index}] follows {follows}, which no test pins.")
 
     # A public dollar figure needs a pinned test: every $ amount in the entry's
     # own prose must be one its money case (computed by a named test) states.
     money = entry.get("money_case") if isinstance(entry.get("money_case"), dict) else {}
+    # Excerpts are the sources' own words and may state any figure; the entry's
+    # prose names a threshold without restating it ("above the section 1341
+    # threshold"). No lexical test can tell a quoted threshold from a computed
+    # amount, so prose amounts are never backed by an excerpt.
     covered = _dollar_values(str(money.get("description", ""))) | _dollar_values(f"${money.get('amount', '')}")
     spelled = list(_prose_fields(entry, label))
     if isinstance(money.get("description"), str):
@@ -794,7 +1140,8 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
         for amount in sorted(_dollar_values(text) - covered):
             issues.append(
                 f"{field_label} states ${amount}, which no money case backs: name it in the money case "
-                "(whose computed_by test computes it) or describe the effect without the amount."
+                "(whose computed_by test computes it) or describe the effect without the amount; name a "
+                "source's threshold without restating it."
             )
 
     if "money_case" in entry:
@@ -1119,17 +1466,62 @@ def pinned_corpus_resolver(corpus_path: Path, release: str, content_sha256: str,
     return resolve
 
 
+def github_on_default_branch(token: str | None = None) -> Callable[[str, str], bool]:
+    """Is a commit shipped code of its repository? The same question
+    tools/pin_runner.py asks before fetching (commit_provenance): GitHub's
+    canonical name is the pinned one, the repository is not a fork, and the
+    commit is reachable from its default branch. False when compare says the
+    commit is off that branch; any other refusal (an API failure, a rename, a
+    fork) raises ValueError with its reason, which verify reports."""
+
+    get = github_api(token)
+
+    def reachable(repo: str, commit: str) -> bool:
+        record = commit_provenance(repo, commit, get)
+        if record["shipped"]:
+            return True
+        if isinstance(record.get("status"), str):
+            return False
+        raise ValueError(record["reason"])
+
+    return reachable
+
+
 def verify_register(
     payload: Mapping[str, Any],
     *,
     fetch: Fetch,
     matches: Callable[[str, str], bool],
     resolve: Callable[[str], str | None] | None,
+    on_default_branch: Callable[[str, str], bool] | None = None,
 ) -> tuple[list[str], list[str]]:
-    """(issues, report lines). `resolve` None skips corpus texts, reported."""
+    """(issues, report lines). `resolve` None skips corpus texts, reported.
+
+    Every external commit (implementations, tests, snapshots) must be reachable
+    from its repository's default branch: the register records shipped code and
+    published captures, never a pull request's branch, whose commits a squash
+    merge leaves off the default branch. `on_default_branch` None skips that
+    check, reported."""
 
     issues: list[str] = []
     report: list[str] = []
+
+    def shipped(label: str, repo: str, commit: str) -> None:
+        if on_default_branch is None:
+            return
+        try:
+            ok = on_default_branch(repo, commit)
+        except (urllib.error.URLError, OSError, KeyError, ValueError) as exc:
+            issues.append(f"{label}: cannot tell whether {repo}@{commit[:12]} is on its default branch: {exc}")
+            return
+        if not ok:
+            issues.append(
+                f"{label}: {repo}@{commit[:12]} is not on {repo}'s default branch; pin a commit on it "
+                "(after a squash merge, the merge commit), or list an unmerged change under proposed."
+            )
+
+    if on_default_branch is None:
+        report.append("unchecked: default-branch reachability of external commits (no checker given)")
     counts = {"texts": 0, "pending_texts": 0, "implementations": 0, "tests": 0}
     for index, entry in enumerate(payload.get("entries") or []):
         label = f"{global_id(entry)} (entries[{index}])"
@@ -1153,6 +1545,7 @@ def verify_register(
         for p_index, item in enumerate(entry.get("pending_texts") or []):
             p_label = f"{label}.pending_texts[{p_index}]"
             snap = item["snapshot"]
+            shipped(p_label, snap["repo"], snap["commit"])
             try:
                 data = fetch(snap["repo"], snap["commit"], snap["path"])
             except (urllib.error.URLError, OSError) as exc:
@@ -1173,6 +1566,7 @@ def verify_register(
                 counts["pending_texts"] += 1
         for i_index, item in enumerate(entry.get("implementations") or []):
             i_label = f"{label}.implementations[{i_index}]"
+            shipped(i_label, item["repo"], item["commit"])
             try:
                 source = fetch(item["repo"], item["commit"], item["path"]).decode("utf-8")
             except (urllib.error.URLError, OSError, UnicodeDecodeError) as exc:
@@ -1188,12 +1582,26 @@ def verify_register(
                 counts["implementations"] += 1
             if not item["cites_entry"]:
                 report.append(f"uncited: {i_label} ({item['repo']}:{item['path']}) does not cite {global_id(entry)} yet")
-            if item["follows"] != "reading":
-                report.append(f"lags: {i_label} follows {item['follows']}, not the adopted reading")
+            adopts = item.get("adopts", ADOPTED_READING)
+            if item["follows"] != adopts:
+                report.append(
+                    f"lags: {i_label} follows {item['follows']}, not the reading it adopts ({adopts})"
+                )
+        for r_index, item in enumerate(entry.get("proposed") or []):
+            report.append(
+                f"proposed: {label}.proposed[{r_index}] {item.get('pr')} would implement "
+                f"{item.get('follows')} in {item.get('repo')}:{item.get('path')} (not counted until merged)"
+            )
+        for u_index, item in enumerate(entry.get("unpublished_sources") or []):
+            report.append(
+                f"unverifiable: {label}.unpublished_sources[{u_index}] is unpublished "
+                f"({item.get('kind')}: {item.get('description')}, {item.get('date')}); verify cannot check it"
+            )
         for t_index, item in enumerate(entry.get("tests") or []):
             if "repo" not in item:
                 continue  # checked offline
             t_label = f"{label}.tests[{t_index}]"
+            shipped(t_label, item["repo"], item["commit"])
             try:
                 source = fetch(item["repo"], item["commit"], item["path"])
             except (urllib.error.URLError, OSError) as exc:
@@ -1269,11 +1677,15 @@ def aggregate(registers: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[
                     "jurisdiction": entry.get("jurisdiction"),
                     "program": entry.get("program"),
                     "question": entry.get("question"),
+                    "years": entry.get("years"),
+                    "conflict": entry.get("conflict", "live"),
                     "status": entry.get("status"),
                     "outcome": entry.get("outcome"),
                     "reading": entry.get("reading"),
                     "alternatives": [
-                        alt.get("reading") for alt in _as_list(entry.get("alternatives")) if isinstance(alt, dict)
+                        {"id": alt.get("id"), "reading": alt.get("reading")}
+                        for alt in _as_list(entry.get("alternatives"))
+                        if isinstance(alt, dict)
                     ],
                     "sources": list(
                         dict.fromkeys(
@@ -1281,10 +1693,31 @@ def aggregate(registers: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[
                             + [item.get("citation") for item in pending if isinstance(item, dict)]
                         )
                     ),
+                    "source_kinds": sorted(
+                        {
+                            kind
+                            for kind in [
+                                text_kind(entry, text["corpus_citation_path"])
+                                for text in texts
+                                if isinstance(text, dict) and isinstance(text.get("corpus_citation_path"), str)
+                                and CORPUS_PATH_RE.fullmatch(text["corpus_citation_path"])
+                            ]
+                            + [item.get("kind") for item in pending if isinstance(item, dict)]
+                            + [
+                                item.get("kind")
+                                for item in entry.get("unpublished_sources") or []
+                                if isinstance(item, dict)
+                            ]
+                            if isinstance(kind, str)
+                        }
+                    ),
                     "ruling": entry.get("ruling"),
                     "adopted_by": entry.get("adopted_by") or [],
                     "implementations": [
-                        {key: item.get(key) for key in ("repo", "path", "follows")}
+                        {
+                            **{key: item.get(key) for key in ("repo", "path", "follows")},
+                            "adopts": item.get("adopts", ADOPTED_READING),
+                        }
                         for item in _as_list(entry.get("implementations"))
                         if isinstance(item, dict)
                     ],
@@ -1307,14 +1740,29 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
         "",
         f"{len(rows)} entr{'y' if len(rows) == 1 else 'ies'}. Generated by tools/source_conflicts.py aggregate.",
         "",
-        "| Global id | Status | Outcome | Sources | Money case |",
-        "|---|---|---|---|---|",
+        "| Global id | Years | Status | Conflict | Outcome | Kinds | Sources | Alternatives | Implementations | Money case |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in rows:
         money = row.get("money_case") or {}
         size = f"{money.get('amount')} {money.get('currency')}/{money.get('period')}" if money else ""
         sources = "; ".join(str(source) for source in row["sources"])
-        lines.append(f"| `{row['global_id']}` | {row['status']} | {row['outcome']} | {sources} | {size} |")
+        years = row.get("years") or {}
+        span = (
+            f"{years.get('from')}\u2013{years.get('to', '')} ({years.get('type')})" if isinstance(years, dict) and years else ""
+        )
+        kinds = ", ".join(row.get("source_kinds") or [])
+        alternatives = ", ".join(f"`{alt.get('id')}`" for alt in row.get("alternatives") or [])
+        # Each consumer: what it follows today, and what it adopts when that differs.
+        implementations = "; ".join(
+            f"{item.get('repo')}: follows `{item.get('follows')}`"
+            + (f", adopts `{item.get('adopts')}`" if item.get("adopts") != item.get("follows") else "")
+            for item in row.get("implementations") or []
+        )
+        lines.append(
+            f"| `{row['global_id']}` | {span} | {row['status']} | {row.get('conflict', 'live')} | "
+            f"{row['outcome']} | {kinds} | {sources} | {alternatives} | {implementations} | {size} |"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -1420,8 +1868,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             release, content_sha256 = _toolchain_pin(args.root)
             resolve = pinned_corpus_resolver(args.corpus_path, release, content_sha256, args.public_key)
+        token = os.environ.get("GITHUB_TOKEN")
         issues, report = verify_register(
-            payload, fetch=github_fetch(os.environ.get("GITHUB_TOKEN")), matches=matches, resolve=resolve
+            payload,
+            fetch=github_fetch(token),
+            matches=matches,
+            resolve=resolve,
+            on_default_branch=github_on_default_branch(token),
         )
         for line in report:
             print(line)

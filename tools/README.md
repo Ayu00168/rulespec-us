@@ -101,19 +101,52 @@ finding. So when the provision is encoded, the entry moves into the module
 unchanged and the module adds `affects`. The register then names that module
 under `adopted_by`. The global id of an entry is `<jurisdiction>:<id>`, for
 example `us:oasdi-family-maximum-saving-clause`; code outside RuleSpec cites
-that id.
+that id, as `# Source conflict <global id>` at the line that decides the
+reading.
+
+Every alternative has an `id`: kebab-case, unique within the entry, and never
+`reading`. A reading reference (`follows`, `adopts`, `pins`) is `reading`,
+meaning the entry's adopted reading, or an alternative's id. References never
+use positions, so inserting or reordering an alternative cannot move anyone's
+pick. The `id` is part of the interpretation core: engine#247 and encode#1835
+add it to `module.interpretations` before either lands.
 
 Register-only fields:
 
 | Field | Meaning |
 |---|---|
 | `jurisdiction`, `program` | A jurisdiction directory of this repository, and a kebab-case program slug. |
-| `pending_texts` | Provisions the pinned corpus release lacks. Each gives `citation`, `url`, an `excerpt`, and a `snapshot`: repo, commit, path and sha256 of a captured copy. An entry that a module adopts cannot have any; ingest them first. |
+| `pending_texts` | Provisions the pinned corpus release lacks. Each gives `citation`, its `kind` (see below), `url`, an `excerpt`, and a `snapshot`: repo, commit, path and sha256 of a captured copy (`.txt`, `.md`, `.html`, `.htm` or `.xml`). An entry that a module adopts cannot have any; ingest them first. |
+| `text_kinds` | Optional. Narrows the kind of a corpus text, as `{corpus citation path: kind}`. A text's kind is otherwise the first kind its document class allows (below). The kind must be one its path's class allows, so a `/statute/` path is always `statute`. |
+| `unpublished_sources` | Sources with no public text, such as an agency's correspondence: `kind`, `description` and `date`. They are described, never quoted: a description holds no `@` and at most four words in quotation marks, counted across all its quoted spans. A span runs from an opening mark to its closing mark. A double quote, straight or curly, that is never closed quotes the rest of the description. A single quote, straight or curly, opens only at the start of a word and closes only at its end, so an apostrophe ("county's", "we’ll") or an elision ("the '90s") is neither. Verify cannot check them and lists them as unverifiable. |
+| `years` | Optional. The years the sources disagree: `from`, and optionally `to` (both inclusive; no `to` means still running). `type` says which year: `calendar`, `tax`, `federal-fiscal`, `state-fiscal` or `program`. `program` also needs `note`, saying what the program year is. |
+| `conflict`, `resolution` | `conflict` is `live` (the default) or `resolved`. `resolved` means a legislature or agency has closed the disagreement. It needs a `resolution` (`by`: `legislation` or `agency`; `effective`, a date; `record`, a public https URL) and `years.to`, the last year the sources disagree. A `live` entry has no `resolution`. |
 | `outcome` | `computed` or `refused`: whether the adopted reading computes the contested cases or refuses them. For a refusal, `reading` says what is refused and the substantive readings go in `alternatives`. |
 | `adopted_by` | RuleSpec modules in this repository that carry the entry, as `module` (path) and `interpretation` (id) pairs. |
-| `implementations` | Code outside RuleSpec that adopts a reading: `repo`, `commit`, `path`, `follows` (`reading` or `alternatives[N]`, meaning what the code does today) and `cites_entry`, which says whether the file contains the global id. |
-| `tests` | Tests that pin readings: `path`, `name` (a test function, `Class::function`, or a companion-test case name) and `pins`, a list of `reading` or `alternatives[N]`. Add `repo` and `commit` for a test in another repository. A Python test is a whole test function. `check` screens only a pin's syntax; a pin is established once the `pinned-tests` job has run it at its pinned commit and it passed. See [Test references](#test-references). |
-| `money_case` | Optional. An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency`, `period` (once, week, month or year) and `computed_by`, the name of the one test in the entry's `tests` that computes the amount, asserting it or both figures whose difference it is. A public file carries no amount that no pinned test computes: leave the money case out instead. `check` also requires every `$` amount in the entry's own prose (`question`, `reading`, `basis`, each alternative's `reading` and `effect`) to be one the money case states, so an entry without one has no dollar figures. Money is written one way, `$` and digits with commas between groups of three and optional two-digit cents (`$1,234.56`); other spellings (`USD 200`, `200 dollars`, `$ 200`, `$.50`, `$1.5k`) are issues. |
+| `implementations` | Code outside RuleSpec that takes a reading: `repo`, `commit`, `path`, `follows` (what the code does today) and `cites_entry`, which says whether the file contains the global id. A consumer may adopt a reading other than the entry's: `adopts` (default `reading`) names the reading it intends, `basis` says why, and an optional `ruling` (`by`, `date`, public `record`) is the consumer's own ruling. PolicyEngine-US follows the statute where the entry adopts an agency's practice. An implementation lags when `follows` differs from `adopts`. |
+| `proposed` | Changes not yet merged that would implement a reading: `repo`, `pr` (the pull request URL), `path` and `follows`. Verify lists them but never counts them as implementations; move one to `implementations` once it merges, pinned to the commit on the default branch. |
+| `tests` | Tests that pin readings: `path`, `name` and `pins`, a list of reading references. Here, `name` is a test function (or `Class::function`) in a `.py` file, or a case name in a companion `.test.yaml`. A test in another repository adds `repo` and `commit`. It may also be a YAML test file (`.yaml`) whose `name` is the case's name, on one line, such as a PolicyEngine-US policy test. Verify checks that the case still exists at that commit. Another repository's YAML test file must sit under a `tests` directory. A Python test is a whole test function. `check` screens only a pin's syntax; a pin is established once the `pinned-tests` job has run it at its pinned commit and it passed. The runner does not execute YAML cases yet, so a YAML pin fails that job. See [Test references](#test-references). |
+| `money_case` | Optional. An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency`, `period` (once, week, month or year) and `computed_by`, the name of the one test in the entry's `tests` that computes the amount, asserting it or both figures whose difference it is. A public file carries no amount that no pinned test computes: leave the money case out instead. `check` also requires every `$` amount in the entry's own prose to be one the money case states. The prose is `question`, `reading`, `basis`, each alternative's `reading` and `effect`, and the consumer fields (an implementation's `basis`, `years.note`, an unpublished source's `description`). Excerpts are the sources' own words and may state any figure. The prose names a threshold without restating it ("above the section 1341 threshold"), because no test on the words around an amount can tell a quoted threshold from a computed one. So an entry without a money case has no dollar figures in its prose. Money is written one way, `$` and digits with commas between groups of three and optional two-digit cents (`$1,234.56`); other spellings (`USD 200`, `200 dollars`, `$ 200`, `$.50`, `$1.5k`) are issues. |
+
+Source kinds are `statute`, `regulation`, `rulemaking`, `form`,
+`instructions`, `worksheet`, `manual`, `guidance`, `policy`, `plan`,
+`calculator` and `agency-practice`. `DOCUMENT_CLASS_KINDS` in
+`tools/source_conflicts.py` maps each corpus document class to the kinds it
+allows; the first is the default:
+
+| Document class | Kinds |
+|---|---|
+| `statute` | statute |
+| `regulation` | regulation |
+| `rulemaking` | rulemaking |
+| `form` | form, instructions, worksheet |
+| `guidance` | guidance, instructions, calculator, plan |
+| `manual` | manual |
+| `policy` | policy, manual, guidance, plan |
+| `district-plan` | plan |
+
+A text whose class has no row is a finding, so a new corpus class fails
+closed until it gets one.
 
 The register is public. These publication rules are reviewed by hand: it
 carries no people's names; `ruling.by` and `confirmation.by` name
@@ -132,6 +165,12 @@ runs it inside the required Repository Checks pytest leg, and it fails on any
 of these:
 
 - a malformed entry, an unknown key or a broken status rule;
+- an alternative without an id, or a reading reference (`follows`, `adopts`,
+  `pins`) that is neither `reading` nor one of the entry's alternative ids;
+- a text whose document class has no `DOCUMENT_CLASS_KINDS` row, or a kind
+  its class does not allow;
+- a `resolution` without `conflict: resolved`, or a resolved entry without a
+  `resolution` or `years.to`;
 - a hygiene hit (one of the four token patterns below);
 - an adopting module that is missing, or that does not carry the entry's
   interpretation core unchanged, or whose `affects` name no rule in the module;
@@ -157,8 +196,7 @@ daily and on dispatch, as two jobs. `tools/source_conflicts.py verify` (the
   from `.axiom/toolchain.toml`;
 - every `pending_texts` excerpt is verbatim in its snapshot, whose sha256 must
   match;
-- external implementations and test files exist at their pinned commits, and
-  each test file defines its pinned test (the same syntactic screen);
+- external implementations, tests and snapshots are pinned to commits reachable from their repository's default branch (a squash-merged pull request's own commits are not), and they exist there; each external Python test file defines its pinned test (the same syntactic screen), and each external YAML test file has its pinned case;
 - each `cites_entry` claim matches its file.
 
 `tools/pin_runner.py` (the `pinned-tests` job) runs every pinned test at its
@@ -166,14 +204,17 @@ pinned commit and fails unless pytest reports it passed; see
 [Test references](#test-references).
 
 Both excerpt checks use axiom-encode's own resolver and proof-atom matcher at
-`axiom_encode_ref`. The verify report lists implementations that do not cite
-their entry yet and implementations that follow an alternative rather than
-the adopted reading. Neither job is a required check; a red scheduled or main
-run opens an alarm issue (see [Merge gate](#merge-gate)).
-`tests/test_source_conflicts_properties.py` (Hypothesis) states the tool's
-invariants, including a differential test against axiom-encode's
-`_validate_module_interpretations` that runs once the pinned encoder has
-module interpretations, and a differential of the syntactic test screen
+`axiom_encode_ref`. The verify report lists:
+- implementations that do not cite their entry yet;
+- implementations that lag (they follow a reading other than the one they adopt);
+- unpublished sources, which it cannot check.
+
+Neither job is a required check; a red scheduled or main run opens an alarm
+issue (see [Merge gate](#merge-gate)). `tests/test_source_conflicts_properties.py`
+(Hypothesis) states the tool's invariants, including a differential test
+against axiom-encode's `_validate_module_interpretations`, which runs once the
+pinned encoder accepts module interpretations with alternative ids
+(encode#1835, engine#247), and a differential of the syntactic test screen
 against Python's own symbol table. `tests/test_pin_runner_properties.py`
 states the runner classifier's. The `source-conflicts` workflow is the gate
 for these properties: it installs Hypothesis and the pinned pytest.
@@ -197,7 +238,9 @@ check` screens a pin's syntax, and that is all it does: the path is a
 `test_*.py` file (or a companion `.test.yaml`), and the file defines the named
 function at module level or in a module-level class (`Class::function`), or
 has a case with that name. Definitions under `if`, `try`, `with`, loops and
-`match` count as module level. The screen says nothing about whether pytest
+`match` count as module level. A file the parser can't handle (a syntax
+error, or input too deep or too complex for CPython's parser) fails the
+screen. The screen says nothing about whether pytest
 collects or runs the test: import-time code, conftest files, plugins and ini
 settings decide that, and no static check can.
 
@@ -308,7 +351,9 @@ holds nothing worth taking:
 
 Its result leaves only as the JSON artifact. The alarm job reads that artifact
 with main's `pin_runner.py --summarize`, which checks every field's type and
-prints only fields that match fixed patterns. A missing or malformed artifact
+prints only fields that match fixed patterns. A missing or malformed artifact,
+including one without the `commits`, `unrun` and `issues` lists or a commit
+without its `pins` and `issues` lists (the runner always writes them),
 becomes its own alarm line ("pinned-tests artifact malformed"); the summary
 never crashes the alarm step. No runner output is interpolated into a
 workflow script.
