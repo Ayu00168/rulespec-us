@@ -874,3 +874,29 @@ def test_proposed_changes(tmp_path, change, fragment):
     proposal = {"repo": PE, "pr": f"https://github.com/{PE}/pull/1", "path": "x.py", "models": "candidate-min", **change}
     assert has(check(make_repo(tmp_path), entry(proposed=[proposal])), fragment)
     assert has(check(make_repo(tmp_path), entry(proposed=[])), "proposed must be a non-empty list")
+
+
+def test_malformed_statutory_identities_are_issues_not_crashes(tmp_path):
+    # #1844 review round 2 (P2): an unhashable jurisdiction or citation crashed
+    # the duplicate check.
+    ctx = make_repo(tmp_path)
+    for field in ("jurisdiction", "citation", "note"):
+        for shape in ([], {}, None, 3, "", [[]], {"a": []}):
+            item = {"jurisdiction": "us-mt", "citation": "MCA", "note": "n", field: shape}
+            issues = check(ctx, entry(), statutory=[item, copy.deepcopy(item)])
+            assert isinstance(issues, list) and all(isinstance(issue, str) for issue in issues), (field, shape)
+
+
+def test_aggregate_keeps_an_empty_file():
+    files = {"TheAxiomFoundation/rulespec-us": {"version": 1, "entries": []}}
+    view, issues = hc.aggregate(files)
+    assert issues == [] and view["repositories"] == [{"repository": "TheAxiomFoundation/rulespec-us", "version": 1}]
+    assert hc.files_from_view(view) == files
+
+
+def test_float32_twins_are_one_option(tmp_path):
+    # A pin can't tell 16777217 from 16777216: a model stores both as one float32.
+    value = entry(domain={"kind": "amount", "per": "tax-unit", "bounds": ["0", "20000000"], "currency": "USD"},
+                  default={"value": "16777216", "basis": "convention", "note": "n"})
+    value["tests"][0]["chooses"] = "16777217"
+    assert has(check(make_repo(tmp_path), value), "chooses is the default, so the pin is vacuous")

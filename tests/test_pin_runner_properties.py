@@ -29,20 +29,21 @@ Invariants, for every oracle record:
    never raises, and says a commit is shipped exactly when the canonical name
    is the pinned one, the repository says it is not a fork, and compare says
    `identical` or `behind`. Any exception from the API is a refusal.
-8. A household choice's optimum pin (differential): `optimum_shown` accepts a
-   recorded YAML case exactly when a reference predicate, written
-   independently, holds:
-   - the chosen option is not the default;
-   - the case's input names neither the decision variable nor a parameter
-     (a dotted key), and it applies no reform;
-   - no error margin could pass the default in place of the chosen option
-     (a boolean compares as 0 or 1);
-   - its output states the variable at least once, and every stated value
-     (per-entity lists and per-period mappings flattened) is the chosen option.
+8. A household choice's optimum pin (differential): `optimum_shown` accepts an
+   oracle record exactly when a reference predicate, written independently,
+   holds:
+   - the chosen option is not the default (as the float32 numbers a model
+     computes with);
+   - the model's choice could be read, and the decision variable is not among
+     the simulation's inputs;
+   - the case changes no parameter and applies no reform or extension;
+   - the model computed at least one value, and every value is the chosen
+     option (booleans by type, numbers as float32, enum options by name).
 """
 
 from __future__ import annotations
 
+import array
 import contextlib
 import importlib.util
 import io
@@ -353,81 +354,61 @@ def _ref_number(value):
     return None
 
 
+def _ref_float32(number):
+    """A float32, through the array module rather than struct."""
+
+    try:
+        return array.array("f", [float(number)])[0]
+    except OverflowError:
+        return None
+
+
 def _ref_same(a, b):
     if isinstance(a, bool) or isinstance(b, bool):
         return type(a) is type(b) and a == b
-    if _ref_number(a) is not None or _ref_number(b) is not None:
-        return _ref_number(a) is not None and _ref_number(a) == _ref_number(b)
-    return isinstance(a, str) and isinstance(b, str) and a == b
+    x, y = _ref_number(a), _ref_number(b)
+    if x is not None or y is not None:
+        return x is not None and y is not None and (x == y or (_ref_float32(x) is not None and _ref_float32(x) == _ref_float32(y)))
+    return isinstance(a, str) and isinstance(b, str) and a.upper().replace("-", "_") == b.upper().replace("-", "_")
 
 
-def _ref_values(node, variable, inside=False):
-    if isinstance(node, dict):
-        for key, value in node.items():
-            yield from _ref_values(value, variable, inside or key == variable)
-    elif isinstance(node, list):
-        for value in node:
-            yield from _ref_values(value, variable, inside)
-    elif inside:
-        yield node
-
-
-OPTION = st.sampled_from([True, False, "a", "b", "0.5", "0.50", "1", 1, 0.5])
-LEAF = st.one_of(st.booleans(), st.sampled_from([0, 1, 0.5, 2.0, "a", "b", "0.5", "x", None]))
-OUTPUT = st.recursive(
-    LEAF,
-    lambda children: st.lists(children, max_size=3) | st.dictionaries(st.sampled_from(["v", "w", "2024", "unit"]), children, max_size=3),
-    max_leaves=10,
-)
-
-
-def _ref_magnitude(value):
-    """What a YAML runner compares: a boolean as 0 or 1, a number or decimal string as itself."""
-
-    return Fraction(int(value)) if isinstance(value, bool) else _ref_number(value)
-
-
-def _ref_margin_passes_default(case, chooses, default) -> bool:
-    """policyengine-core accepts a value within every given margin (absolute,
-    and relative to the stated value), or exactly with none. Could the default
-    pass where the case states `chooses`?"""
-
-    target, other = _ref_magnitude(chooses), _ref_magnitude(default)
-    if target is None or other is None:
-        return False
-    limits = []
-    if case.get("absolute_error_margin") is not None:
-        limits.append(Fraction(repr(case["absolute_error_margin"])))
-    if case.get("relative_error_margin") is not None:
-        limits.append(Fraction(repr(case["relative_error_margin"])) * abs(target))
-    return abs(target - other) <= (min(limits) if limits else 0)
-
-
-CASES = st.one_of(
+OPTION = st.sampled_from([True, False, "a", "b", "A", "0.5", "0.50", "1", 1, 0.5, "16777216", "16777217"])
+COMPUTED = st.lists(st.sampled_from([True, False, 0, 1, 0.5, 0.30000001192092896, "a", "A", "B", 16777216.0]), max_size=3)
+ITEMS = st.one_of(
     st.none(),
-    st.fixed_dictionaries(
-        {"input_keys": st.lists(st.sampled_from(["v", "w", "people", "gov.x.y"]), max_size=3), "output": OUTPUT},
-        optional={
-            "absolute_error_margin": st.sampled_from([0, 0.01, 0.25, 0.5, 1, 2]),
-            "relative_error_margin": st.sampled_from([0, 0.1, 0.5, 1]),
+    st.fixed_dictionaries({
+        "case": st.fixed_dictionaries({
+            "parameters": st.lists(st.sampled_from(["gov.x.y", "gov.z"]), max_size=1),
             "reforms": st.booleans(),
-        },
-    ),
+            "extensions": st.booleans(),
+        }),
+        "choice": st.one_of(
+            st.fixed_dictionaries({"variable": st.just("v"), "error": st.just("KeyError: 'v'")}),
+            st.fixed_dictionaries({
+                "variable": st.just("v"),
+                "computed": COMPUTED,
+                "input_variables": st.lists(st.sampled_from(["v", "w", "age"]), max_size=2),
+            }),
+        ),
+    }),
 )
 
 
 @SETTINGS
-@given(CASES, OPTION, OPTION)
-def test_optimum_shown_matches_a_reference(case, chooses, default):
-    values = list(_ref_values(case["output"], "v")) if case else []
+@given(ITEMS, OPTION, OPTION)
+def test_optimum_shown_matches_a_reference(item, chooses, default):
+    case = (item or {}).get("case") or {}
+    choice = (item or {}).get("choice") or {}
+    computed = choice.get("computed") or []
     expected = (
-        case is not None
+        item is not None
         and not _ref_same(chooses, default)
-        and "v" not in case["input_keys"]
-        and not any("." in key for key in case["input_keys"])
+        and "error" not in choice
+        and "v" not in choice.get("input_variables", [])
+        and not case.get("parameters")
         and not case.get("reforms")
-        and not _ref_margin_passes_default(case, chooses, default)
-        and bool(values)
-        and all(_ref_same(value, chooses) for value in values)
+        and not case.get("extensions")
+        and bool(computed)
+        and all(_ref_same(value, chooses) for value in computed)
     )
-    assert (runner.optimum_shown(case, ("v", chooses, default)) is None) is expected
+    assert (runner.optimum_shown(item, ("v", chooses, default)) is None) is expected

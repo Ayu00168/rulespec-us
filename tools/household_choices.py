@@ -56,6 +56,7 @@ import copy
 import json
 import os
 import re
+import struct
 import sys
 import urllib.error
 from collections.abc import Callable, Iterator, Mapping
@@ -243,13 +244,21 @@ def in_domain(domain: Any, value: Any) -> bool:
 
 def same_value(a: Any, b: Any) -> bool:
     """Two domain values are the same option: booleans and strings by
-    equality and type, decimal strings by value ("0.5" is "0.50")."""
+    equality and type; decimal strings by value, or when they round to the
+    same float32 number a model would compute ("0.5" is "0.50", and
+    "16777217" is "16777216"), since a pin can't tell those apart."""
 
     if isinstance(a, bool) or isinstance(b, bool):
         return type(a) is type(b) and a == b
     left, right = _decimal(a), _decimal(b)
     if left is not None and right is not None:
-        return left == right
+        if left == right:
+            return True
+        try:
+            pack = lambda value: struct.unpack("f", struct.pack("f", float(value)))[0]  # noqa: E731
+            return pack(left) == pack(right)
+        except (OverflowError, struct.error):
+            return False
     return type(a) is type(b) and a == b
 
 
@@ -666,9 +675,10 @@ def check_statutory(items: Any, *, jurisdictions: frozenset[str]) -> list[str]:
         sc._string(item.get("citation"), label=f"{i_label}.citation", issues=issues)
         sc._string(item.get("note"), label=f"{i_label}.note", issues=issues)
         key = (item.get("jurisdiction"), item.get("citation"))
-        if key in seen:
-            issues.append(f"{i_label} repeats {key[1]} for {key[0]}.")
-        seen.add(key)
+        if all(isinstance(part, str) for part in key):  # a malformed one is reported above
+            if key in seen:
+                issues.append(f"{i_label} repeats {key[1]} for {key[0]}.")
+            seen.add(key)
         if isinstance(item.get("note"), str):
             issues.extend(money_issues([(f"{i_label}.note", item["note"])]))
     return issues
@@ -848,18 +858,21 @@ def verify_choices(
 
 
 def aggregate(files: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
-    """One view of every repository's file: each entry exactly once, as it is
-    in its file, with its repository, global id and worklist; and every
+    """One view of every repository's file: each file's repository and
+    version (an empty file too); each entry exactly once, as it is in its
+    file, with its repository, global id and worklist; and every
     statutory_not_choice item with its repository. Repositories are read in
     sorted order and entries in file order, so the view depends only on the
     files' contents."""
 
+    repositories: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     statutory: list[dict[str, Any]] = []
     issues: list[str] = []
     seen: dict[str, str] = {}
     for repo in sorted(files):
         payload = files[repo] if isinstance(files[repo], dict) else {}
+        repositories.append({"repository": repo, "version": copy.deepcopy(payload.get("version"))})
         for entry in sc._as_list(payload.get("entries")):
             if not isinstance(entry, dict):
                 continue
@@ -874,14 +887,18 @@ def aggregate(files: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
         for item in sc._as_list(payload.get("statutory_not_choice")):
             if isinstance(item, dict):
                 statutory.append({"repository": repo, "item": copy.deepcopy(item)})
-    return {"entries": rows, "statutory_not_choice": statutory}, issues
+    return {"repositories": repositories, "entries": rows, "statutory_not_choice": statutory}, issues
 
 
 def files_from_view(view: Mapping[str, Any]) -> dict[str, Any]:
-    """The files an aggregate view was built from (the inverse of aggregate
-    for files without colliding ids)."""
+    """The files an aggregate view was built from: the inverse of aggregate
+    for files that check accepts and whose ids don't collide, empty files
+    included."""
 
-    files: dict[str, Any] = {}
+    files: dict[str, Any] = {
+        row["repository"]: {"version": copy.deepcopy(row.get("version")), "entries": []}
+        for row in view.get("repositories") or []
+    }
     for row in view.get("entries") or []:
         files.setdefault(row["repository"], {"version": SCHEMA_VERSION, "entries": []})["entries"].append(copy.deepcopy(row["entry"]))
     for row in view.get("statutory_not_choice") or []:

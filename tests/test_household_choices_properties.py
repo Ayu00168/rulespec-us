@@ -29,6 +29,7 @@ Invariants, each for every input Hypothesis draws:
 
 from __future__ import annotations
 
+import array
 import copy
 import importlib.util
 import itertools
@@ -66,9 +67,14 @@ KEBAB = st.from_regex(r"[a-z][a-z0-9]{0,6}(-[a-z0-9]{1,4}){0,2}", fullmatch=True
     lambda word: not any(pattern.search(word) for pattern, _ in sc.HYGIENE_PATTERNS)
 )
 DECIMAL = st.from_regex(r"(0|[1-9][0-9]{0,3})(\.[0-9]{1,3})?", fullmatch=True)
+# Every quoted lower-case word in household_choices.py: the field names
+# `check` reads, among others. #1844 review round 2 (P2): six-character random
+# keys never reached `jurisdiction` or `citation`.
+FIELD_NAMES = sorted(set(re.findall(r'"([a-z][a-z_]{1,30})"', (TOOLS / "household_choices.py").read_text())))
 JSONISH = st.recursive(
     st.none() | st.booleans() | st.integers(-5, 5) | st.floats(allow_nan=False, allow_infinity=False) | st.text(max_size=8),
-    lambda children: st.lists(children, max_size=3) | st.dictionaries(st.text(max_size=6), children, max_size=3),
+    lambda children: st.lists(children, max_size=3)
+    | st.dictionaries(st.sampled_from(FIELD_NAMES) | st.text(max_size=6), children, max_size=3),
     max_leaves=12,
 )
 
@@ -123,9 +129,9 @@ def test_aggregate_round_trips_and_carries_every_entry_once(files):
         f"{entry['jurisdiction']}:{entry['id']}" for repo in sorted(files) for entry in files[repo]["entries"]
     ]
     assert [row["global_id"] for row in view["entries"]] == expected
+    # #1844 review round 2 (P2): empty files round-trip too.
     rebuilt = hc.files_from_view(view)
-    nonempty = {repo: payload for repo, payload in files.items() if payload["entries"] or payload.get("statutory_not_choice")}
-    assert rebuilt == {repo: nonempty[repo] for repo in sorted(nonempty)}
+    assert rebuilt == {repo: files[repo] for repo in sorted(files)}
     assert hc.aggregate(rebuilt)[0] == view
     # The view holds copies: changing it never changes the files.
     before = copy.deepcopy(files)
@@ -174,7 +180,7 @@ def domain_values(domain):
         return st.booleans()
     if domain["kind"] == "enum":
         return st.sampled_from(domain["options"])
-    return st.sampled_from(["0", "0.5", "0.50", "1", "1.0", "0.25"])
+    return st.sampled_from(["0", "0.5", "0.50", "0.500000001", "1", "1.0", "0.25"])
 
 
 @st.composite
@@ -218,7 +224,8 @@ def _same_reference(a, b) -> bool:
         return type(a) is type(b) and a is b
     number = re.compile(r"(0|[1-9][0-9]*)(\.[0-9]+)?")
     if isinstance(a, str) and isinstance(b, str) and number.fullmatch(a) and number.fullmatch(b):
-        return Fraction(a) == Fraction(b)
+        # The same number, or the same float32 a model would compute with.
+        return Fraction(a) == Fraction(b) or array.array("f", [float(a)])[0] == array.array("f", [float(b)])[0]
     return isinstance(a, str) and isinstance(b, str) and a == b
 
 
@@ -233,7 +240,9 @@ def test_an_optimum_pin_is_vacuous_exactly_when_it_is_the_default(case):
     assert [issue for issue in issues if "vacuous" not in issue] == []
 
 
-DOMAIN_VALUES = st.one_of(st.booleans(), KEBAB, DECIMAL)
+DOMAIN_VALUES = st.one_of(
+    st.booleans(), KEBAB, DECIMAL, st.sampled_from(["16777216", "16777217", "0.5", "0.500000001", "0.3"])
+)
 
 
 @PROPERTY
@@ -280,7 +289,9 @@ def test_the_worklist_lists_a_narrower_objective_exactly_when_it_is_narrower(wan
 def test_check_is_total(payload):
     with tempfile.TemporaryDirectory() as directory:
         ctx = _repo(directory)
-        for candidate in (payload, {"version": 1, "entries": [payload]}, {"version": 1, "entries": [], "statutory_not_choice": payload}):
+        statutory = {"version": 1, "entries": [], "statutory_not_choice": payload}
+        repeated = {"version": 1, "entries": [], "statutory_not_choice": [payload, copy.deepcopy(payload)]}
+        for candidate in (payload, {"version": 1, "entries": [payload]}, statutory, repeated):
             issues = hc.check_choices(candidate, ctx)
             assert isinstance(issues, list) and all(isinstance(issue, str) for issue in issues)
 

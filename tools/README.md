@@ -538,33 +538,38 @@ the same way. The report adds the worklist:
 
 `tools/pin_runner.py` runs the household choices' pins with the register's,
 labelled `choices.entries[i].tests[j]`. An `optimum` pin must pass and also be
-non-vacuous, or it is `vacuous`. For each pinned YAML case, the oracle records
-the case's input keys, stated output, reforms, extensions and error margins as
-the YAML runner collected them. The runner then requires:
+non-vacuous, or it is `vacuous`. The runner hands the oracle each optimum
+pin's decision variable. After the case runs, the oracle reads that variable
+from the case's own simulation (`simulation.calculate`), along with the
+variables the simulation took as inputs (`simulation.input_variables`, which
+counts direct inputs and axes). It also records whether the case changes the
+model: a top-level dotted input key (a parameter override, as the YAML runner
+reads it), a reform or an extension. The runner then requires:
 
-- the case runs the model as shipped: no parameter override (a dotted input
-  key), reform or extension;
-- its input does not set the decision variable;
-- its output states the variable;
-- every stated value is the chosen option, and that option is not the
-  default;
-- its error margin could not pass the default instead. policyengine-core
-  compares a boolean as 0 or 1 within `absolute_error_margin`, and within
-  `relative_error_margin` times the stated value, so a margin at least as
-  wide as the gap between the option and the default would pass either.
+- the case runs the model as shipped: no parameter override, reform or
+  extension;
+- the decision variable is not among the simulation's inputs;
+- the model computed at least one value, and every value is the chosen
+  option;
+- the chosen option is not the default.
 
-Options compare as the model writes them:
-- A boolean must be stated as a boolean. A case that states `1` for `true`
-  passes in policyengine-core but counts as vacuous here, which fails closed.
+The check reads the model's own computed value, not the case's stated
+output. So an error margin, an implicit tolerance, or an entity instance
+named like the variable can't stand in for the choice.
+
+Options compare as the model stores them:
+- A boolean must be a boolean: 1 is not true.
+- Numbers and decimal strings compare as float32. `16777217` and `16777216`
+  are one option, so neither shows the other, and `check` refuses such a
+  `chooses` too.
 - An enum option compares by name, so `head-of-household` matches
   PolicyEngine-US's `HEAD_OF_HOUSEHOLD`.
-- Shares and amounts compare by value.
 
 So each `optimum` pin shows the model choosing something other than the
 default. It does not show which rule chose it: a convention that picks the
 same option in that case passes too. For itemizing, every PolicyEngine-US case
-(at main, 2026-10-22) that states `tax_unit_itemizes` without changing the
-model also agrees with the deduction comparison, or doesn't state the
+(at main `505f530e49b9`, 2026-10-22) that states `tax_unit_itemizes` without
+changing the model also agrees with the deduction comparison, or doesn't state the
 deductions. So none of them tells the two apart, and the entry's `basis`
 records the code that compares tax.
 
@@ -581,7 +586,7 @@ Markdown view: each entry once, as it is in its file, with its repository,
 global id and worklist, and every `statutory_not_choice` item. It reads
 repositories in sorted order and entries in file order, and writes JSON with
 sorted keys. So the same files give byte-identical output in any order, and
-`files_from_view` rebuilds the files it read.
+`files_from_view` rebuilds the files it read, empty files included.
 `tests/test_household_choices_properties.py` states these properties and the
 tool's other invariants: one namespace from either side, vacuity, scope, the
 worklist, and totality. It also includes a differential test of the check's

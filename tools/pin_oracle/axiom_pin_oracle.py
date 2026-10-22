@@ -7,18 +7,29 @@ of the pinned items. Items are identified by their position in the
 collection (`index`), not by node id: a YAML test runner such as
 policyengine-core's gives every case in a file the same node id (`path::`),
 because a case's name is set only when it runs. A report belongs to the item
-`pytest_runtest_protocol` is running when it arrives. tools/pin_runner.py classifies the record; nothing here
-decides whether a pin passed. Items the register does not pin are dropped
-after the repository's own selection has run, so only pinned tests execute.
-For a pinned YAML case it also records the case's own input keys, stated
-output, reforms, extensions and error margins (`case`), from which the runner
-checks a household choice's optimum.
+`pytest_runtest_protocol` is running when it arrives. tools/pin_runner.py
+classifies the record; nothing here decides whether a pin passed. Items the
+register does not pin are dropped after the repository's own selection has
+run, so only pinned tests execute.
+
+For a household choice's optimum pin (a YAML case), it also records what the
+model did, for the runner to judge:
+- `case`: whether the case changes the model, as the YAML runner reads it.
+  That means top-level dotted input keys (parameter overrides), and any
+  reforms or extensions.
+- `choice`: after the case runs, the decision variable as the case's own
+  simulation computes it (`simulation.calculate(variable, period)`), and the
+  variables that simulation took as inputs (`simulation.input_variables`,
+  which counts direct inputs and axes). If the simulation can't be read, it
+  records the error instead.
 
 Environment (set by the runner):
 - AXIOM_PIN_ORACLE_OUT: where to write the JSON record.
 - AXIOM_PIN_ORACLE_ROOT: the checkout root; paths are recorded relative to it.
 - AXIOM_PIN_ORACLE_PINS: JSON list of [path, name] pairs, name being
   `function` or `Class::function` for a Python test, or a YAML case's `name`.
+- AXIOM_PIN_ORACLE_CHOICES (optional): JSON list of [path, name, variable]
+  for optimum pins: the decision variable to read after each case runs.
 
 It imports nothing but pytest and the standard library.
 """
@@ -32,27 +43,22 @@ from pathlib import Path
 import pytest
 
 _MESSAGE_LIMIT = 2000
-_CASE_LIMIT = 200_000  # characters of a case's recorded output
+_CASE_LIMIT = 200_000  # characters of a recorded value list
 
 
-def _input_keys(value: object) -> list[str]:
-    """Every mapping key anywhere in a case's input, as strings."""
+def _parameter_overrides(case_input: object) -> list[str]:
+    """The case's parameter overrides: the YAML runner reads a top-level
+    dotted input key as one (a reform), and nothing deeper."""
 
-    keys: set[str] = set()
-    stack = [value]
-    while stack:
-        node = stack.pop()
-        if isinstance(node, dict):
-            keys.update(str(key) for key in node)
-            stack.extend(node.values())
-        elif isinstance(node, list):
-            stack.extend(node)
-    return sorted(keys)
+    if not isinstance(case_input, dict):
+        return []
+    return sorted(str(key) for key in case_input if isinstance(key, str) and "." in key)
 
 
 def _jsonable(value: object) -> object:
-    """The case's output as JSON data: mapping keys become strings, and any
-    other value JSON can't hold becomes its text."""
+    """A recorded value as JSON data: mapping keys become strings, and any
+    other value JSON can't hold becomes its text. Too large or too deep a
+    value is None."""
 
     def convert(node: object) -> object:
         if isinstance(node, dict):
@@ -76,6 +82,10 @@ class _Oracle:
         self.root = Path(os.environ["AXIOM_PIN_ORACLE_ROOT"]).resolve()
         self.out = Path(os.environ["AXIOM_PIN_ORACLE_OUT"])
         self.wanted = {(path, name) for path, name in json.loads(os.environ["AXIOM_PIN_ORACLE_PINS"])}
+        self.choices = {
+            (path, name): variable
+            for path, name, variable in json.loads(os.environ.get("AXIOM_PIN_ORACLE_CHOICES") or "[]")
+        }
         self.index: dict[int, int] = {}  # id(item) -> position in the collection
         self.current: int | None = None
         self.record: dict = {
@@ -129,14 +139,9 @@ class _Oracle:
         case = getattr(item, "test", None)
         if isinstance(case, dict) and not isinstance(item, pytest.Function) and (path, name) in self.wanted:
             collected["case"] = {
-                "input_keys": _input_keys(case.get("input")),
-                "output": _jsonable(case.get("output")),
-                # What else decides whether the case shows the model choosing:
-                # a reform or extension, and the error margins it allows.
+                "parameters": _parameter_overrides(case.get("input")),
                 "reforms": bool(case.get("reforms")),
                 "extensions": bool(case.get("extensions")),
-                "absolute_error_margin": _jsonable(case.get("absolute_error_margin")),
-                "relative_error_margin": _jsonable(case.get("relative_error_margin")),
             }
         self.record["collected"].append(collected)
 
@@ -174,6 +179,27 @@ class _Oracle:
             yield
         finally:
             self.current = None
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_call(self, item: pytest.Item):
+        yield
+        # After the case ran: read the decision variable from its own
+        # simulation. A pin that failed is failed anyway; this records what
+        # the model computed when it passed.
+        variable = self.choices.get(self.key(item))
+        if variable is None or id(item) not in self.index:
+            return
+        record = self.record["collected"][self.index[id(item)]]
+        try:
+            simulation = item.simulation
+            values = simulation.calculate(variable, item.test.get("period"))
+            if hasattr(values, "decode_to_str"):  # an enum's values, by name
+                values = values.decode_to_str()
+            computed = _jsonable(list(values.tolist() if hasattr(values, "tolist") else values))
+            inputs = sorted(str(name) for name in simulation.input_variables)
+            record["choice"] = {"variable": variable, "computed": computed, "input_variables": inputs}
+        except Exception as exc:  # noqa: BLE001 - recorded; the runner fails the pin
+            record["choice"] = {"variable": variable, "error": f"{type(exc).__name__}: {exc}"[:_MESSAGE_LIMIT]}
 
     @pytest.hookimpl
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:

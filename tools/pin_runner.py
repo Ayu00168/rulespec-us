@@ -39,11 +39,11 @@ Only the outcome `passed` passes: every collected case of the pinned function
 passed its setup, call and teardown, none was deselected, skipped, xfailed or
 xpassed, and pytest's process exited 0, checked independently of the
 plugin's own record. A household choice's `optimum` pin must also be
-non-vacuous (`optimum_shown`), or it is `vacuous`: a YAML case that runs the
-model as shipped (no parameter override, reform or extension), whose input
-does not set the decision variable, whose stated output gives it as the chosen
-option (`chooses`) everywhere, which differs from the entry's default, and
-whose error margin could not pass the default instead. Anything else is an
+non-vacuous (`optimum_shown`), or it is `vacuous`. It must be a YAML case that
+runs the model as shipped, with no parameter override, reform or extension,
+and whose own simulation computed the chosen option (`chooses`) for the
+decision variable without taking that variable as an input. The chosen option
+must differ from the entry's default, even as a float32 number. Anything else is an
 issue: an unshipped or unprovable commit, a fetch, venv or install failure, a
 collection error, a missing or deselected test, a module-level skip,
 `skipped`, `xfail`, `xpass`, `failed` or `error`, a per-commit timeout
@@ -82,6 +82,7 @@ import os
 import re
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -345,101 +346,67 @@ def option_name(value: str) -> str:
     return value.upper().replace("-", "_")
 
 
+def _float32(value: Decimal) -> float | None:
+    """The value as a float32, as a model stores it; None if it can't be one."""
+
+    try:
+        return struct.unpack("f", struct.pack("f", float(value)))[0]
+    except (OverflowError, struct.error, ValueError):
+        return None
+
+
 def same_option(a: Any, b: Any) -> bool:
     """One option of a choice: booleans by value and type (1 is not true);
-    numbers and decimal strings by value ("0.5" is 0.5 is "0.50"); other
-    strings by option name (`separate` is `SEPARATE`)."""
+    numbers and decimal strings as the float32 numbers a model computes with
+    ("0.5" is 0.5 is "0.50", and 16777217 is 16777216); other strings by
+    option name (`separate` is `SEPARATE`)."""
 
     if isinstance(a, bool) or isinstance(b, bool):
         return type(a) is type(b) and a == b
     x, y = _number(a), _number(b)
     if x is not None or y is not None:
-        return x is not None and y is not None and x == y
+        if x is None or y is None:
+            return False
+        if x == y:
+            return True
+        fx, fy = _float32(x), _float32(y)
+        return fx is not None and fx == fy
     return isinstance(a, str) and isinstance(b, str) and option_name(a) == option_name(b)
 
 
-def _magnitude(value: Any) -> Decimal | None:
-    """A boolean or number as the number a YAML runner compares (true is 1)."""
-
-    return Decimal(int(value)) if isinstance(value, bool) else _number(value)
-
-
-def margin_admits_default(case: Mapping[str, Any], chooses: Any, default: Any) -> Decimal | None:
-    """The margin, when the case's error margin would also pass the default.
-
-    policyengine-core compares a stated number or boolean (as 0 or 1) within
-    `absolute_error_margin`, and within `relative_error_margin` times the
-    stated value; with neither, exactly. Both, when given, must hold. A margin
-    at least as wide as the gap between the chosen option and the default lets
-    the default pass in its place. Enum options compare exactly."""
-
-    target, other = _magnitude(chooses), _magnitude(default)
-    if target is None or other is None:
-        return None
-    allowed: list[Decimal] = []
-    for key, scale in (("absolute_error_margin", Decimal(1)), ("relative_error_margin", abs(target))):
-        value = _number(case.get(key)) if not isinstance(case.get(key), bool) else None
-        if case.get(key) is not None:
-            if value is None:
-                return Decimal("Infinity")  # an unreadable margin fails closed
-            allowed.append(abs(value) * scale)
-    margin = min(allowed) if allowed else Decimal(0)
-    return margin if margin >= abs(target - other) else None
-
-
-def _stated(output: Any, variable: str) -> list[Any]:
-    """Every value the case's output states for `variable`, at any entity
-    level, with per-entity lists and per-period mappings flattened."""
-
-    found: list[Any] = []
-    stack: list[tuple[Any, bool]] = [(output, False)]
-    while stack:
-        node, inside = stack.pop()
-        if isinstance(node, Mapping):
-            for key, value in node.items():
-                if inside:
-                    stack.append((value, True))  # a period or instance under the variable
-                else:
-                    stack.append((value, key == variable))
-        elif isinstance(node, list):
-            stack.extend((value, inside) for value in node)
-        elif inside:
-            found.append(node)
-    return found
-
-
-def optimum_shown(case: Any, expect: tuple[str, Any, Any]) -> str | None:
-    """None when a YAML case shows the model choosing the optimum: it runs the
-    model as shipped (no parameter override, reform or extension), its input
-    does not set the decision variable, its output states the variable, every
-    stated value is the chosen option, which is not the default, and its
-    error margin could not pass the default instead. Otherwise why the pin is
-    vacuous. It shows the model choosing the non-default option, not which
-    rule chose it: a convention that agrees with the optimum in this case
-    passes too."""
+def optimum_shown(item: Any, expect: tuple[str, Any, Any]) -> str | None:
+    """None when a pinned YAML case shows the model choosing the optimum,
+    else why the pin is vacuous. The oracle's record of the case says:
+    - `case`: whether it changes the model (parameter overrides, a reform or
+      an extension);
+    - `choice`: what its own simulation computed for the decision variable,
+      and which variables it took as inputs, including through axes.
+    The model must compute the chosen option everywhere, without the variable
+    as an input, in a case that runs it as shipped, and the option must not be
+    the default. This shows the model choosing the non-default option, not
+    which rule chose it: a convention that agrees in this case passes too."""
 
     variable, chooses, default = expect
     if same_option(chooses, default):
-        return f"the chosen option {chooses!r} is the default, so the case shows nothing"
-    if not (isinstance(case, Mapping) and isinstance(case.get("input_keys"), list)):
-        return "the YAML runner did not expose the case's input and output"
-    if variable in case["input_keys"]:
-        return f"the case sets {variable} as an input, so the model did not choose it"
-    overrides = sorted(key for key in case["input_keys"] if isinstance(key, str) and "." in key)
+        return f"the chosen option {chooses!r} is the default (or the same number), so the case shows nothing"
+    case = item.get("case") if isinstance(item, Mapping) else None
+    choice = item.get("choice") if isinstance(item, Mapping) else None
+    if not isinstance(case, Mapping) or not isinstance(choice, Mapping):
+        return "the YAML runner did not expose the case or the model's choice"
+    if choice.get("error") is not None or not isinstance(choice.get("input_variables"), list):
+        return f"the model's {variable} could not be read: {choice.get('error')}"
+    if variable in choice["input_variables"]:
+        return f"the case sets {variable} as an input (directly or through axes), so the model did not choose it"
+    overrides = case.get("parameters") if isinstance(case.get("parameters"), list) else []
     if overrides or case.get("reforms") or case.get("extensions"):
-        changed = ", ".join(overrides) or "a reform or extension"
+        changed = ", ".join(str(key) for key in overrides) or "a reform or extension"
         return f"the case changes the model ({changed}), so it does not show the model choosing as shipped"
-    margin = margin_admits_default(case, chooses, default)
-    if margin is not None:
-        if _magnitude(chooses) == _magnitude(default):
-            return f"the default {default!r} compares as the same number as {chooses!r}, so the case shows nothing"
-        return f"the case's error margin ({margin}) would also pass the default {default!r}"
-    values = _stated(case.get("output"), variable)
-    if not values:
-        return f"the case's output does not state {variable}"
-    wrong = [value for value in values if not same_option(value, chooses)]
+    computed = choice.get("computed")
+    if not (isinstance(computed, list) and computed):
+        return f"the model computed no value of {variable}"
+    wrong = [value for value in computed if not same_option(value, chooses)]
     if wrong:
-        return f"the case's output gives {variable} = {wrong[0]!r}, not the chosen option {chooses!r}"
+        return f"the model computed {variable} = {wrong[0]!r}, not the chosen option {chooses!r}"
     return None
 
 
@@ -511,7 +478,7 @@ def classify(
             elif pin.expect is not None:
                 # A household choice's optimum: every case of the pin must show
                 # the model choosing an option other than the default.
-                reason = next(filter(None, (optimum_shown(item.get("case"), pin.expect) for item in items)), None)
+                reason = next(filter(None, (optimum_shown(item, pin.expect) for item in items)), None)
                 if reason is not None:
                     result.update(outcome="vacuous", detail=reason)
         results.append(result)
@@ -805,6 +772,9 @@ def run_commit(repo: str, commit: str, pins: list[Pin], settings: Settings, *, k
                     step = "yaml-tests"
                     module, extra = YAML_RUNNERS[repo]
                     run_env["PYTEST_ADDOPTS"] = f"-p {ORACLE_MODULE} -p no:cacheprovider --basetemp={work / 'basetemp-yaml'}"
+                    run_env["AXIOM_PIN_ORACLE_CHOICES"] = json.dumps(
+                        sorted([pin.path, pin.name, pin.expect[0]] for pin in kind_pins if pin.expect is not None)
+                    )
                     argv = [str(python), "-m", module, "test", *files, *extra]
                 code, tail = timed(step, argv, cwd=tree, env=run_env)
                 result["logs"][step] = tail
