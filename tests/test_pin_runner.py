@@ -1492,6 +1492,7 @@ def test_record_provenance_asks_with_the_token_and_runs_nothing(tmp_path, monkey
         '{"provenance_version": 1, "records": [{"repo": "a/b", "commit": "c"}]}',
         '{"provenance_version": 1, "records": [{"repo": "a/b", "commit": "c", "shipped": "yes"}]}',
         '{"provenance_version": 1, "records": [{"repo": 1, "commit": 2, "shipped": false}]}',
+        '{"provenance_version": 1, "records": [{"repo": 1, "commit": "' + "c" * 40 + '", "shipped": false}]}',
         '{"provenance_version": 1, "records": [{"repo": "a/b", "commit": 2, "shipped": false}]}',
         '{"provenance_version": 1, "records": ["a/b"]}',
     ],
