@@ -865,12 +865,13 @@ def test_summarize_never_raises(tmp_path, monkeypatch, capsys):
 
 def test_summarize_prints_yaml_case_ids_but_nothing_that_formats(tmp_path):
     # A YAML case name is free text. It is printed inside a code span when it
-    # holds no backtick, @, angle bracket, or control, format or separator
-    # character but a space; anything else is malformed. #1843 round-2 review
+    # holds no backtick, @, angle bracket, category C, default-ignorable, or
+    # separator character but a space; anything else is malformed. #1843 round-2 review
     # (P3): "Café" and "A case!" were malformed though the rule allows them.
     printable = ("A farm loss (2024), $3,000", "Café", "A case!", "Ein Fall für 2024 [ü]", "(2024) a case", "a :: b")
     unsafe = ("x `@team`", "<img src=x>", "@everyone", "two\nlines", "tab\there", "\u202ereversed", "zero\u200dwidth",
-              "line\u2028separator", "no\u00a0break", " leading", "trailing ", "")
+              "line\u2028separator", "no\u00a0break", "private\ue000use", "surrogate\ud800", "unassigned\u0378",
+              " leading", "trailing ", "")
     pins = [
         {"entry": "us-md:x", "label": f"entries[0].tests[{index}]", "id": f"policyengine_us/tests/a.yaml::{name}", "outcome": "failed"}
         for index, name in enumerate(printable + unsafe)
@@ -883,6 +884,129 @@ def test_summarize_prints_yaml_case_ids_but_nothing_that_formats(tmp_path):
         f"- `us-md:x` entries[0].tests[{index}]: `PolicyEngine/policyengine-us@cccccccccccc:policyengine_us/tests/a.yaml::{name}` failed"
         for index, name in enumerate(printable)
     ] + [f"- pinned-tests artifact malformed ({len(unsafe) + 1} item(s)); the `pinned-tests` job's log has the details."]
+
+
+def _yaml_summary_report(names, *, path="tests/a.yaml", repo="PolicyEngine/a"):
+    return {
+        "commits": [{"repo": repo, "commit": COMMIT, "issues": [], "pins": [
+            {"entry": "us:x", "label": f"entries[0].tests[{index}]", "id": f"{path}::{name}", "outcome": "failed"}
+            for index, name in enumerate(names)
+        ]}],
+        "unrun": [], "issues": [],
+    }
+
+
+@pytest.mark.parametrize("forbidden", ["`", "<", ">", "@"])
+def test_summarize_refuses_each_unsafe_case_name(tmp_path, forbidden):
+    # A second unsafe character must not mask removal of this one's guard.
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(_yaml_summary_report(["ab", f"a{forbidden}b"])))
+    assert runner.summarize(path) == [
+        "- `us:x` entries[0].tests[0]: `PolicyEngine/a@cccccccccccc:tests/a.yaml::ab` failed",
+        "- pinned-tests artifact malformed (1 item(s)); the `pinned-tests` job's log has the details.",
+    ]
+
+
+@pytest.mark.parametrize("name", [
+    "\u034f", "\u115f", "\u1160", "\u115f\u1160", "\u17b4", "\u17b5", "\u180b", "\u180d", "\u180f",
+    "\u3164", "\ufe00", "\ufe0f", "\uffa0", "\U000e0100", "\U000e01ef",
+])
+def test_summarize_refuses_default_ignorable_case_names(tmp_path, name):
+    # Every hard-coded range is tested at both boundaries, independently of
+    # category C: all these characters are letters or combining marks.
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(_yaml_summary_report([name])))
+    assert runner.summarize(path) == [
+        "- pinned-tests artifact malformed (1 item(s)); the `pinned-tests` job's log has the details."
+    ]
+
+
+@pytest.mark.parametrize(("name", "displayed"), [
+    ("a" * 200, "a" * 200),
+    ("a" * 201, "a" * 200 + "…"),
+    ("a" * 199 + " z", "a" * 199 + "…"),
+    ("a" * 300_000, "a" * 200 + "…"),
+])
+def test_summarize_shortens_long_yaml_case_names(tmp_path, name, displayed):
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(_yaml_summary_report([name])))
+    assert runner.summarize(path) == [
+        f"- `us:x` entries[0].tests[0]: `PolicyEngine/a@cccccccccccc:tests/a.yaml::{displayed}` failed"
+    ]
+
+
+def test_summarize_validates_the_whole_name_before_shortening(tmp_path):
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(_yaml_summary_report(["a" * 300_000 + "`"])))
+    assert runner.summarize(path) == [
+        "- pinned-tests artifact malformed (1 item(s)); the `pinned-tests` job's log has the details."
+    ]
+
+
+def test_summarize_bounds_the_whole_output(tmp_path, capsys):
+    path = tmp_path / "report.json"
+    # Long names are shortened individually; large, valid paths still make
+    # the character budget bind before the existing 100-line limit.
+    report = _yaml_summary_report(["a" * 10_000] * 99, path="tests/" + "b" * 1000 + ".yaml")
+    path.write_text(json.dumps(report))
+    lines = runner.summarize(path)
+    assert 1 < len(lines) < 100
+    assert lines[-1] == f"- ... and {99 - len(lines) + 1} more; see the report artifact."
+    assert all("::" + "a" * 200 + "…` failed" in line for line in lines[:-1])
+    assert sum(len(line) + 1 for line in lines) <= 60_000
+    assert runner.main(["--summarize", str(path)]) == 0
+    assert len(capsys.readouterr().out) <= 60_000
+    # The full prefix can consume the budget: even a repository name alone
+    # must not force an oversized line into the result.
+    path.write_text(json.dumps(_yaml_summary_report(["ab"], repo="PolicyEngine/" + "a" * 60_000)))
+    assert runner.summarize(path) == ["- ... and 1 more; see the report artifact."]
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+def test_summarize_character_budget_boundary(tmp_path, extra):
+    path = tmp_path / "report.json"
+    # Exactly 60,000 rendered characters, including the CLI's final newline,
+    # fit. One more is replaced by the bounded artifact pointer.
+    prefix = "- `us:x` entries[0].tests[0]: `PolicyEngine/"
+    suffix = "@cccccccccccc:tests/a.yaml::ab` failed\n"
+    repo_name = "a" * (60_000 - len(prefix) - len(suffix) + extra)
+    path.write_text(json.dumps(_yaml_summary_report(["ab"], repo="PolicyEngine/" + repo_name)))
+    lines = runner.summarize(path)
+    if extra:
+        assert lines == ["- ... and 1 more; see the report artifact."]
+    else:
+        assert "\n".join(lines) + "\n" == prefix + repo_name + suffix
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+def test_summarize_character_budget_counts_every_line_break(tmp_path, extra):
+    path = tmp_path / "report.json"
+    # Each detail line is 30,000 characters including its newline. A second
+    # line one character longer must overflow; omitting accumulated newlines
+    # from the budget would admit 60,001 rendered characters here.
+    prefix = "- `us:x` entries[0].tests[0]: `PolicyEngine/"
+    suffix = "@cccccccccccc:tests/a.yaml::ab` failed\n"
+    repo_name = "a" * (30_000 - len(prefix) - len(suffix))
+    report = _yaml_summary_report(["ab", "ab" + "c" * extra], repo="PolicyEngine/" + repo_name)
+    path.write_text(json.dumps(report))
+    lines = runner.summarize(path)
+    if extra:
+        assert lines[-1] == "- ... and 1 more; see the report artifact."
+    else:
+        assert len(lines) == 2
+        assert len("\n".join(lines) + "\n") == 60_000
+    assert len("\n".join(lines) + "\n") <= 60_000
+
+
+def test_summarize_reserves_room_for_the_overflow_line(tmp_path):
+    path = tmp_path / "report.json"
+    # A line can fit by itself yet leave no room for the overflow pointer;
+    # it must be removed as well when another line would exceed the budget.
+    first = "- `us:x` entries[0].tests[0]: `PolicyEngine/"
+    suffix = "@cccccccccccc:tests/a.yaml::ab` failed\n"
+    repo_name = "a" * (60_000 - len(first) - len(suffix))
+    path.write_text(json.dumps(_yaml_summary_report(["ab", "cd"], repo="PolicyEngine/" + repo_name)))
+    assert runner.summarize(path) == ["- ... and 2 more; see the report artifact."]
 
 
 def test_summarize_without_a_report(tmp_path):

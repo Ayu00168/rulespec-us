@@ -368,9 +368,22 @@ Its result leaves only as the JSON artifact. The alarm job reads that artifact
 with main's `pin_runner.py --summarize`, which checks every field's type and
 prints only fields that match fixed patterns. The one free text it prints is a
 YAML case's name, inside its pin id in a code span, and only when the name has
-no backtick, `@` or angle bracket and no control, format or separator
-character but a space ("Café" and "A case!" print; a line break or a
-bidirectional override makes the pin malformed). A missing or malformed artifact,
+no backtick, `@` or angle bracket. The rule refuses every Unicode category C
+character (control, format, private-use, surrogate and unassigned), every
+separator except a space, and every Default_Ignorable_Code_Point character,
+including those outside category C: U+034F, U+115F–U+1160, U+17B4–U+17B5,
+U+180B–U+180D, U+180F, U+3164, U+FE00–U+FE0F, U+FFA0 and
+U+E0100–U+E01EF. "Café" and "A case!" print; a line break, a bidirectional
+override or a default-ignorable character makes the pin malformed. Tests check
+that names stay inside one code span, contain none of those forbidden
+characters, and cannot insert lines, mentions or angle brackets. They do not
+establish that every accepted Unicode character is visibly distinguishable.
+At most 200 characters of a YAML case name are displayed; longer names use
+the first 200 characters, right-stripped, followed by `…`. The summary holds
+at most 100 detail lines and 60,000 Python characters (Unicode code points),
+including an overflow line pointing to the report artifact. Workflow
+boilerplate is added separately; this is not a UTF-16-unit or byte budget.
+A missing or malformed artifact,
 including one without the `commits`, `unrun` and `issues` lists or a commit
 without its `pins` and `issues` lists (the runner always writes them),
 becomes its own alarm line ("pinned-tests artifact malformed"); the summary

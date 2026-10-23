@@ -23,10 +23,10 @@ Invariants, for every oracle record:
 6. `summarize` prints, from any report, only text that fixed patterns allow:
    every backticked span is an entry id, a commit reference or a pin id, and
    the only free text from the run is a YAML case's name inside its pin id,
-   which holds no backtick, @ or angle bracket and no control, format or
-   separator character but a space. For any JSON artifact, any field
-   of any type, `--summarize` exits 0 and prints either a valid summary or
-   the malformed-artifact alarm.
+   which holds no backtick, @ or angle bracket, no category C or
+   default-ignorable character, and no separator but a space. For any JSON
+   artifact, any field of any type, `--summarize` exits 0 and prints either a
+   valid summary or the malformed-artifact alarm.
 7. Provenance: for any answers GitHub's API could give, `commit_provenance`
    never raises, and says a commit is shipped exactly when the canonical name
    is the pinned one, the repository says it is not a fork, and compare says
@@ -240,7 +240,7 @@ def test_cache_key(names, other, order):
     assert changed != key
 
 
-# 6. The alarm summary prints no free text from the run.
+# 6. The alarm summary validates its one free-text field, a YAML case name.
 BACKTICKED = re.compile(r"`([^`]*)`")
 SAFE_SPANS = (
     re.compile(r"[a-z0-9-]+:[a-z0-9-]+"),
@@ -248,11 +248,15 @@ SAFE_SPANS = (
     re.compile(r"pinned-tests"),
 )
 YAML_CASE_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+@[0-9a-f]{12}:[A-Za-z0-9_./-]+\.ya?ml::(.+)", re.DOTALL)
+DEFAULT_IGNORABLE_IN_NAME = re.compile(
+    "[\u034f\u115f-\u1160\u17b4-\u17b5\u180b-\u180d\u180f\u3164\ufe00-\ufe0f\uffa0\U000e0100-\U000e01ef]"
+)
 
 
 def _safe_span(span):
     """A span the alarm may print: a fixed pattern, or a YAML case reference
-    whose name can't end the code span, mention, link or hide text."""
+    whose name has no forbidden delimiter, category C, default-ignorable
+    character, non-space separator or surrounding whitespace."""
 
     if any(pattern.fullmatch(span) for pattern in SAFE_SPANS):
         return True
@@ -260,7 +264,7 @@ def _safe_span(span):
     if match is None:
         return False
     name = match.group(1)
-    return name == name.strip() and not any(
+    return name == name.strip() and DEFAULT_IGNORABLE_IN_NAME.search(name) is None and not any(
         char in "`@<>" or (char != " " and unicodedata.category(char)[:1] in ("C", "Z")) for char in name
     )
 FIXED_TEXT = re.compile(
@@ -297,14 +301,30 @@ reports = st.fixed_dictionaries({
     "unrun": st.one_of(st.lists(st.fixed_dictionaries({"entry": text, "label": text, "reason": text}), max_size=2), json_values),
     "issues": st.one_of(st.lists(text, max_size=2), json_values),
 })
+# These reports have exactly one defect, so a different malformed field or
+# a second forbidden character cannot mask an individually missing guard.
+targeted_name_reports = st.builds(
+    lambda before, forbidden, after: {
+        "commits": [{"repo": "PolicyEngine/a", "commit": COMMIT, "issues": [], "pins": [{
+            "entry": "us:x", "label": "entries[0].tests[0]", "outcome": "failed",
+            "id": f"{YAML_PATH}::a{before}{forbidden}{after}b",
+        }]}],
+        "unrun": [], "issues": [],
+    },
+    st.text(alphabet="abcXYZ 012", max_size=8),
+    st.sampled_from(["`", "<", ">", "@"]),
+    st.text(alphabet="abcXYZ 012", max_size=8),
+)
 
 
 @SETTINGS
-@given(report=st.one_of(reports, json_values))
+@given(report=st.one_of(reports, json_values, targeted_name_reports))
 def test_summarize_prints_only_fixed_text(tmp_path_factory, report):
     path = tmp_path_factory.mktemp("summary") / "report.json"
     path.write_text(json.dumps(report))
-    for line in runner.summarize(path):
+    lines = runner.summarize(path)
+    assert sum(len(line) + 1 for line in lines) <= 60_000
+    for line in lines:
         assert "\n" not in line
         assert FIXED_TEXT.fullmatch(line), line
         for span in BACKTICKED.findall(line):
@@ -312,7 +332,7 @@ def test_summarize_prints_only_fixed_text(tmp_path_factory, report):
 
 
 @SETTINGS
-@given(report=st.one_of(reports, json_values))
+@given(report=st.one_of(reports, json_values, targeted_name_reports))
 def test_summarize_cli_exits_zero_on_any_artifact(tmp_path_factory, report):
     path = tmp_path_factory.mktemp("cli") / "report.json"
     path.write_text(json.dumps(report))
