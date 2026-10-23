@@ -68,6 +68,7 @@ allowed_root_files:
   - LICENSE-CODE
   - NOTICE
   - README.md
+  - household-choices.yaml
   - known-dangling.yaml
   - known-missing-money-atoms.yaml
   - known-source-conflicts.yaml
