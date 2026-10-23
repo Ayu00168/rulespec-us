@@ -1,4 +1,4 @@
 [toolchain]
-axiom_corpus_release = "us-rulespec-2026-08-08-obbb-alien-snap"
-axiom_corpus_release_content_sha256 = "0d69a0cdbe024fc2276f3c261c00402bb0a47488ac5f482cc20bd3404980adbc"
-validation_waiver_set_sha256 = "39979b41cdb3b0872bee502f445828feeaf43a59a2f68aa4b4482dd594e56dc9"
+axiom_corpus_release = "us-rulespec-2026-10-20-fs-pilot-reg-e-f"
+axiom_corpus_release_content_sha256 = "788608e7c7181d77f3c2313b3694b6c1f01b324e415e2dcadd8607edd0deee61"
+validation_waiver_set_sha256 = "80200381643a69e4adda43c6a579deb23e2d834134f39cc311da2781dfb970ce"

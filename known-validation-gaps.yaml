@@ -1335,21 +1335,15 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
-  "us-co/regulations/9-ccr-2503-6/3.606.1/E.yaml":
-    active:
-      fingerprint: "sha256:d9375b14930a8362f5db779f54d5843eeb2570792add02fd87207d93a58ad3cf"
-      owner: "@MaxGhenis"
-      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
-      expires: "2026-12-21"
   "us-co/regulations/9-ccr-2503-6/3.606.1/F.yaml":
     active:
-      fingerprint: "sha256:dfc981e7244f26f9a085bf6e4e08ed7b6c385595ae33c4bf71ce5f03f1bc1b32"
+      fingerprint: "sha256:dd2091604f1ce9f2ee0225e84ee90895b18c0ceb79767d390ade881f43d450d4"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
   "us-co/regulations/9-ccr-2503-6/3.606.6.yaml":
     active:
-      fingerprint: "sha256:93aacbe77f4ff7d5c938dfe9a12abd154ada8c48849e104fce0adadef0af6b73"
+      fingerprint: "sha256:dba9d034ce001d90bffd3417e98c6a828ddc855e3073cf3e2376bbe04ad6a22e"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -1404,12 +1398,6 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
   "us-ma/regulations/106-cmr/366/140/block-1.yaml":
     active:
       fingerprint: "sha256:c6fbe453ef93dfda542a6bb0437d6adf5e10af8aa56e7ea7a305793a5a9c28a6"
-      owner: "@MaxGhenis"
-      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
-      expires: "2026-12-21"
-  "us-ny/policies/income_tax/pilot_liability_pipeline.yaml":
-    active:
-      fingerprint: "sha256:f7c0dbbc1efc774dc4d8580d04cd55383ab947772e1fc98cf20aff00d246086e"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -1833,33 +1821,9 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
-  "us-co/regulations/9-ccr-2503-6/3.606.1/G.yaml":
-    active:
-      fingerprint: "sha256:418faaa21ecc85196c7248ede2b45c903846b3283956e3083be2300d44a8e049"
-      owner: "@MaxGhenis"
-      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
-      expires: "2026-12-21"
-  "us-co/regulations/9-ccr-2503-6/3.606.1/H.yaml":
-    active:
-      fingerprint: "sha256:44a3796fc807397fca2e3fa5039ef079612a155eb10fcdf463a1f76f8c69e38a"
-      owner: "@MaxGhenis"
-      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
-      expires: "2026-12-21"
-  "us-co/regulations/9-ccr-2503-6/3.606.1/I.yaml":
-    active:
-      fingerprint: "sha256:8ed92951663398f975da443851f649ea77197a640c82ad513e6e64c1041821fe"
-      owner: "@MaxGhenis"
-      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
-      expires: "2026-12-21"
-  "us-co/regulations/9-ccr-2503-6/3.606.1/J.yaml":
-    active:
-      fingerprint: "sha256:f2044f05d0e714b53eb5e38a7d82757fd29e99b43054f1758cded085e0710c15"
-      owner: "@MaxGhenis"
-      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
-      expires: "2026-12-21"
   "us-co/regulations/9-ccr-2503-6/3.606.2.yaml":
     active:
-      fingerprint: "sha256:ee917e7c4e61911abffd9f57bc8b7a3c0a59fefdf3e092c09ae6ccea65f4bd09"
+      fingerprint: "sha256:1e7a054ce3493f382cc7d814dc6632abc65965ac579ca1db915a9036fbb04cc2"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -2697,7 +2661,7 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-ny/statutes/NYC/11-1701.yaml":
     active:
-      fingerprint: "sha256:c44346ff79acce3723c819ae88dd1f020d9e43d1eb13968bf72f92d0c8fdc1c2"
+      fingerprint: "sha256:5b8e0003d0a6063b9b7c800fae244bb95daeddfcd1ed48a288c1d667b59b4a9d"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -3375,7 +3339,7 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-tn/regulations/1240-01/04/27/block-1.yaml":
     active:
-      fingerprint: "sha256:3a7e3d33ca706ef824a6492ee0060538f9c4fe631748cfd43c11169a4a2307c0"
+      fingerprint: "sha256:9fed3ffe759bab5d31f4fafc1f36ebbf87add896aa362b17bf8e6365f90f3085"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -3753,7 +3717,7 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-il/policies/dhs/csmm/25-06-01.yaml":
     active:
-      fingerprint: "sha256:014ef635d95a9c1af7ac4fa10b8ef50c7975161af591dca8c2e8d918fecec937"
+      fingerprint: "sha256:73f710c8a2bba56faf1a1de705402a369901de6379d704f992a87f0331b12e99"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -4029,13 +3993,13 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-ca/policies/cdss/calworks/minimum-basic-standard-of-adequate-care.yaml":
     active:
-      fingerprint: "sha256:22f5a0697b6f8e874a9d00f004fbca2b30b6d7d5f4cb75a05f91fc51e6db2079"
+      fingerprint: "sha256:aef37b20677d59b800f61c0797b2485c36f654adfbddd1059c9bc76c2f0727f4"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
   "us-ca/policies/cdss/calworks/monthly-aid-payment.yaml":
     active:
-      fingerprint: "sha256:b664307194e918f742cd969c0b1f4d3eb09239a26e754abdb204e6a5caf1211b"
+      fingerprint: "sha256:6433ecf90f72a21829c619818d96766a003a7442adb4f1a48d6bbb018040b6d3"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -4420,12 +4384,6 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
   "us-co/regulations/9-ccr-2503-5/3.587.1.yaml":
     active:
       fingerprint: "sha256:b4768a46d8defa0ea778ad7deafc9eff7e4cdcbe5c708a371da49450859ab39c"
-      owner: "@MaxGhenis"
-      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
-      expires: "2026-12-21"
-  "us-co/regulations/9-ccr-2503-6/3.606.1/K.yaml":
-    active:
-      fingerprint: "sha256:cab9b79a7fe61079c7bcb89fe2cabcfbb0cf06adb10a5a9d0dfc31850f913504"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -5055,7 +5013,7 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-in/statutes/6-3-3-9.yaml":
     active:
-      fingerprint: "sha256:98161a69813d294d4b4edce626abc6f1f117ecfe6c27d9caac70b4374064db23"
+      fingerprint: "sha256:3cf71b1613acb77d57001ca410250582ec64ad1b1180cbce49906b1b4bff621f"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -5211,7 +5169,7 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-md/policies/dhs/fia/im-26-13/2026-tca-tdap-benefit-increase/allowable-tca-monthly-payment.yaml":
     active:
-      fingerprint: "sha256:9dbd467c895e84c469c85985f7602f61e3a56cdc1bff578cb6613e735e6b1cfd"
+      fingerprint: "sha256:a962fe058b7f622c30e975a5a79d2ee5ca6b2883fb1533a0d24d7fd2b43a0ffc"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -5253,7 +5211,7 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-me/policies/income_tax/pilot_liability_pipeline.yaml":
     active:
-      fingerprint: "sha256:93ec98d2dcdb17d7a0afd0bc7958fb7b753fc19de4a2a6d9da36eb1c6c520106"
+      fingerprint: "sha256:421dcad2e0b8b3af2f81002da0c2a5fb8093f95f09dcf66f6f1dd81c966abb3f"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -5265,7 +5223,7 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-me/statutes/36/5111.yaml":
     active:
-      fingerprint: "sha256:7311339cc52590ed4b412cc131c7189722009e9fb06434c0fb0de46e26e89ad2"
+      fingerprint: "sha256:b8f07e6522c3a0512b634831da0c76206ef7ffc1f7673b800a4dfecad8bd89ec"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -5503,12 +5461,6 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
-  "us-nc/policies/dhhs/fns/fns-315-special-budgeting-income/page-8.yaml":
-    active:
-      fingerprint: "sha256:5a2ea12484e0d7db71da0e76963d1e49de659c954a043244cbae307f56f47097"
-      owner: "@MaxGhenis"
-      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
-      expires: "2026-12-21"
   "us-nc/policies/dhhs/fns/fns-820-intentional-program-violation-ipv-claims/page-4.yaml":
     active:
       fingerprint: "sha256:c7d92b8f63c60423a690e0f5e7610e63b806b468757ee956394c1ddca7f6c008"
@@ -5691,7 +5643,7 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-ny/statutes/TAX/616.yaml":
     active:
-      fingerprint: "sha256:98b079d98ab0bcba6feeb6fa05102aea0f3e14c0132541646ec31fb4c23e3acd"
+      fingerprint: "sha256:3bf79c044a34cfa67c421950a176f45edde0a6189e548e048e96c5558f3498fc"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -5799,7 +5751,7 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-sc/statutes/12-6-520.yaml":
     active:
-      fingerprint: "sha256:0f0bc45e78fac89064df97774ace8b442601e537387bd9199510f3bb18f39cfe"
+      fingerprint: "sha256:698136c6def993216002ef729f3b7e7fe93ece11baaefe1b836ca9b585d7cb59"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -5859,7 +5811,7 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-ut/statutes/59-10-1018.yaml":
     active:
-      fingerprint: "sha256:7252fb133a959df98c0df7d319dbabbe0c2f0792509df462060ed04526f0be98"
+      fingerprint: "sha256:be24a1d188e376af1b1b0ce9cf2ee24c2aa414ec377b5f1a2757c8c9ab848346"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -9567,13 +9519,7 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-ks/policies/income_tax/2026_k40es_schedule_before_credits.yaml":
     active:
-      fingerprint: "sha256:1e5e3f6e632438d98b0afeb65576520cc228c9ddc80617ee384cf04b4e291fef"
-      owner: "@MaxGhenis"
-      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
-      expires: "2026-12-21"
-  "us-ks/policies/income_tax/pilot_liability_pipeline.yaml":
-    active:
-      fingerprint: "sha256:eaa003d7fd0f460537864150cc21b24216af3e3356111460202f7082d648fb87"
+      fingerprint: "sha256:b91aabd77b34eb07d26ff59fb2808f06f6eaf15caa3295eb05302d7db3667ec6"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -9643,12 +9589,6 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
-  "us-nd/policies/income_tax/2026_nd1es_estimated_schedule.yaml":
-    active:
-      fingerprint: "sha256:8371d02698df2c2ccc1dbc79e45e4d7b82ea909b9c225fc4e453598dbe56d142"
-      owner: "@MaxGhenis"
-      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
-      expires: "2026-12-21"
   "us-nd/policies/income_tax/resident_core_liability_pipeline.yaml":
     active:
       fingerprint: "sha256:13f1f0b8a3fdb49240f0842e433ac70cc019f44c85737b265790282599ac817f"
@@ -9679,12 +9619,6 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
-  "us-nm/policies/income_tax/pilot_liability_pipeline.yaml":
-    active:
-      fingerprint: "sha256:77d0f8860b544f7c967923b53cde4c7f09dc4b10319974d8f39fac0e40282b4e"
-      owner: "@MaxGhenis"
-      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
-      expires: "2026-12-21"
   "us-nv/policies/income_tax/2026_resident_zero_liability.yaml":
     active:
       fingerprint: "sha256:50ef4b75bef17e2b6906ed134efde87be9eabb026bf2fc7f72e7ff072ed4dbfe"
@@ -9711,7 +9645,7 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-or/policies/income_tax/2026_or_estimate_schedule.yaml":
     active:
-      fingerprint: "sha256:22692e440bcbb9f9b9cb4c578005b17933633e622f8586b0adbc40ece4407285"
+      fingerprint: "sha256:874a554ba502371bc6199f24eeaac78cee9fcbe030ef03dc9930c1c784078f48"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -9783,13 +9717,13 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       expires: "2026-12-21"
   "us-wv/policies/income_tax/pilot_liability_pipeline.yaml":
     active:
-      fingerprint: "sha256:11e0df8ebfdda8430fffa25f4829472840ccec525d380af6f1946669bcfa2eaf"
+      fingerprint: "sha256:4c5c172e043ca2a4a95e95cbe0346202396e0f336d49e4685b4fbdeed1780c94"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
   "us-wv/policies/income_tax/resident_core_liability_pipeline.yaml":
     active:
-      fingerprint: "sha256:1926007a1e4fcf0415fd4758d3c228ffa4ac6070d2738fd57ec9afc65bc2abef"
+      fingerprint: "sha256:e0e36133f814062e247f93a0e4efc09d177704999a4157f5fa61d50d818cb81d"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
       expires: "2026-12-21"
@@ -10516,6 +10450,14 @@ validate_failures:  # https://github.com/TheAxiomFoundation/rulespec-us/issues/3
       fingerprint: "sha256:85d4951fe3a93c6fad3700bd553593f10d16d2d4bfb902f97233488e50c23491"
       owner: "@MaxGhenis"
       issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/782"
+      expires: "2026-12-21"
+  "us/regulations/7-cfr/273/4.yaml":
+    # Entity mismatch: Household rule household_refuses_determination reads the Person
+    # input determination_refused with no relation (7 CFR 273.4(c)(3)(iv)); fails under encoder 0.2.2248.
+    pending:
+      fingerprint: "sha256:b7c9b9462119ee7ff4362793e1013cbdf1f499960d1b7d295ec8ff4b28e04211"
+      owner: "@PavelMakarchuk"
+      issue: "https://github.com/TheAxiomFoundation/rulespec-us/issues/1713"
       expires: "2026-12-21"
   "us/regulations/7-cfr/273/7.yaml":
     active:

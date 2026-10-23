@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -325,7 +326,8 @@ def test_encode_failure_persists_complete_output(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(_local_drain, "WT_ROOT", tmp_path / "wt")
     monkeypatch.setattr(_local_drain, "already_handled", lambda _slug: False)
     monkeypatch.setattr(_local_drain, "make_worktree", lambda _slug, _ref: leaf)
-    monkeypatch.setattr(_local_drain, "signing_key", lambda: "test-key")
+    # Bypass retirement only to retain the encoder failure-log regression.
+    monkeypatch.setattr(_local_drain, "signing_key", lambda: None)
     monkeypatch.setattr(_local_drain, "encode_command", lambda *_args: ["encode"])
     monkeypatch.setattr(
         _local_drain,
@@ -341,6 +343,59 @@ def test_encode_failure_persists_complete_output(monkeypatch, tmp_path: Path) ->
     assert result["status"] == "failed"
     assert result["detail"] == f"encode/apply failed (rc=1); see {failure_log}"
     assert failure_log.read_text() == "resolver failed with full diagnostic\n"
+
+
+def test_retired_signing_key_never_looks_up_credentials(monkeypatch) -> None:
+    environ = MagicMock(name="environ")
+    subprocess_run = Mock(name="subprocess.run")
+    run = Mock(name="run")
+    with monkeypatch.context() as patch:
+        patch.setattr(_local_drain.os, "environ", environ)
+        patch.setattr(_local_drain.subprocess, "run", subprocess_run)
+        patch.setattr(_local_drain, "run", run)
+
+        with pytest.raises(SystemExit, match="Local apply signing is retired") as exc:
+            _local_drain.signing_key()
+
+    assert "TheAxiomFoundation/axiom-encode" in str(exc.value)
+    assert "targeted-signed-reencode" in str(exc.value)
+    assert "main in its protected environment" in str(exc.value)
+    assert environ.mock_calls == []
+    subprocess_run.assert_not_called()
+    run.assert_not_called()
+
+
+def test_encode_entry_rejects_retired_signing_before_worktree(monkeypatch) -> None:
+    make_worktree = Mock(name="make_worktree")
+    run = Mock(name="run")
+    monkeypatch.setattr(_local_drain, "_PAUSE", _local_drain.threading.Event())
+    monkeypatch.setattr(_local_drain, "already_handled", lambda _slug: False)
+    monkeypatch.setattr(_local_drain, "make_worktree", make_worktree)
+    monkeypatch.setattr(_local_drain, "run", run)
+
+    with pytest.raises(SystemExit, match="targeted-signed-reencode"):
+        _local_drain.encode_entry(
+            {"citation": "us-mi/statute/206.30/8", "slug": "retired-signing"}
+        )
+
+    make_worktree.assert_not_called()
+    run.assert_not_called()
+
+
+def test_drain_rejects_retired_signing_before_toolchain_checks(monkeypatch) -> None:
+    toolchain = Mock(name="require_generation_toolchain")
+    coverage = Mock(name="require_coverage_ref")
+    subprocess_run = Mock(name="subprocess.run")
+    monkeypatch.setattr(_local_drain, "require_generation_toolchain", toolchain)
+    monkeypatch.setattr(_local_drain, "require_coverage_ref", coverage)
+    monkeypatch.setattr(_local_drain.subprocess, "run", subprocess_run)
+
+    with pytest.raises(SystemExit, match="targeted-signed-reencode"):
+        _local_drain.cmd_drain(None)
+
+    toolchain.assert_not_called()
+    coverage.assert_not_called()
+    subprocess_run.assert_not_called()
 
 
 def test_wait_for_checks_rejects_stale_validation(monkeypatch) -> None:
@@ -640,8 +695,8 @@ def test_local_runner_reads_checked_in_workflow_toolchain(monkeypatch) -> None:
 
     toolchain = _local_drain.pinned_toolchain()
 
-    assert toolchain["axiom_encode_version"] == "0.2.2092"
-    assert toolchain["axiom_encode_ref"] == "3bf5a2afbff0391261ad65bd7497f1b0efaaff85"
+    assert toolchain["axiom_encode_version"] == "0.2.2160"
+    assert toolchain["axiom_encode_ref"] == "5ddb5ea4a3d98d386330ca4a076ecb1beb54e16a"
     assert toolchain["axiom_rules_engine_ref"] == (
         "89571cc2a938707fd60a5489b951135345697296"
     )
@@ -652,7 +707,7 @@ def test_local_runner_reads_checked_in_workflow_toolchain(monkeypatch) -> None:
         "b041b6b5a0e39f2c05c93669f354f8a54e9a84c3"
     )
     assert toolchain["axiom_corpus_ref"] == (
-        "8f7d60aaced28ee4252b9237f9d6e02360dc34bc"
+        "4cf99d445019a97e260514de5533bbc3e1baacaf"
     )
     assert toolchain["rulespec_us_ref"] == (
         "38d5c8c516f9243cedf8e07a22f96dde9ac66fe3"
@@ -673,7 +728,7 @@ def test_role_specific_workflows_use_compatible_toolchain_pins() -> None:
     assert "axiom-compose-ref: ${{ needs.workflow-toolchain.outputs.axiom_compose_ref }}" in validation
     assert "axiom_compose_ref: ${{ steps.pins.outputs.axiom_compose_ref }}" in validation
     assert '"axiom_compose_ref",' in validation
-    assert "validate-rulespec.yml@92ccb0f2266bf06aba6111d2bfd0e5f03af55fc3" in validation
+    assert "validate-rulespec.yml@30e942938e675ae2b4a23b6154652592dcdc8065" in validation
 
 
 def test_local_runner_reports_missing_checkout(tmp_path: Path) -> None:
@@ -701,3 +756,18 @@ def test_local_runner_toolchain_status_handles_missing_checkouts(
 
     assert not ok
     assert any("unavailable" in check for check in checks)
+
+
+def test_doctor_reports_retired_signing_before_any_probe(monkeypatch, capsys) -> None:
+    def broken_probe(*_args, **_kwargs):
+        raise FileNotFoundError("encoder cannot launch")
+
+    monkeypatch.setattr(_local_drain, "run", broken_probe)
+    monkeypatch.setattr(_local_drain, "pinned_toolchain", broken_probe)
+
+    with pytest.raises(FileNotFoundError):
+        _local_drain.cmd_doctor(None)
+
+    out = capsys.readouterr().out
+    assert "local apply signing" in out
+    assert "targeted-signed-reencode" in out
