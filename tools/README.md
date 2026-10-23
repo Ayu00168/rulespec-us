@@ -255,9 +255,13 @@ pins, it:
    every object of a fork network through the parent's URL, so a fetch that
    succeeds proves nothing about who wrote a commit, and neither does a
    `refs/pull/*` ref. Any failed or unexpected answer is a refusal, including
-   an exhausted rate limit; the job holds no token, so it asks
-   unauthenticated, which allows 60 requests an hour (one per repository plus
-   one per commit);
+   an exhausted rate limit. The job that runs pinned code holds no token, and
+   GitHub's unauthenticated limit (60 requests an hour, one per repository
+   plus one per commit) runs out on shared runners. So the workflow's
+   `pin-provenance` job, which runs no pinned code, asks first with the run's
+   read-only token (`pin_runner.py --record-provenance`), and the run reads its
+   record (`--provenance`) before any pinned code runs, asking GitHub
+   unauthenticated only for a commit the record lacks;
 1. fetches the commit (`git fetch --depth 1`) into a fresh checkout;
 2. picks the newest Python from 3.14 down to 3.9 that the project's
    `requires-python` allows;
@@ -346,8 +350,8 @@ repository, the commit, the sorted pinned ids and the runner version, a hash
 of the runner and the plugin, so a runner change re-runs everything. Failures
 are never cached, and neither is a nonzero exit. A cached record is used only
 if it names the same repository, commit and ids, every pin passed with at
-least one passing case, and the process exit was 0; provenance is asked of
-GitHub again first. Those checks catch corruption and stale records, but
+least one passing case, and the process exit was 0; provenance is checked
+again first (from this run's record, or GitHub). Those checks catch corruption and stale records, but
 they cannot authenticate a record someone forged on purpose. So the workflow
 restores the cache only for pull requests; pushes to main and the daily run
 execute every pin and save fresh results.
@@ -443,7 +447,8 @@ malformed-artifact alarm for any JSON artifact.
   but it is not an operating-system sandbox: the pinned code runs as the job's
   user. The job's isolation (no secrets, read-only permissions) is the
   boundary.
-- Provenance is asked unauthenticated, so GitHub's rate limit (60 requests an
-  hour per address) can refuse a run; that fails closed and passes on retry.
+- Provenance comes from the run's `pin-provenance` record, asked with the
+  run's read-only token. If that job fails, `pinned-tests` doesn't run, and
+  the check fails closed.
 - Deliberate evasion, such as a test that detects the runner, is out of
   scope: the register guards against honest mistakes.
