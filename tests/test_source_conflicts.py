@@ -1343,6 +1343,30 @@ def test_publication_regressions(tmp_path, description, count, refused):
     assert any("quotes more than 4 words in all" in issue for issue in issues) is refused
 
 
+def _readme_quotation_examples():
+    text = (REPO_ROOT / "tools" / "README.md").read_text()
+    section = text.split("### Quotation examples", 1)[1].split("\n## ", 1)[0]
+    rows = []
+    for line in section.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) == 4 and cells[0].startswith("`") and cells[0].endswith("`"):
+            rows.append((cells[0][1:-1], int(cells[1]), cells[2] == "yes"))
+    return rows
+
+
+def test_the_readme_quotation_examples_hold():
+    # The eng hub's ruling 3: the README states the ambiguous-opener rule with
+    # examples, and each example's documented count and refusal is checked
+    # here, so the docs can't drift from the code.
+    rows = _readme_quotation_examples()
+    assert len(rows) >= 25
+    for description, counted, refused in rows:
+        assert sc.quoted_words(description) == counted, description
+        issues: list[str] = []
+        sc._check_unpublished_source({**UNPUBLISHED, "description": description}, label="u", issues=issues)
+        assert any("quotes more than 4 words in all" in issue for issue in issues) is refused, description
+
+
 def test_the_refusal_shows_the_span_and_the_remedy(tmp_path):
     description = "The agency called it 'routine' and won't reopen the workers' case."
     issues = check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))

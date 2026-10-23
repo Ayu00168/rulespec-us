@@ -237,20 +237,13 @@ def _word_char(char: str) -> bool:
 
 
 def _opens_single(text: str, index: int) -> bool:
-    """A single mark may open a quotation unless it follows a letter or digit
-    (past any combining marks on it) or ends the text. So the apostrophes in
-    "agency's", "the workers'" and 6'7 open nothing, while 'one, wrote:'one,
-    ('one, '30 days, ' one and the elided year in "the '90s" all may. This is
-    the first known limit documented in tools/README.md: a quotation whose
-    opening mark directly follows a letter or digit (x'one …') is read as an
-    apostrophe."""
+    """A single mark may open a quotation unless it ends the text or is an
+    ambiguous opener (_ambiguous_opener: it directly follows a letter or
+    digit). So the apostrophes in "agency's", "the workers'" and 6'7 open
+    nothing, while 'one, wrote:'one, ('one, '30 days, ' one and the elided
+    year in "the '90s" all may."""
 
-    if index + 1 >= len(text):
-        return False
-    before = index - 1
-    while before >= 0 and index - before <= 4 and unicodedata.category(text[before]).startswith("M"):
-        before -= 1
-    return before < 0 or not text[before].isalnum()
+    return index + 1 < len(text) and not _ambiguous_opener(text, index)
 
 
 def _closes_single(text: str, index: int) -> bool:
@@ -300,23 +293,46 @@ def _glued(text: str, index: int) -> bool:
     return before >= 0 and text[before].isalnum()
 
 
-def _opens_delimited(text: str, index: int) -> bool:
-    """A delimited opener opens anywhere, except a mark that also closes
-    another pair (”, », ›, ″, “, «, ‹, 🙶). That opens where it starts a
-    quotation (_starts_a_quotation), and otherwise unless it directly
-    follows a letter or digit (_glued); ” » › ″, which close the commonest
-    pairs, also need a non-space after them. So the inch mark in 6” and the
-    inner closers in „a „b“ c“ and »a »b« c« open nothing, while « oui »,
-    :«one» and —«one» open. The first known limit follows (tools/README.md):
-    such a mark glued to a letter or digit (x«one …»), or ” » › ″ before a
-    space, opens nothing; main's floor still reads a glued “."""
+def _ambiguous_opener(text: str, index: int, *, inside: bool = False) -> bool:
+    """Whether a mark that could open a quotation is read as not opening
+    one, because it could as well close one. This one predicate is both
+    known limits (tools/README.md, Quotation examples), and every reading
+    asks it:
 
-    mark = text[index]
-    if mark not in _ALSO_CLOSES or _starts_a_quotation(text, index):
-        return True
-    if _glued(text, index):
+    - inside a quotation the mark could close (`inside`), it is ambiguous
+      unless it starts a quotation (_starts_a_quotation): a letter or digit
+      follows it after an opener prefix, or a quotation mark follows it at
+      the start or after whitespace. That is the second limit: such a nested
+      quotation that doesn't start with a letter or digit ("one "[sic] two"
+      three") reads as two quotations;
+    - elsewhere, a single mark or a mark that also closes another pair (”
+      » › ″ “ « ‹ 🙶) is ambiguous when it directly follows a letter or digit
+      (_glued), and ” » › ″, which close the commonest pairs, also when a
+      space or the end follows; unless it starts a quotation. That is the
+      first limit: x'one …' and x«one …» aren't counted (main's floor still
+      reads a glued “).
+
+    Any other mark ("  „  「 …) only opens, so it is never ambiguous."""
+
+    if _starts_a_quotation(text, index):
         return False
-    return mark not in _CONTEXT_OPENERS or (index + 1 < len(text) and not text[index + 1].isspace())
+    if inside:
+        return True
+    mark = text[index]
+    if mark not in _ALSO_CLOSES and mark not in _SINGLE_OPENERS:
+        return False
+    if _glued(text, index):
+        return True
+    return mark in _CONTEXT_OPENERS and (index + 1 == len(text) or text[index + 1].isspace())
+
+
+def _opens_delimited(text: str, index: int) -> bool:
+    """A delimited opener opens unless it is an ambiguous opener
+    (_ambiguous_opener). So the inch mark in 6” and the inner closers in
+    „a „b“ c“ and »a »b« c« open nothing, while « oui », :«one» and —«one»
+    open."""
+
+    return not _ambiguous_opener(text, index)
 
 
 def _opens_strict(text: str, index: int) -> bool:
@@ -340,7 +356,7 @@ def _delimited_close(text: str, index: int, reading: str) -> int:
         return _nested_close(text, index)
     pattern = _DELIMITER_CLOSE[text[index]]
     found = pattern.search(text, index + 1)
-    while reading == "strict" and found and _starts_a_quotation(text, found.start()):
+    while reading == "strict" and found and not _ambiguous_opener(text, found.start(), inside=True):
         found = pattern.search(text, found.start() + 1)
     return found.start() if found else len(text)
 
@@ -358,7 +374,7 @@ def _nested_close(text: str, index: int) -> int:
         position = found.start()
         mark = found.group()
         opens = mark in _DELIMITERS and _opens_delimited(text, position)
-        if mark in _DELIMITERS[stack[-1]] and not (opens and _starts_a_quotation(text, position)):
+        if mark in _DELIMITERS[stack[-1]] and (not opens or _ambiguous_opener(text, position, inside=True)):
             stack.pop()
             if not stack:
                 return position

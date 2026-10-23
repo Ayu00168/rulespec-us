@@ -1268,14 +1268,13 @@ def nested_double_quotations_in_prose(draw, shared=False):
 @example(case=("It wrote:\u201cone \u00abtwo \u300cthree\u300d\u00bb four\u201d today.", 4))
 @given(case=nested_double_quotations_in_prose())
 def test_nesting_in_a_disjoint_pair_counts_exactly(case):
-    # The eng hub's round-5 ruling: outside the two documented limits, a
-    # quotation nested in a pair that shares no mark with the outer one
-    # counts in full. The nested reading counts it exactly, no reading counts
-    # more, and the overall count is exact unless main's floor counts more.
+    # The eng hub's rulings 2 and 3: outside the ambiguous-opener predicate,
+    # a quotation nested in a pair that shares no mark with the outer one is
+    # counted exactly in each of the three readings, and overall unless
+    # main's floor counts more.
     text, quoted = case
     counts = {reading: sum(sc._words(span) for _, span in sc._delimited(text, reading)[0]) for reading in sc._DELIMITED_READINGS}
-    assert counts["nested"] == quoted, (counts, text)
-    assert max(counts.values()) == quoted, (counts, text)
+    assert set(counts.values()) == {quoted}, (counts, text)
     assert sc.quoted_words(text) == max(quoted, _main_quoted_words(text)), text
 
 
@@ -1286,11 +1285,11 @@ def test_nesting_in_a_disjoint_pair_counts_exactly(case):
 @example(case=("\u00abthe \u00abthe\u00bb\u00bb. today.", 2))
 @given(case=nested_double_quotations_in_prose(shared=True))
 def test_nesting_in_a_shared_pair_counts_in_full(case):
-    # Nesting in the same marks, or in a pair that shares a mark with the
-    # outer one, with the inner quotation starting with a letter or digit,
-    # counts at least in full (the second known limit covers the rest). It
-    # may count more: a mark that could close or open is read as opening
-    # when it isn't glued, failing closed.
+    # Inside the ambiguous-opener predicate (ruling 3): nesting in the same
+    # marks, or in a pair that shares a mark with the outer one, with the
+    # inner quotation starting with a letter or digit, counts at least in full
+    # (the second known limit covers the rest). It may count more, failing
+    # closed; the README's Quotation examples pin a case.
     text, quoted = case
     assert sum(sc._words(span) for _, span in sc._delimited(text, "nested")[0]) >= quoted, text
     assert sc.quoted_words(text) >= quoted, text
