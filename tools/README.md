@@ -123,7 +123,7 @@ Register-only fields:
 | `conflict`, `resolution` | `conflict` is `live` (the default) or `resolved`. `resolved` means a legislature or agency has closed the disagreement. It needs a `resolution` (`by`: `legislation` or `agency`; `effective`, a date; `record`, a public https URL) and `years.to`, the last year the sources disagree. A `live` entry has no `resolution`. |
 | `outcome` | `computed` or `refused`: whether the adopted reading computes the contested cases or refuses them. For a refusal, `reading` says what is refused and the substantive readings go in `alternatives`. |
 | `adopted_by` | RuleSpec modules in this repository that carry the entry, as `module` (path) and `interpretation` (id) pairs. |
-| `implementations` | Code outside RuleSpec that takes a reading: `repo`, `commit`, `path`, `follows` (what the code does today) and `cites_entry`, which says whether the file contains the global id. A consumer may adopt a reading other than the entry's: `adopts` (default `reading`) names the reading it intends, `basis` says why, and an optional `ruling` (`by`, `date`, public `record`) is the consumer's own ruling. PolicyEngine-US follows the statute where the entry adopts an agency's practice. An implementation lags when `follows` differs from `adopts`. |
+| `implementations` | Code outside RuleSpec that takes a reading: `repo`, `commit`, `path`, `follows` (what the code does today) and `cites_entry`, which says whether the file contains the global id. A consumer may adopt a reading other than the entry's: `adopts` (default `reading`) names the reading it intends, `basis` says why, and an optional `ruling` (`by`, `date`, public `record`) is the consumer's own ruling. That ruling may also name the `principle` it applies, from a closed list: `statute-first` (a statute over a conflicting form, instructions or practice), `regulations-are-law` (a regulation binds like the statute), `agency-breaks-ties` (the administering agency's reading decides a true tie) or `taxpayer-choice` (the taxpayer's cheapest election or allocation). `basis` stays the free-text reason, and the aggregate view carries the principle. PolicyEngine-US follows the statute where the entry adopts an agency's practice. An implementation lags when `follows` differs from `adopts`. |
 | `proposed` | Changes not yet merged that would implement a reading: `repo`, `pr` (the pull request URL), `path` and `follows`. Verify lists them but never counts them as implementations; move one to `implementations` once it merges, pinned to the commit on the default branch. |
 | `tests` | Tests that pin readings: `path`, `name` and `pins`, a list of reading references. Here, `name` is a test function (or `Class::function`) in a `.py` file, or a case name in a companion `.test.yaml`. A test in another repository adds `repo` and `commit`. It may also be a YAML test file (`.yaml`) whose `name` is the case's name, on one line, such as a PolicyEngine-US policy test. Verify checks that the case still exists at that commit. Another repository's YAML test file must sit under a `tests` directory. A Python test is a whole test function. `check` screens only a pin's syntax; a pin is established once the `pinned-tests` job has run it at its pinned commit and it passed. The runner executes a YAML case through its repository's own YAML test runner, so a YAML pin needs a `YAML_RUNNERS` entry (today, PolicyEngine-US's policyengine-core). See [Test references](#test-references). |
 | `money_case` | Optional. An invented case showing the size of the difference: `description`, `amount` (a decimal string), `currency`, `period` (once, week, month or year) and `computed_by`, the name of the one test in the entry's `tests` that computes the amount, asserting it or both figures whose difference it is. A public file carries no amount that no pinned test computes: leave the money case out instead. `check` also requires every `$` amount in the entry's own prose to be one the money case states. The prose is `question`, `reading`, `basis`, each alternative's `reading` and `effect`, and the consumer fields (an implementation's `basis`, `years.note`, an unpublished source's `description`). Excerpts are the sources' own words and may state any figure. The prose names a threshold without restating it ("above the section 1341 threshold"), because no test on the words around an amount can tell a quoted threshold from a computed one. So an entry without a money case has no dollar figures in its prose. Money is written one way, `$` and digits with commas between groups of three and optional two-digit cents (`$1,234.56`); other spellings (`USD 200`, `200 dollars`, `$ 200`, `$.50`, `$1.5k`) are issues. |
@@ -258,9 +258,13 @@ pins, it:
    every object of a fork network through the parent's URL, so a fetch that
    succeeds proves nothing about who wrote a commit, and neither does a
    `refs/pull/*` ref. Any failed or unexpected answer is a refusal, including
-   an exhausted rate limit; the job holds no token, so it asks
-   unauthenticated, which allows 60 requests an hour (one per repository plus
-   one per commit);
+   an exhausted rate limit. The job that runs pinned code holds no token, and
+   GitHub's unauthenticated limit (60 requests an hour, one per repository
+   plus one per commit) runs out on shared runners. So the workflow's
+   `pin-provenance` job, which runs no pinned code, asks first with the run's
+   read-only token (`pin_runner.py --record-provenance`), and the run reads its
+   record (`--provenance`) before any pinned code runs, asking GitHub
+   unauthenticated only for a commit the record lacks;
 1. fetches the commit (`git fetch --depth 1`) into a fresh checkout;
 2. picks the newest Python from 3.14 down to 3.9 that the project's
    `requires-python` allows;
@@ -349,8 +353,8 @@ repository, the commit, the sorted pinned ids and the runner version, a hash
 of the runner and the plugin, so a runner change re-runs everything. Failures
 are never cached, and neither is a nonzero exit. A cached record is used only
 if it names the same repository, commit and ids, every pin passed with at
-least one passing case, and the process exit was 0; provenance is asked of
-GitHub again first. Those checks catch corruption and stale records, but
+least one passing case, and the process exit was 0; provenance is checked
+again first (from this run's record, or GitHub). Those checks catch corruption and stale records, but
 they cannot authenticate a record someone forged on purpose. So the workflow
 restores the cache only for pull requests; pushes to main and the daily run
 execute every pin and save fresh results.
@@ -457,8 +461,9 @@ malformed-artifact alarm for any JSON artifact.
   but it is not an operating-system sandbox: the pinned code runs as the job's
   user. The job's isolation (no secrets, read-only permissions) is the
   boundary.
-- Provenance is asked unauthenticated, so GitHub's rate limit (60 requests an
-  hour per address) can refuse a run; that fails closed and passes on retry.
+- Provenance comes from the run's `pin-provenance` record, asked with the
+  run's read-only token. If that job fails, `pinned-tests` doesn't run, and
+  the check fails closed.
 - Deliberate evasion, such as a test that detects the runner, is out of
   scope: the register guards against honest mistakes.
 

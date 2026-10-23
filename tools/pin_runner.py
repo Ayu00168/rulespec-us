@@ -12,7 +12,8 @@ pytest.
 For each (repository, commit) the register pins, it:
 
 0. asks GitHub, before fetching anything, whether the commit is shipped code
-   of that repository (`source_conflicts.commit_provenance`): the canonical
+   of that repository (`source_conflicts.commit_provenance`), or reads the
+   answer `--record-provenance` recorded (below): the canonical
    name must be exactly the pinned one, the repository must not be a fork,
    and the commit must be reachable from its default branch. GitHub serves
    every object of a fork network through the parent's URL, so the owner in
@@ -60,14 +61,19 @@ its pinned commit, in the repository's own install resolved as of that
 commit's date, under its own pytest configuration.
 
 The job that runs this executes code from other repositories, so it holds no
-secrets and passes its result on only as the JSON report (`--report`).
+secrets and passes its result on only as the JSON report (`--report`). It
+asks GitHub unauthenticated, and on shared runners GitHub's unauthenticated
+limit (60 requests an hour) runs out. So provenance is recorded first, by
+`--record-provenance`, in a job that runs no pinned code and holds the
+workflow's read-only token (GH_TOKEN); the run reads it with `--provenance`
+before any pinned code runs, and asks GitHub only for a commit it lacks.
 
 Results that passed are cached (`--cache-dir`) under a key of the repository,
 the commit, the sorted pinned ids and the runner version (a hash of this file
 and the oracle plugin), so a runner change re-runs everything. Failures are
 never cached, a cached record is re-checked against the commit it is read
-for, and provenance is asked of GitHub again before any cached result is
-used. The workflow restores the cache only for pull requests, so pushes to
+for, and provenance is asked of GitHub again (or read from this run's
+record) before any cached result is used. The workflow restores the cache only for pull requests, so pushes to
 main and the daily run execute every pin.
 """
 
@@ -629,6 +635,9 @@ class Settings:
     uv_dirs: Mapping[str, str] = dataclasses.field(default_factory=dict)
     # GET a GitHub REST path; unauthenticated by default (the job holds no token).
     api: Callable[[str], Any] = dataclasses.field(default_factory=sc.github_api)
+    # Provenance recorded by --record-provenance, by (repository, commit);
+    # used instead of asking `api` (load_provenance).
+    provenance: Mapping[tuple[str, str], Mapping[str, Any]] = dataclasses.field(default_factory=dict)
 
 
 def _tail(path: Path) -> str:
@@ -696,14 +705,54 @@ def _refused(repo: str, commit: str, pins: list[Pin], provenance: Mapping[str, A
     }
 
 
+def _ask_provenance(repo: str, commit: str, api: Callable[[str], Any]) -> dict[str, Any]:
+    try:
+        return sc.commit_provenance(repo, commit, api)
+    except Exception as exc:  # noqa: BLE001 - an unanswerable question refuses
+        return {"repo": repo, "commit": commit, "shipped": False, "reason": f"runner error: {exc}"}
+
+
+PROVENANCE_VERSION = 1
+
+
+def record_provenance(payload: Any, api: Callable[[str], Any], choices: Any = None) -> dict[str, Any]:
+    """The provenance of every (repository, commit) the register and the
+    household choices pin, asked of GitHub through `api`. Runs no pinned code."""
+
+    groups, _ = collect_pins(payload, choices)
+    return {
+        "provenance_version": PROVENANCE_VERSION,
+        "records": [_ask_provenance(repo, commit, api) for repo, commit in sorted(groups)],
+    }
+
+
+def load_provenance(path: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    """Provenance recorded by record_provenance, by (repository, commit). A
+    file that isn't one raises ValueError, so the run fails closed."""
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("provenance_version") != PROVENANCE_VERSION or not isinstance(data.get("records"), list):
+        raise ValueError(f"{path} is not a provenance record of version {PROVENANCE_VERSION}")
+    records: dict[tuple[str, str], dict[str, Any]] = {}
+    for record in data["records"]:
+        if not (
+            isinstance(record, dict) and isinstance(record.get("repo"), str)
+            and isinstance(record.get("commit"), str) and isinstance(record.get("shipped"), bool)
+        ):
+            raise ValueError(f"{path} holds a malformed provenance record: {record!r}")
+        records[(record["repo"], record["commit"])] = record
+    return records
+
+
 def run_commit(repo: str, commit: str, pins: list[Pin], settings: Settings, *, key: str | None = None) -> dict[str, Any]:
     """Check provenance, then reuse a cached pass (`key`) or fetch, install and
     run one commit's pins. Never raises."""
 
-    try:
-        provenance = sc.commit_provenance(repo, commit, settings.api)
-    except Exception as exc:  # noqa: BLE001 - an unanswerable question refuses
-        provenance = {"repo": repo, "commit": commit, "shipped": False, "reason": f"runner error: {exc}"}
+    recorded = settings.provenance.get((repo, commit))
+    if recorded is not None:
+        provenance = dict(recorded)
+    else:
+        provenance = _ask_provenance(repo, commit, settings.api)
     if not provenance.get("shipped"):
         return _refused(repo, commit, pins, provenance)
     if key is not None:
@@ -1146,9 +1195,38 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="seconds per commit")
     parser.add_argument("--repo-url", default=REPO_URL, help="clone URL template with {repo}")
     parser.add_argument("--uv", default=shutil.which("uv"), help="uv executable")
-    parser.add_argument("--github-api", default=sc.GITHUB_API, help="GitHub REST API base URL (asked, unauthenticated, for provenance)")
+    parser.add_argument("--github-api", default=sc.GITHUB_API, help="GitHub REST API base URL (asked for provenance; unauthenticated in a run)")
     parser.add_argument("--git", default=shutil.which("git"), help="git executable")
+    parser.add_argument(
+        "--record-provenance", type=Path, metavar="FILE",
+        help="ask GitHub (with GH_TOKEN, when set) for the provenance of every pinned commit, write it here, and exit; runs no pinned code",
+    )
+    parser.add_argument(
+        "--provenance", type=Path, metavar="FILE",
+        help="read provenance that --record-provenance wrote; a commit the record lacks is asked of GitHub unauthenticated",
+    )
     args = parser.parse_args(argv)
+    register_path = args.register or args.root / sc.REGISTER_FILENAME
+    choices_path = args.choices or register_path.parent / sc.CHOICES_FILENAME
+
+    def load_choices() -> Any:
+        if args.choices is None and not choices_path.exists() and not choices_path.is_symlink():
+            return None
+        return sc.load_register(choices_path)
+
+    if args.record_provenance is not None:
+        try:
+            payload = sc.load_register(register_path)
+            api = sc.github_api(os.environ.get("GH_TOKEN") or None, base_url=args.github_api)
+            record = record_provenance(payload, api, load_choices())
+        except Exception as exc:  # noqa: BLE001 - no record, so the run that needs it fails closed
+            print(f"pin-runner: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+        args.record_provenance.parent.mkdir(parents=True, exist_ok=True)
+        args.record_provenance.write_text(json.dumps(record, indent=1) + "\n")
+        refused = sum(1 for item in record["records"] if not item.get("shipped"))
+        print(f"Recorded the provenance of {len(record['records'])} pinned commit(s); {refused} not shipped or unknown.")
+        return 0
     if args.summarize is not None:
         try:
             lines = summarize(args.summarize)
@@ -1165,17 +1243,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if not args.uv or not args.git:
                 raise RuntimeError("uv and git must be on PATH (or given with --uv and --git)")
-            register_path = args.register or args.root / sc.REGISTER_FILENAME
             payload = sc.load_register(register_path)
-            choices_path = args.choices or register_path.parent / sc.CHOICES_FILENAME
-            choices = (
-                sc.load_register(choices_path)
-                if args.choices is not None or choices_path.exists() or choices_path.is_symlink()
-                else None
-            )
+            choices = load_choices()
             settings = Settings(
                 uv=args.uv, git=args.git, work=work, timeout=args.timeout, repo_url=args.repo_url,
                 cache_dir=args.cache_dir, uv_dirs=uv_dirs(args.uv), api=sc.github_api(base_url=args.github_api),
+                provenance=load_provenance(args.provenance) if args.provenance is not None else {},
             )
             report = run_register(payload, settings, choices)
         except Exception as exc:  # noqa: BLE001 - fail closed, with a report

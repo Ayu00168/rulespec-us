@@ -1034,6 +1034,50 @@ def test_pinned_tests_job_holds_no_secrets():
             assert step["with"]["persist-credentials"] is False, step
 
 
+def test_pin_provenance_job_holds_only_the_read_token_and_runs_no_pinned_code():
+    # The pinned-tests job asks GitHub unauthenticated, and shared runners use
+    # up the 60-request limit. This job asks with the run's read-only token
+    # instead; it runs no pinned code, so no other repository's code sees it.
+    jobs = workflow()["jobs"]
+    job = jobs["pin-provenance"]
+    assert job["permissions"] == {"contents": "read"}
+    assert "env" not in job and "outputs" not in job
+    text = steps_text(job)
+    for forbidden in ("secrets.", "R2_", "ACTIONS_ID_TOKEN", "vars.", "uv", "pytest"):
+        assert forbidden not in text, forbidden
+    with_token = [step for step in job["steps"] if "github.token" in steps_text(step)]
+    assert len(with_token) == 1 and with_token[0]["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    runs = [step["run"] for step in job["steps"] if "tools/pin_runner.py" in step.get("run", "")]
+    assert len(runs) == 1 and "--record-provenance" in runs[0] and "--report" not in runs[0]
+    for step in job["steps"]:
+        if str(step.get("uses", "")).startswith("actions/checkout@"):
+            assert step["with"]["persist-credentials"] is False, step
+    uploads = [step for step in job["steps"] if str(step.get("uses", "")).startswith("actions/upload-artifact@")]
+    assert len(uploads) == 1 and uploads[0]["with"]["name"] == "pin-provenance"
+    assert uploads[0]["with"]["if-no-files-found"] == "error"
+    # pinned-tests waits for the record and reads it.
+    pinned = jobs["pinned-tests"]
+    assert pinned["needs"] == "pin-provenance"
+    downloads = [step for step in pinned["steps"] if str(step.get("uses", "")).startswith("actions/download-artifact@")]
+    assert len(downloads) == 1 and downloads[0]["with"]["name"] == "pin-provenance"
+    (run,) = [step["run"] for step in pinned["steps"] if "tools/pin_runner.py" in step.get("run", "")]
+    assert "--provenance" in run
+
+
+def test_the_alarm_fires_when_pin_provenance_fails():
+    # A failed pin-provenance skips pinned-tests (it needs the record), and a
+    # skipped pinned-tests is not a success, so main and scheduled runs still
+    # raise the alarm: always() keeps the alarm job from being skipped too.
+    jobs = workflow()["jobs"]
+    assert jobs["pinned-tests"]["needs"] == "pin-provenance"
+    alarm = jobs["alarm"]
+    assert "pinned-tests" in alarm["needs"]
+    condition = alarm["if"]
+    assert condition.startswith("${{ always() &&")
+    assert "needs.pinned-tests.result != 'success'" in condition
+    assert "== 'failure'" not in condition
+
+
 def test_pinned_tests_job_passes_its_result_only_as_a_json_artifact():
     jobs = workflow()["jobs"]
     job = jobs["pinned-tests"]
@@ -1053,10 +1097,12 @@ def test_pinned_tests_job_passes_its_result_only_as_a_json_artifact():
 
 
 def test_only_the_isolated_job_runs_other_repositories_code():
+    # A runner command runs pinned code unless it only records provenance or
+    # summarizes a report.
     jobs = workflow()["jobs"]
     for name, job in jobs.items():
-        runs = " ".join(step.get("run", "") for step in job.get("steps", []))
-        runs_pins = "tools/pin_runner.py --root" in runs or "pin_runner.py --register" in runs
+        commands = [step.get("run", "") for step in job.get("steps", []) if "tools/pin_runner.py" in step.get("run", "")]
+        runs_pins = any("--record-provenance" not in command and "--summarize" not in command for command in commands)
         assert runs_pins == (name == "pinned-tests"), name
 
 
@@ -1791,6 +1837,190 @@ def test_an_unexpected_api_failure_refuses(tmp_path):
     assert outcomes(report) == {"tests/test_a.py::test_a": "untrusted commit"}
     assert "runner error: an API client bug" in report["issues"][0]
     assert not any(work.iterdir())
+
+
+def test_recorded_provenance_is_used_without_asking(tmp_path):
+    def unreachable(path):
+        raise AssertionError(f"asked GitHub for {path}")
+
+    work = tmp_path / "work"
+    work.mkdir()
+    recorded = {("PolicyEngine/a", COMMIT): {"repo": "PolicyEngine/a", "commit": COMMIT, "shipped": False, "reason": "recorded: a fork"}}
+    settings_ = runner.Settings(uv="uv", git="git", work=work, api=unreachable, provenance=recorded)
+    report = runner.run_register(register(*pinned("PolicyEngine/a", COMMIT, ["tests/test_a.py::test_a"])), settings_)
+    assert outcomes(report) == {"tests/test_a.py::test_a": "untrusted commit"}
+    assert "recorded: a fork" in report["issues"][0]
+    assert not any(work.iterdir())
+
+
+def _seed_passing_cache(settings_, payload):
+    """A valid cached pass for every commit the payload pins, as _store
+    would write it after a passing run."""
+
+    groups, _ = runner.collect_pins(payload)
+    for (repo, commit), pins in groups.items():
+        key = runner.cache_key(repo, commit, pins, runner.runner_version())
+        runner._store(settings_, key, {
+            "repo": repo, "commit": commit, "issues": [], "logs": {}, "pytest_exit": 0,
+            "pins": [{"entry": p.entry, "label": p.label, "id": p.id, "path": p.path, "name": p.name,
+                      "outcome": "passed", "cases": [{"nodeid": p.id, "outcome": "passed"}]} for p in pins],
+        })
+
+
+def _unreachable(path):
+    raise AssertionError(f"asked GitHub for {path}")
+
+
+@pytest.mark.parametrize("shipped", [False, True])
+def test_a_recorded_answer_decides_before_the_cache_and_asks_nothing(tmp_path, shipped):
+    # #1843 fix review (P2): a recorded refusal refuses even with a valid
+    # cached pass for that commit, and a recorded success serves the cached
+    # pass without asking GitHub, whose unauthenticated limit runs out.
+    work = tmp_path / "work"
+    work.mkdir()
+    cache = tmp_path / "cache"
+    payload = register(*pinned("PolicyEngine/a", COMMIT, ["tests/test_a.py::test_a"]))
+    record = {"repo": "PolicyEngine/a", "commit": COMMIT, "shipped": shipped, "reason": None if shipped else "recorded: a fork"}
+    settings_ = runner.Settings(uv="uv", git="git", work=work, cache_dir=cache, api=_unreachable,
+                                provenance={("PolicyEngine/a", COMMIT): record})
+    _seed_passing_cache(settings_, payload)
+    report = runner.run_register(payload, settings_)
+    if shipped:
+        assert outcomes(report) == {"tests/test_a.py::test_a": "passed"}
+        assert report["commits"][0]["cached"] is True and report["commits"][0]["provenance"] == record
+    else:
+        assert outcomes(report) == {"tests/test_a.py::test_a": "untrusted commit"}
+        assert report["commits"][0]["cached"] is False and "recorded: a fork" in report["issues"][0]
+    assert not any(work.iterdir())  # nothing was fetched
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        ("PolicyEngine/a", "d" * 40),  # the same repository, another commit
+        ("PolicyEngine/b", COMMIT),  # another repository, the same commit
+        ("PolicyEngine/A", COMMIT),  # the repository name in another case
+        ("policyengine/a", COMMIT),  # the owner in another case
+    ],
+)
+def test_a_record_serves_only_its_exact_repository_and_commit(tmp_path, recorded):
+    # #1843 fix review (P2): a record for anything but the exact (repository,
+    # commit) is not used, so the run asks GitHub, which here refuses.
+    calls = []
+
+    def refusing(path):
+        calls.append(path)
+        return {"full_name": "PolicyEngine/a", "fork": True, "default_branch": "main"}
+
+    work = tmp_path / "work"
+    work.mkdir()
+    cache = tmp_path / "cache"
+    payload = register(*pinned("PolicyEngine/a", COMMIT, ["tests/test_a.py::test_a"]))
+    record = {"repo": recorded[0], "commit": recorded[1], "shipped": True, "reason": None}
+    settings_ = runner.Settings(uv="uv", git="git", work=work, cache_dir=cache, api=refusing, provenance={recorded: record})
+    _seed_passing_cache(settings_, payload)
+    report = runner.run_register(payload, settings_)
+    assert outcomes(report) == {"tests/test_a.py::test_a": "untrusted commit"}
+    assert "is a fork" in report["issues"][0] and calls == ["/repos/PolicyEngine/a"]
+    assert report["commits"][0]["cached"] is False and not any(work.iterdir())
+
+
+def test_a_commit_the_record_lacks_is_asked_of_github(tmp_path):
+    base = tmp_path / "repos"
+    head = fixture_repo(base, "PolicyEngine/fixture-meta", {"tests/test_a.py": "def test_a():\n    pass\n"})
+    fake = FakeGitHub(base, meta={"PolicyEngine/fixture-meta": {"fork": True}})
+    other = {("PolicyEngine/b", COMMIT): {"repo": "PolicyEngine/b", "commit": COMMIT, "shipped": True, "reason": None}}
+    payload = register(*pinned("PolicyEngine/fixture-meta", head, ["tests/test_a.py::test_a"]))
+    report = runner.run_register(payload, settings(tmp_path, base, api=fake, provenance=other))
+    assert "is a fork" in report["issues"][0] and fake.calls
+
+
+def test_record_provenance_asks_with_the_token_and_runs_nothing(tmp_path, monkeypatch, capsys):
+    base = tmp_path / "repos"
+    head = fixture_repo(base, "PolicyEngine/fixture-meta", {"tests/test_a.py": "def test_a():\n    pass\n"})
+    tokens = []
+
+    def github_api(token=None, base_url=None):
+        tokens.append(token)
+        return FakeGitHub(base)
+
+    monkeypatch.setattr(sc, "github_api", github_api)
+    monkeypatch.setenv("GH_TOKEN", "read-only")
+    register_path = tmp_path / "register.yaml"
+    register_path.write_text(yaml.safe_dump(register(*pinned("PolicyEngine/fixture-meta", head, ["tests/test_a.py::test_a"]))))
+    out = tmp_path / "out" / "provenance.json"
+    assert runner.main(["--register", str(register_path), "--record-provenance", str(out)]) == 0
+    assert tokens == ["read-only"]
+    record = json.loads(out.read_text())
+    assert record["provenance_version"] == runner.PROVENANCE_VERSION
+    assert [(item["repo"], item["commit"], item["shipped"]) for item in record["records"]] == [("PolicyEngine/fixture-meta", head, True)]
+    assert runner.load_provenance(out)[("PolicyEngine/fixture-meta", head)]["shipped"] is True
+    assert "1 pinned commit(s); 0 not shipped" in capsys.readouterr().out
+    assert not (tmp_path / "work").exists()
+    # Without a register there is no record, and the command fails.
+    assert runner.main(["--register", str(tmp_path / "absent.yaml"), "--record-provenance", str(tmp_path / "none.json")]) == 1
+    assert not (tmp_path / "none.json").exists()
+
+
+def test_record_provenance_covers_the_household_choices(tmp_path, monkeypatch):
+    # The pinned-tests job holds no token, so a household choice's pin that
+    # the record missed would be asked of GitHub unauthenticated.
+    base = tmp_path / "repos"
+    head = fixture_repo(base, "PolicyEngine/fixture-meta", {"tests/test_a.py": "def test_a():\n    pass\n"})
+    other = fixture_repo(base, "PolicyEngine/fixture-choice", {"tests/test_b.py": "def test_b():\n    pass\n"})
+    monkeypatch.setattr(sc, "github_api", lambda token=None, base_url=None: FakeGitHub(base))
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-choice", ("fixture_core.cli", ()))
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-meta", ("fixture_core.cli", ()))
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "known-source-conflicts.yaml").write_text(yaml.safe_dump(register(*pinned("PolicyEngine/fixture-meta", head, ["tests/test_a.py::test_a"]))))
+    choice = {**OPTIMUM, "repo": "PolicyEngine/fixture-choice", "commit": other, "path": "tests/b.yaml", "name": "Itemizes"}
+    out = tmp_path / "provenance.json"
+
+    def recorded():
+        return sorted((item["repo"], item["commit"]) for item in json.loads(out.read_text())["records"])
+
+    assert runner.main(["--root", str(root), "--record-provenance", str(out)]) == 0
+    assert recorded() == [("PolicyEngine/fixture-meta", head)]
+    # The file beside the register is read, as a run reads it.
+    (root / "household-choices.yaml").write_text(yaml.safe_dump(choices(choice)))
+    assert runner.main(["--root", str(root), "--record-provenance", str(out)]) == 0
+    assert recorded() == [("PolicyEngine/fixture-choice", other), ("PolicyEngine/fixture-meta", head)]
+    # So is one named explicitly, which must exist.
+    named = tmp_path / "named.yaml"
+    named.write_text(yaml.safe_dump(choices({**choice, "commit": head, "repo": "PolicyEngine/fixture-meta"})))
+    assert runner.main(["--root", str(root), "--choices", str(named), "--record-provenance", str(out)]) == 0
+    assert recorded() == [("PolicyEngine/fixture-meta", head)]
+    assert runner.main(["--root", str(root), "--choices", str(tmp_path / "absent.yaml"), "--record-provenance", str(tmp_path / "none.json")]) == 1
+    assert not (tmp_path / "none.json").exists()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "not json",
+        "[]",
+        '{"provenance_version": 2, "records": []}',
+        '{"provenance_version": 1}',
+        '{"provenance_version": 1, "records": [{"repo": "a/b", "commit": "c"}]}',
+        '{"provenance_version": 1, "records": [{"repo": "a/b", "commit": "c", "shipped": "yes"}]}',
+        '{"provenance_version": 1, "records": [{"repo": 1, "commit": 2, "shipped": false}]}',
+        '{"provenance_version": 1, "records": [{"repo": 1, "commit": "' + "c" * 40 + '", "shipped": false}]}',
+        '{"provenance_version": 1, "records": [{"repo": "a/b", "commit": 2, "shipped": false}]}',
+        '{"provenance_version": 1, "records": ["a/b"]}',
+    ],
+)
+def test_a_malformed_provenance_record_fails_the_run_closed(tmp_path, content):
+    path = tmp_path / "provenance.json"
+    path.write_text(content)
+    with pytest.raises(ValueError):
+        runner.load_provenance(path)
+    register_path = tmp_path / "register.yaml"
+    register_path.write_text(yaml.safe_dump(register(*pinned("PolicyEngine/a", COMMIT, ["tests/test_a.py::test_a"]))))
+    report_path = tmp_path / "report.json"
+    argv = ["--register", str(register_path), "--report", str(report_path), "--provenance", str(path), "--uv", "uv", "--git", "git"]
+    assert runner.main(argv) == 1
+    assert json.loads(report_path.read_text())["issues"][0].startswith("runner error:")
 
 
 @needs_tools

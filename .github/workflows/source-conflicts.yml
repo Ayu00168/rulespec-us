@@ -6,7 +6,7 @@ name: Source conflicts
 # status rules, hygiene, in-repo references, the syntactic screen of test
 # pins and the scan for unregistered module interpretations; and
 # tools/household_choices.py check) run inside the required Repository Checks
-# pytest leg. This workflow checks what needs the network, in two jobs:
+# pytest leg. This workflow checks what needs the network, in two checks:
 #
 # - `verify` (check name source-conflicts): every `texts` excerpt verbatim at
 #   its citation in the PINNED corpus release (.axiom/toolchain.toml) and every
@@ -19,7 +19,10 @@ name: Source conflicts
 #   only `passed` passes. It executes code from other repositories, so it is
 #   isolated: no secrets or tokens, contents: read, no id-token, no persisted
 #   checkout credentials, and its result leaves only as the `pinned-tests`
-#   JSON artifact, which the alarm job reads as data.
+#   JSON artifact, which the alarm job reads as data. The provenance it checks
+#   first (that each commit is shipped code of its repository) comes from
+#   `pin-provenance`, a job that runs no pinned code and asks GitHub with the
+#   run's read-only token, since the unauthenticated limit runs out.
 #
 # Neither is a required check, so an outage of a source host never blocks
 # merges, but the merge rule for register pull requests is that every check is
@@ -236,18 +239,61 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
+  pin-provenance:
+    # Asks GitHub's API, with this run's read-only token, that each pinned
+    # commit's repository is canonical and not a fork and that the commit is
+    # on its default branch (tools/pin_runner.py --record-provenance), and
+    # passes the answers to pinned-tests as an artifact. GitHub's
+    # unauthenticated limit (60 requests an hour) runs out on shared runners.
+    # This job runs no pinned code, so pinned-tests, which does, still holds
+    # no token. tests/test_pin_runner.py checks both jobs statically.
+    name: pin-provenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout rules repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: rulespec-us
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.14"
+
+      - name: Install the runner's tools
+        run: python -m pip install pyyaml==6.0.3
+
+      - name: Record provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python rulespec-us/tools/pin_runner.py --root rulespec-us \
+            --record-provenance "$RUNNER_TEMP/pin-provenance.json"
+
+      - name: Keep the record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pin-provenance
+          path: ${{ runner.temp }}/pin-provenance.json
+          if-no-files-found: error
+
   pinned-tests:
     # Runs every pinned test at its pinned commit (tools/pin_runner.py). This
     # executes code from other repositories, so the job holds nothing worth
     # taking: no secrets or tokens in any env, a checkout without persisted
     # credentials, contents: read and no id-token. Its result leaves only as
     # the pinned-tests JSON artifact (no job outputs). Before fetching a
-    # commit the runner asks GitHub's API (unauthenticated) that the
-    # repository is canonical and not a fork and that the commit is on its
-    # default branch. Passing results are cached under (repository, commit,
-    # pinned ids, runner version).
+    # commit the runner reads the provenance pin-provenance recorded (the
+    # repository is canonical and not a fork, and the commit is on its
+    # default branch), and asks GitHub's API unauthenticated for any commit
+    # the record lacks. Passing results are cached under (repository,
+    # commit, pinned ids, runner version).
     # tests/test_pin_runner.py checks this job's isolation statically.
     name: pinned-tests
+    needs: pin-provenance
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -271,7 +317,8 @@ jobs:
         # pin and save fresh results. Each run saves its own snapshot (the key
         # ends in the run id) and restores the newest one; records are keyed
         # inside by repository, commit, ids and runner version, and the runner
-        # re-checks each one and asks GitHub for provenance before using it.
+        # re-checks each one and checks its provenance (from this run's
+        # pin-provenance record, or GitHub) before using it.
         if: github.event_name == 'pull_request'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -299,10 +346,17 @@ jobs:
           --with policyengine-core==3.33.12
           python -m pytest -q -p no:cacheprovider tests/test_pin_oracle_core.py
 
+      - name: Fetch the provenance record
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pin-provenance
+          path: ${{ runner.temp }}/pin-provenance
+
       - name: Run the pinned tests
         run: |
           python rulespec-us/tools/pin_runner.py --root rulespec-us \
-            --report "$RUNNER_TEMP/pinned-tests.json" --cache-dir "$RUNNER_TEMP/pin-runs-cache"
+            --report "$RUNNER_TEMP/pinned-tests.json" --cache-dir "$RUNNER_TEMP/pin-runs-cache" \
+            --provenance "$RUNNER_TEMP/pin-provenance/pin-provenance.json"
 
       - name: Save passing results
         if: always()
