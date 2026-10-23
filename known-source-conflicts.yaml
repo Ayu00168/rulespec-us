@@ -848,3 +848,22 @@ entries:
   years:
     from: 2025
     type: tax
+  implementations:
+  - repo: PolicyEngine/policyengine-us
+    commit: 79249f0feacd2600f88d566cfdf46f1155a0b9fc
+    path: policyengine_us/variables/gov/states/md/tax/income/credits/poverty_line/md_poverty_line_credit_potential.py
+    follows: reading
+    adopts: reading
+    basis: PolicyEngine-US follows the statute when it conflicts with forms or worksheets.
+    ruling:
+      by: PolicyEngine
+      date: '2026-10-19'
+      record: https://github.com/PolicyEngine/policyengine-us/pull/10287
+    cites_entry: false
+  tests:
+  - repo: PolicyEngine/policyengine-us
+    commit: 79249f0feacd2600f88d566cfdf46f1155a0b9fc
+    path: policyengine_us/tests/policy/baseline/gov/states/md/tax/income/credits/poverty_line/md_poverty_line_credit_earned_income.yaml
+    name: A farm loss is netted against wages like other self-employment (2024)
+    pins:
+    - reading

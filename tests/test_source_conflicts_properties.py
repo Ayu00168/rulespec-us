@@ -81,8 +81,12 @@ _spec.loader.exec_module(sc)
 REPO = "TheAxiomFoundation/rulespec-us"
 SETTINGS = settings(max_examples=150, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
 
-# Free text without digits, '@', '/' or '~', so it never trips hygiene by accident.
-prose = st.text(alphabet=string.ascii_letters + " ,.;:'()-", min_size=1, max_size=40).filter(lambda s: s.strip())
+# Free text without digits, '@', '/' or '~', so it never trips hygiene by
+# accident, and without a money spelling ("usd" is one), so it never trips the
+# money rule.
+prose = st.text(alphabet=string.ascii_letters + " ,.;:'()-", min_size=1, max_size=40).filter(
+    lambda s: s.strip() and not sc._unsupported_money(s)
+)
 # A slug such as "d1338" reads as a decision-queue id, which hygiene rightly
 # rejects (an intended violation), so generated slugs avoid that shape.
 kebab = st.from_regex(r"[a-z0-9]{1,6}(-[a-z0-9]{1,6}){0,3}", fullmatch=True).filter(

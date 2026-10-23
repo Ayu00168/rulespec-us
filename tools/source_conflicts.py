@@ -1063,7 +1063,10 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
             # policy tests) count, pinned like any external test; here, a
             # companion test is always .test.yaml.
             suffixes = (".py", ".yaml") if external else (".py", ".test.yaml")
-            if not _relative_path(path) or not str(path).endswith(suffixes):
+            if isinstance(path, str) and "::" in path:
+                issues.append(f"{t_label}.path {path} contains `::`, which separates a test file from its test name.")
+                path = None
+            elif not _relative_path(path) or not str(path).endswith(suffixes):
                 issues.append(
                     f"{t_label}.path must be a relative "
                     + (".py or .yaml path." if external else ".py or .test.yaml path.")
