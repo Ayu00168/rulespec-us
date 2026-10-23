@@ -1277,15 +1277,36 @@ def test_quoted_words(text, words):
         ("It wrote \u201d one\u201d today.", 1, False),
         ("It wrote \u201aclaimants\u2019 policy\u2019 today.", 1, False),
         ("It wrote \u201eone\u201c then denied every remaining claim.", 5, True),
-        # The boundary rules (mutation round 8): an outer closer after a dash
-        # or right after an inner closer opens nothing; a closer before an
-        # opening quotation character or after an apostrophe closes.
-        ('It wrote "one "two" wait\u2014"[1] today.', 3, False),
-        ('It wrote "one "two"" today.', 2, False),
+        # The boundary rules (mutation round 8): a closer before an opening
+        # quotation character or after an apostrophe closes. Nesting in the
+        # same marks may overcount, failing closed: the strict reading opens
+        # an outer closer that isn't glued to a word (3 words counted 4; 2
+        # counted 3).
+        ('It wrote "one "two" wait\u2014"[1] today.', 4, False),
+        ('It wrote "one "two"" today.', 3, False),
         ('It wrote \u00bbone "two\u2014"\u00ab today.', 2, False),
         ("It wrote \"one \u00abtwo workers'\u00bb\" today.", 3, False),
         # Found by fuzzing: only the standard delimited reading counts both words.
         ("'\u00abb\u2014\u00bbb\u2019", 2, False),
+        # #1867 round 6 (P1): an opening mark that can also close opens after
+        # punctuation, a dash or a colon; only a letter or digit before it
+        # (or, for \u201d \u00bb \u203a \u2033, a space after it) keeps it shut.
+        ("It wrote:\u00abone two three four five\u00bb.", 5, True),
+        ("It wrote:\u2039one two three four five\u203a.", 5, True),
+        ("It wrote:\U0001f676one two three four five\U0001f677.", 5, True),
+        ("It wrote\u2014\u00ab one two three four five \u00bb.", 5, True),
+        ("It wrote:\u00bbone two three four five\u00ab.", 5, True),
+        # Known limit 2, as worded after round 6: a quotation nested inside
+        # another, whose opening mark could also close the outer one and
+        # that doesn't start with a letter or digit, reads as two quotations.
+        ('It wrote "one """two" three" four" five" today.', 4, False),
+        ('It wrote "one \u2014"\u00abtwo\u00bb three four" five" today.', 3, False),
+        ("It wrote \u201eone \u201c[sic] two three\u201d four five\u201d today.", 3, False),
+        # Intended (#1867 round 6): \u2018\u2026\u2019 nested in a double quotation is read
+        # conservatively, so a later word-end apostrophe stretches it; nested
+        # in \u00ab\u2026\u00bb, which the refusal recommends, it counts exactly.
+        ("It wrote \u201cone \u2018two\u2019 three\u201d then denied workers\u2019 claims.", 6, True),
+        ("It wrote \u201cone \u00abtwo\u00bb three\u201d then denied workers\u2019 claims.", 3, False),
         ("'a\"b\u00ab\"\u00bb", 2, False),
         # Known limit (#1867 round 4, accepted by ruling): a quotation whose
         # opening mark directly follows a letter or digit, where that mark can
@@ -1327,7 +1348,7 @@ def test_the_refusal_shows_the_span_and_the_remedy(tmp_path):
     issues = check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))
     (issue,) = [issue for issue in issues if "quotes more than 4 words in all" in issue]
     assert "(6, counted in \"routine' and won't reopen the workers\")" in issue
-    assert 'one style of double quotation marks ("\u2026" or \u201c\u2026\u201d), nesting with \u2018\u2026\u2019 or \u00ab\u2026\u00bb if needed and never in the same marks; those are counted exactly in plain prose' in issue
+    assert 'one style of double quotation marks ("\u2026" or \u201c\u2026\u201d), nesting with \u00ab\u2026\u00bb if needed and never in the same marks; those are counted exactly in plain prose' in issue
     assert "Describe it instead" in issue
     long = "It wrote '" + " ".join(["word"] * 40) + "'"
     (issue,) = [issue for issue in check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": long}]))
@@ -1548,7 +1569,7 @@ def test_quote_scan_work_is_linear(monkeypatch, family):
     # pattern search; doubling the text must not much more than double it,
     # and it stays under a fixed multiple of the length.
     counter = {"search": 0}
-    for name in ("_opens_single", "_closes_single", "_opens_delimited", "_opens_in_context", "_starts_a_quotation", "_opens_strict"):
+    for name in ("_opens_single", "_closes_single", "_opens_delimited", "_glued", "_starts_a_quotation", "_opens_strict"):
         real = getattr(sc, name)
         monkeypatch.setattr(sc, name, lambda *args, _real=real, _name=name: counter.__setitem__(_name, counter.get(_name, 0) + 1) or _real(*args))
     monkeypatch.setattr(sc, "_DELIMITER_MARK", _CountedSearch(sc._DELIMITER_MARK, counter))

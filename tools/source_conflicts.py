@@ -270,33 +270,17 @@ def _next_after(positions: Sequence[int], index: int) -> int | None:
     return positions[following] if following < len(positions) else None
 
 
-def _opening_context(text: str, index: int) -> bool:
-    """The mark starts the text or follows whitespace, a slash or an opening
-    bracket: where a quotation opens, unlike after another quotation mark or
-    a dash, which a closer may follow (the second » in «a «b»», wait—"[1])."""
-
-    if index == 0:
-        return True
-    before = text[index - 1]
-    return before.isspace() or before == "/" or unicodedata.category(before) == "Ps"
-
-
-def _opens_in_context(text: str, index: int) -> bool:
-    """A mark stands where an opener would: in an opening context and before
-    a non-space."""
-
-    return index + 1 < len(text) and not text[index + 1].isspace() and _opening_context(text, index)
-
-
 def _starts_a_quotation(text: str, index: int) -> bool:
     """A mark that can both close and open reads as an opener: after an
     opener prefix and before a letter or a digit; or, after the text's start
     or whitespace, before a quotation mark. So the inner marks in "one "two"
     three", ""one" two" and " ""one" two" open, while the closers in
     "wait—"., "workers'",, "four—"[1], «wait—»", «workers'»" and »a "b—"«
-    close (« and “ open quotations but close others too). One limit follows, documented in
-    tools/README.md: a quotation nested in the same marks that starts with a
-    bracket ("one "[sic] two" three") reads as two quotations."""
+    close (« and “ open quotations but close others too). The second known
+    limit follows (tools/README.md): a quotation nested inside another, whose
+    opening mark could also close the outer one and which doesn't start with
+    a letter or digit ("one "[sic] two" three", „one “[sic] two” three”),
+    reads as two quotations."""
 
     if index + 1 >= len(text) or not _opener_prefix(text, index):
         return False
@@ -306,29 +290,41 @@ def _starts_a_quotation(text: str, index: int) -> bool:
     return after in _QUOTATION_MARKS and (index == 0 or text[index - 1].isspace())
 
 
+def _glued(text: str, index: int) -> bool:
+    """The mark directly follows a letter or digit (past any combining marks
+    on it)."""
+
+    before = index - 1
+    while before >= 0 and index - before <= 4 and unicodedata.category(text[before]).startswith("M"):
+        before -= 1
+    return before >= 0 and text[before].isalnum()
+
+
 def _opens_delimited(text: str, index: int) -> bool:
     """A delimited opener opens anywhere, except a mark that also closes
-    another pair (”, », ›, ″, “, «, ‹, 🙶). That opens only where it starts a
-    quotation (_starts_a_quotation) or in an opening context
-    (_opening_context; for ” » › ″, also before a non-space). So the inch
-    mark in 6” opens nothing, and nor do the inner closers in „a „b“ c“ and
-    »a »b« c«, while « oui » opens. One limit follows, documented in
-    tools/README.md: such a mark directly after a letter or digit
-    (x«one …») opens nothing; main's floor still reads “ there."""
+    another pair (”, », ›, ″, “, «, ‹, 🙶). That opens where it starts a
+    quotation (_starts_a_quotation), and otherwise unless it directly
+    follows a letter or digit (_glued); ” » › ″, which close the commonest
+    pairs, also need a non-space after them. So the inch mark in 6” and the
+    inner closers in „a „b“ c“ and »a »b« c« open nothing, while « oui »,
+    :«one» and —«one» open. The first known limit follows (tools/README.md):
+    such a mark glued to a letter or digit (x«one …»), or ” » › ″ before a
+    space, opens nothing; main's floor still reads a glued “."""
 
     mark = text[index]
     if mark not in _ALSO_CLOSES or _starts_a_quotation(text, index):
         return True
-    return _opens_in_context(text, index) if mark in _CONTEXT_OPENERS else _opening_context(text, index)
+    if _glued(text, index):
+        return False
+    return mark not in _CONTEXT_OPENERS or (index + 1 < len(text) and not text[index + 1].isspace())
 
 
 def _opens_strict(text: str, index: int) -> bool:
-    """The strict reading's opener: a delimiter mark that starts a quotation
-    (_starts_a_quotation), or that stands in an opening context
-    (_opening_context), so the inch mark in 6" and the second closer in "the
-    "the"" open nothing, and " one" opens."""
+    """The strict reading's opener: a delimiter mark that isn't glued to a
+    letter or digit (_glued), so the inch mark in 6" opens nothing while
+    " one", :"one" and —"one" open."""
 
-    return index + 1 < len(text) and (_starts_a_quotation(text, index) or _opening_context(text, index))
+    return index + 1 < len(text) and not _glued(text, index)
 
 
 def _delimited_close(text: str, index: int, reading: str) -> int:
@@ -465,6 +461,20 @@ def _span_text(text: str, start: int, close: int, regions: list[tuple[int, int]]
     return "".join(pieces)
 
 
+def _text_outside(text: str, start: int, end: int, regions: list[tuple[int, int]]) -> str:
+    """text[start:end], with each part of a pass-1 region in it one space."""
+
+    pieces: list[str] = []
+    cursor = start
+    for region_start, region_end in regions:
+        if region_end <= cursor or region_start >= end:
+            continue
+        pieces.extend((text[cursor:max(region_start, cursor)], " "))
+        cursor = min(region_end, end)
+    pieces.append(text[cursor:end])
+    return "".join(pieces)
+
+
 def _opens_single_main(text: str, index: int) -> bool:
     """main's single opener: after an ASCII prefix, before a letter."""
 
@@ -588,28 +598,15 @@ def _readings(text: str) -> Iterator[tuple[int, list[str]]]:
         if single is not None:
             spans.append(_span_text(text, single[0], single[1], regions))
         yield sum(_words(span) for span in spans), spans
-    # The single span over the whole text (_whole_text_span), together with
-    # the standard reading's delimited quotations: the words of every
-    # character inside either, the rest blanked, so a span that starts inside
-    # a quotation loses none of its words and splits none in two.
+    # The single span over the whole text (_whole_text_span): every standard
+    # quotation counted on its own, and the span's own text outside them
+    # (each quotation inside it a space). A wider span only adds text at its
+    # edge, so widening the openers can't lower this count.
     located, regions = _delimited(text)
     single = _whole_text_span(text, regions)
     if single is not None:
         start, close = single
-        inside = [False] * len(text)
-        for position in range(start + 1, close):
-            inside[position] = True
-        for region_start, span in located:
-            for position in range(region_start + 1, region_start + 1 + len(span)):
-                inside[position] = True
-        spans: list[str] = []
-        run_start = None
-        for position in range(len(text) + 1):
-            if position < len(text) and inside[position]:
-                run_start = position if run_start is None else run_start
-            elif run_start is not None:
-                spans.append(text[run_start:position])
-                run_start = None
+        spans = [span for _, span in located] + [_text_outside(text, start + 1, close, regions)]
         yield sum(_words(span) for span in spans), spans
     every_closer = [index for index, mark in enumerate(text) if mark in _QUOTATION_MARKS and _closes_single(text, index)]
     # The one-pass reading under main's single openers too: a wider opener can
@@ -644,10 +641,10 @@ def quoted_reading(text: str) -> tuple[int, list[str]]:
     that quotes with single marks and also has a later apostrophe at a
     word's end (the workers' case) or a second single quotation is read as
     one quotation from the first mark to the last. tools/README.md says to
-    quote with one style, "…" or “…”, nesting with ‘…’ or «…» if needed and
-    never in the same marks: in plain prose, each delimited reading counts a
-    double quotation exactly (within the scope the README states), and main
-    reads those two pairs exactly too.
+    quote with one style, "…" or “…”, nesting with «…» if needed and never in
+    the same marks: in plain prose with no single mark that may open, each
+    delimited reading counts such a quotation exactly (within the scope the
+    README states), and main reads those two pairs exactly too.
     """
 
     return max(_readings(text), key=lambda reading: reading[0])
@@ -1380,9 +1377,9 @@ def _check_unpublished_source(item: Any, *, label: str, issues: list[str]) -> No
                 f"{label}.description quotes more than {MAX_QUOTED_WORDS} words in all ({count}, counted in "
                 f"{shown}); an unpublished source is described, never quoted. Describe it instead, or put a "
                 f"quotation of at most {MAX_QUOTED_WORDS} words in one style of double quotation marks (\"\u2026\" or "
-                "\u201c\u2026\u201d), nesting with \u2018\u2026\u2019 or \u00ab\u2026\u00bb if needed and never in the same marks; "
-                "those are counted exactly in plain prose. Single marks can't be told from apostrophes, so every "
-                "word from the first single mark to the last quotation mark counts."
+                "\u201c\u2026\u201d), nesting with \u00ab\u2026\u00bb if needed and never in the same marks; those are counted "
+                "exactly in plain prose. Single marks (\u2018\u2026\u2019 too) can't be told from apostrophes, so every word "
+                "from the first single mark to the last quotation mark counts."
             )
 
 
