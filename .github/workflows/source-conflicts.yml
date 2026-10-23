@@ -185,9 +185,13 @@ jobs:
 
       - name: Offline check
         run: |
+          # Both files are checked even when the first fails, so one run
+          # reports both.
+          rc=0
           python rulespec-us/tools/source_conflicts.py check --root rulespec-us \
-            --warnings-file "$RUNNER_TEMP/open-interpretations.txt"
-          python rulespec-us/tools/household_choices.py check --root rulespec-us
+            --warnings-file "$RUNNER_TEMP/open-interpretations.txt" || rc=1
+          python rulespec-us/tools/household_choices.py check --root rulespec-us || rc=1
+          exit "$rc"
 
       - name: Keep the unregistered open interpretations
         if: always()
@@ -203,10 +207,14 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
+          # Both files are verified even when the first fails, so the summary
+          # and the alarm have both results.
+          rc=0
           python rulespec-us/tools/source_conflicts.py verify \
-            --root rulespec-us --corpus-path axiom-corpus 2>&1 | tee "$RUNNER_TEMP/source-conflicts.txt"
+            --root rulespec-us --corpus-path axiom-corpus 2>&1 | tee "$RUNNER_TEMP/source-conflicts.txt" || rc=1
           python rulespec-us/tools/household_choices.py verify \
-            --root rulespec-us --corpus-path axiom-corpus 2>&1 | tee "$RUNNER_TEMP/household-choices.txt"
+            --root rulespec-us --corpus-path axiom-corpus 2>&1 | tee "$RUNNER_TEMP/household-choices.txt" || rc=1
+          exit "$rc"
 
       - name: Test the tool, with property-based and differential tests
         working-directory: rulespec-us

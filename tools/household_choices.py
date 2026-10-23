@@ -316,7 +316,7 @@ def _module_rules(path: Path) -> tuple[set[str], set[str], list[str]] | None:
 
     try:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError):
+    except (OSError, ValueError, yaml.YAMLError, RecursionError):  # ValueError: undecodable, or 2026-02-30
         return None
     if not isinstance(payload, dict):
         return None
@@ -341,7 +341,7 @@ def _declared_inputs(path: Path) -> dict[str, Mapping[str, Any]]:
 
     try:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError):
+    except (OSError, ValueError, yaml.YAMLError, RecursionError):  # ValueError: undecodable, or 2026-02-30
         return {}
     inputs = payload.get("inputs") if isinstance(payload, dict) else None
     return {
@@ -1130,7 +1130,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if issues else 0
 
     if args.command == "verify":
-        payload = sc.load_register(args.root / CHOICES_FILENAME)
+        try:
+            payload = sc.load_register(args.root / CHOICES_FILENAME)
+        except sc.RegisterError as exc:
+            print(f"household-choices: {exc}", file=sys.stderr)
+            return 1
         try:
             matches = sc.encoder_matcher()
         except ImportError as exc:
@@ -1156,13 +1160,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if issues else 0
 
     if args.file:
-        files = {}
-        for spec in args.file:
-            repo, _, path = spec.partition("=")
-            files[repo] = sc.load_register(Path(path))
+        files, read_issues = sc.local_registers(args.file)
     else:
-        files = sc.discover_registers(os.environ.get("GITHUB_TOKEN"), filename=CHOICES_FILENAME)
+        files, read_issues = sc.discover_registers(os.environ.get("GITHUB_TOKEN"), filename=CHOICES_FILENAME)
     view, issues = aggregate(files)
+    issues = read_issues + issues
     if args.json:
         args.json.write_text(render_json(view))
     if args.markdown:

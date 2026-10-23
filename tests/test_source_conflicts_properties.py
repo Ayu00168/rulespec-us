@@ -55,15 +55,22 @@ Invariants, for every input:
     repository's default branch.
 17. Quoted words, differentially and against main:
     - `quoted_spans` returns exactly the spans an independently written
-      quadratic reference finds for the default reading. The spans together
-      are no longer than the text.
-    - `quoted_words` equals an independent envelope: delimited words once,
-      plus the largest single-quotation count over three pairings (last
-      closer before the next opener, first closer, nesting) and two prefix
-      rules, never below main's one-pass reading.
-    - It never counts fewer words than main's scanner did, so this change
-      accepts no description main refused, and widening the opener prefixes
-      never lowers it.
+      quadratic reference finds for the default (possessive) reading. The
+      spans together are no longer than the text.
+    - `quoted_words` equals an independent envelope: under each delimited
+      reading (standard and strict), delimited words once plus the largest
+      single-quotation count over three pairings (first closer, nesting,
+      possessive) and two prefix rules; a one-pass reading under both prefix
+      rules; and main's count.
+    - The floor is main's scanner exactly: `_main_words` equals a verbatim
+      copy of main's function, its whitespace word count included, so this
+      change accepts no description main refused. Widening the opener
+      prefixes never lowers the count.
+    - Plain prose (contractions, possessives, elided years) with closed
+      single quotations in it counts exactly the quoted words, so a
+      possessive outside a quotation never lengthens it; and any
+      recognisable quotation counts at least its own words, whatever
+      surrounds it.
 
 Hypothesis is not installed in the shared validate workflow's pytest leg, so
 these skip there; the source-conflicts workflow installs it and runs them.
@@ -720,74 +727,270 @@ def test_screen_is_total(source, name):
     assert sc.python_test_exists(source, name) in (True, False)
 
 
-# An alphabet that reaches every branch of the quote scanner: letters, a digit,
-# ASCII and Unicode spaces, every recognised opening and closing mark,
-# brackets and dashes, and other punctuation (plus the unsupported primes).
-QUOTE_ALPHABET = "ab1 \u00a0\u3000'‘’\"“”„‚«»‹›「」『』＂＇([-—/:.′″"
+# An alphabet that reaches every branch of the quote scanner: letters
+# (s too, for possessives), a decimal and a superscript digit, ASCII and
+# Unicode spaces, every recognised opening and closing mark, brackets and
+# dashes, and other punctuation (plus the unsupported primes).
+QUOTE_ALPHABET = "abs1\u00b9 \u00a0\u3000'\u2018\u2019\"\u201c\u201d\u201e\u201a\u00ab\u00bb\u2039\u203a\u300c\u300d\u300e\u300f\u301d\u301e\u301f\uff02\uff07([-\u2014/:.\u2032\u2033"
+# Whole words and marks, so possessives (as' a), elisions ('em), barriers
+# ('1) and nested marks turn up more often than letter by letter.
+QUOTE_TOKENS = [
+    "a", "b", "s", "as", "em", "tis", "1", "\u00b9", " ", " ", "\u00a0", "'", "\u2018", "\u2019", "\uff07",
+    '"', "\u201c", "\u201d", "\u201e", "\u201a", "\u00ab", "\u00bb", "\u2039", "\u203a", "\u300c", "\u300d",
+    "\u301d", "\u301e", "\uff02", ":", "(", "\u2014", "/", ".",
+]
+quote_texts = st.one_of(
+    st.text(alphabet=QUOTE_ALPHABET, max_size=60),
+    st.lists(st.sampled_from(QUOTE_TOKENS), max_size=30).map("".join),
+)
+
+# The reference scanner below is deliberately independent of the production
+# constants, predicates, bisection helpers and stack: membership and suffix
+# scans, quadratic.
+REF_PAIRS = {
+    '"': '"', "\u201c": "\u201d", "\u201e": "\u201c\u201d", "\u201a": "\u2018\u2019", "\u00ab": "\u00bb",
+    "\u2039": "\u203a", "\u300c": "\u300d", "\u300e": "\u300f", "\uff02": "\uff02", "\u301d": "\u301e\u301f",
+    "\u201d": "\u201d", "\u00bb": "\u00ab\u00bb", "\u203a": "\u2039\u203a",
+}
+REF_ELISIONS = {"em", "til", "tis", "twas", "twere", "twill", "cos", "neath", "gainst", "twixt", "nother"}
 
 
-def _reference_spans(text):
-    # Deliberately independent of the production constants, predicates and
-    # bisection helpers. Repeated membership and suffix scans are quadratic.
-    pairs = {'"': '"', '“': '”', '„': '“', '‚': '‘', '«': '»',
-             '‹': '›', '「': '」', '『': '』', '＂': '＂'}
-    regions, spans, i = [], [], 0
+def _ref_wide(text, i):
+    if i == 0:
+        return True
+    before = text[i - 1]
+    return before.isspace() or before == "/" or unicodedata.category(before) in ("Ps", "Pd", "Pi")
+
+
+def _ref_ascii(text, i):
+    return i == 0 or text[i - 1] in " \t\n\r([{\u2014\u2013-/"
+
+
+def _ref_opens_delimited(text, i):
+    if text[i] not in "\u201d\u00bb\u203a":
+        return True
+    return i + 1 < len(text) and not text[i + 1].isspace() and _ref_wide(text, i)
+
+
+def _ref_word_count(span):
+    return len([token for token in span.split() if any(char.isalnum() for char in token)])
+
+
+def _ref_word_end(text, i):
+    return i > 0 and not text[i - 1].isspace() and _ref_closer_context(text, i)
+
+
+def _ref_closer_context(text, i):
+    return i + 1 == len(text) or not (text[i + 1].isalpha() or unicodedata.category(text[i + 1]) == "Nd")
+
+
+def _ref_delimited(text, strict=False):
+    spans, regions, i = [], [], 0
     while i < len(text):
-        if text[i] in pairs:
+        opens = (_ref_opens_delimited(text, i) if not strict
+                 else i + 1 < len(text) and not text[i + 1].isspace() and _ref_wide(text, i))
+        if text[i] in REF_PAIRS and opens:
             end = i + 1
-            while end < len(text) and text[end] != pairs[text[i]]:
+            while end < len(text) and not (text[end] in REF_PAIRS[text[i]] and (not strict or _ref_word_end(text, end))):
                 end += 1
             spans.append((i, text[i + 1:end]))
             regions.append((i, min(end + 1, len(text))))
             i = end + 1
         else:
             i += 1
+    return spans, regions
 
+
+def _ref_closer(text, i):
+    return text[i] in "'\u2019\uff07" and _ref_closer_context(text, i)
+
+
+def _ref_opener(text, i, prefix):
+    return text[i] in "'\u2018\uff07\u2019" and i + 1 < len(text) and text[i + 1].isalpha() and prefix(text, i)
+
+
+def _ref_elision(text, i):
+    word = ""
+    for char in text[i + 1:]:
+        if not char.isalpha():
+            break
+        word += char
+    return word.lower() in REF_ELISIONS
+
+
+def _ref_marks(text, regions, prefix):
     def outside(i):
         return not any(start <= i < end for start, end in regions)
 
-    def opens(i):
-        if not outside(i) or text[i] not in "'‘＇":
-            return False
-        if i + 1 >= len(text) or not text[i + 1].isalpha():
-            return False
-        if i == 0:
-            return True
-        before = text[i - 1]
-        return before.isspace() or before == "/" or unicodedata.category(before) in ("Ps", "Pd", "Pi")
+    opens = [i for i in range(len(text)) if outside(i) and _ref_opener(text, i, prefix)]
+    closes = [i for i in range(len(text)) if outside(i) and not _ref_opener(text, i, prefix) and _ref_closer(text, i)]
+    events = []
+    for i in range(len(text)):
+        if not outside(i):
+            continue
+        if i in opens:
+            if not _ref_elision(text, i):
+                events.append((i, "open"))
+        elif i in closes:
+            weak = i > 0 and text[i - 1] in "sS" and i + 1 < len(text) and text[i + 1].isspace()
+            events.append((i, "weak" if weak else "strong"))
+        elif text[i] in "'\u2018\uff07\u2019" and (i == 0 or not text[i - 1].isalnum()) and not _ref_elision(text, i):
+            events.append((i, "barrier"))
+    return opens, closes, events
 
-    def closes(i):
-        return (outside(i) and text[i] in "'’＇"
-                and (i + 1 == len(text) or not text[i + 1].isalnum()))
 
-    i = 0
+def _ref_outermost(pairs):
+    return sorted(p for p in pairs if not any(q != p and q[0] <= p[0] and p[1] <= q[1] for q in pairs))
+
+
+def _ref_first(opens, closes):
+    pairs, reach = [], -1
+    for o in opens:
+        if o <= reach:
+            continue
+        after = [c for c in closes if c > o]
+        if after:
+            pairs.append((o, after[0]))
+            reach = after[0]
+    return pairs
+
+
+def _ref_nested(opens, closes):
+    stack, closed = [], []
+    for j in sorted(opens + closes):
+        if j in opens:
+            stack.append(j)
+        elif stack:
+            closed.append((stack.pop(), j))
+    return _ref_outermost(closed)
+
+
+def _ref_possessive(events):
+    # Each open quotation remembers its first possible-possessive closer.
+    stack, closed = [], []
+    for j, kind in events:
+        if kind == "open":
+            stack.append({"start": j, "weak": None})
+        elif kind == "strong" and stack:
+            closed.append((stack.pop()["start"], j))
+        elif kind == "weak" and stack and stack[-1]["weak"] is None:
+            stack[-1]["weak"] = j
+        elif kind == "barrier" and stack and stack[-1]["weak"] is not None:
+            top = stack.pop()
+            closed.append((top["start"], top["weak"]))
+    closed += [(item["start"], item["weak"]) for item in stack if item["weak"] is not None]
+    return _ref_outermost(closed)
+
+
+def _ref_span_text(text, regions, start, close):
+    # Each enclosed pass-1 region becomes one space, including its marks, so
+    # no word is counted a second time.
+    pieces, cursor = [], start + 1
+    for region_start, region_end in regions:
+        if start < region_start < close:
+            pieces.extend((text[cursor:region_start], " "))
+            cursor = region_end
+    pieces.append(text[cursor:close])
+    return "".join(pieces)
+
+
+def _ref_one_pass(text, prefix):
+    every = [i for i in range(len(text)) if _ref_closer(text, i) and not _ref_opener(text, i, prefix)]
+    words, i = 0, 0
     while i < len(text):
-        if opens(i):
-            boundary = i + 1
-            while boundary < len(text) and not opens(boundary):
-                boundary += 1
-            close = None
-            for candidate in range(i + 1, boundary):
-                if closes(candidate):
-                    close = candidate
-            if close is not None:
-                # Each enclosed pass-1 region becomes one space, including
-                # its marks, so no word is counted a second time.
-                pieces, cursor = [], i + 1
-                for start, end in regions:
-                    if i < start < close:
-                        pieces.extend((text[cursor:start], " "))
-                        cursor = end
-                pieces.append(text[cursor:close])
-                spans.append((i, "".join(pieces)))
-                i = close + 1
+        if text[i] in REF_PAIRS and _ref_opens_delimited(text, i):
+            end = i + 1
+            while end < len(text) and text[end] not in REF_PAIRS[text[i]]:
+                end += 1
+            words += _ref_word_count(text[i + 1:end])
+            i = end + 1
+            continue
+        if _ref_opener(text, i, prefix):
+            after = [c for c in every if c > i]
+            if after:
+                words += _ref_word_count(text[i + 1:after[0]])
+                i = after[0] + 1
                 continue
         i += 1
+    return words
+
+
+def _reference_spans(text):
+    spans, regions = _ref_delimited(text)
+    _, _, events = _ref_marks(text, regions, _ref_wide)
+    spans += [(o, _ref_span_text(text, regions, o, c)) for o, c in _ref_possessive(events)]
     return [span for _, span in sorted(spans)]
 
 
+def _reference_words(text):
+    # quoted_words's envelope, independently: under each delimited reading
+    # (standard and strict), delimited words once plus the largest
+    # single-quotation count over three pairings and two prefix rules; the
+    # one-pass reading under both prefix rules; and main's count.
+    best = 0
+    for strict in (False, True):
+        spans, regions = _ref_delimited(text, strict)
+        delimited = sum(_ref_word_count(span) for _, span in spans)
+        for prefix in (_ref_wide, _ref_ascii):
+            opens, closes, events = _ref_marks(text, regions, prefix)
+            for pairs in (_ref_first(opens, closes), _ref_nested(opens, closes), _ref_possessive(events)):
+                best = max(best, delimited + sum(_ref_word_count(_ref_span_text(text, regions, o, c)) for o, c in pairs))
+    one_pass = max(_ref_one_pass(text, prefix) for prefix in (_ref_wide, _ref_ascii))
+    return max(best, one_pass, _main_quoted_words(text))
+
+
+def _main_quoted_words(text):
+    # main's scanner (its last commit before this change), verbatim apart
+    # from nesting it here: doubles and singles in one pass, ASCII prefixes,
+    # the first closer after a non-space, and words counted by whitespace.
+    _DOUBLE_CLOSERS = {'"': '"', "\u201c": "\u201d"}
+    _SINGLE_OPENERS = ("'", "\u2018")
+    _SINGLE_CLOSERS = ("'", "\u2019")
+    _BEFORE_OPENER = frozenset(" \t\n\r([{\u2014\u2013-/")
+
+    def _opens_single(text: str, index: int) -> bool:
+        before_ok = index == 0 or text[index - 1] in _BEFORE_OPENER
+        return before_ok and index + 1 < len(text) and text[index + 1].isalpha()
+
+    def _closes_single(text: str, index: int) -> bool:
+        return (
+            index > 0
+            and not text[index - 1].isspace()
+            and (index + 1 == len(text) or not text[index + 1].isalnum())
+        )
+
+    def quoted_spans(text: str) -> list[str]:
+        spans: list[str] = []
+        index = 0
+        while index < len(text):
+            mark = text[index]
+            if mark in _DOUBLE_CLOSERS:
+                close = text.find(_DOUBLE_CLOSERS[mark], index + 1)
+                close = len(text) if close == -1 else close
+                spans.append(text[index + 1 : close])
+                index = close + 1
+                continue
+            if mark in _SINGLE_OPENERS and _opens_single(text, index):
+                close = next(
+                    (
+                        position
+                        for position in range(index + 1, len(text))
+                        if text[position] in _SINGLE_CLOSERS and _closes_single(text, position)
+                    ),
+                    None,
+                )
+                if close is not None:
+                    spans.append(text[index + 1 : close])
+                    index = close + 1
+                    continue
+            index += 1
+        return spans
+
+    return sum(len(span.split()) for span in quoted_spans(text))
+
+
 @settings(max_examples=2000, deadline=None)
-@given(text=st.text(alphabet=QUOTE_ALPHABET, max_size=60))
+@given(text=quote_texts)
 def test_quoted_spans_agree_with_a_reference(text):
     spans = sc.quoted_spans(text)
     assert spans == _reference_spans(text)
@@ -796,121 +999,34 @@ def test_quoted_spans_agree_with_a_reference(text):
     assert sc.quoted_words(text) >= sum(_ref_word_count(span) for span in spans)
 
 
-def _ref_word_count(span):
-    return len([token for token in span.split() if any(char.isalnum() for char in token)])
-
-
-def _reference_words(text):
-    # quoted_words's envelope, independently and quadratically: delimited
-    # words once, plus the largest single-quotation count over three pairings
-    # and two prefix rules.
-    pairs = {'"': '"', '“': '”', '„': '“', '‚': '‘', '«': '»',
-             '‹': '›', '「': '」', '『': '』', '＂': '＂'}
-    regions, words, i = [], 0, 0
-    while i < len(text):
-        if text[i] in pairs:
-            end = i + 1
-            while end < len(text) and text[end] != pairs[text[i]]:
-                end += 1
-            words += _ref_word_count(text[i + 1:end])
-            regions.append((i, min(end + 1, len(text))))
-            i = end + 1
-        else:
-            i += 1
-
-    def outside(i):
-        return not any(start <= i < end for start, end in regions)
-
-    def unicode_prefix(before):
-        return before.isspace() or before == "/" or unicodedata.category(before) in ("Ps", "Pd", "Pi")
-
-    def ascii_prefix(before):
-        return before in " \t\n\r([{—–-/"
-
-    def opener(i, prefix):
-        return (outside(i) and text[i] in "'‘＇" and i + 1 < len(text) and text[i + 1].isalpha()
-                and (i == 0 or prefix(text[i - 1])))
-
-    def closer(i):
-        return outside(i) and text[i] in "'’＇" and (i + 1 == len(text) or not text[i + 1].isalnum())
-
-    def span_words(start, close):
-        kept = "".join(" " if not outside(j) else text[j] for j in range(start + 1, close))
-        return _ref_word_count(kept)
-
-    best = 0
-    for prefix in (unicode_prefix, ascii_prefix):
-        opens = [i for i in range(len(text)) if opener(i, prefix)]
-        closes = [i for i in range(len(text)) if closer(i)]
-        # Last closer before the next opener.
-        last = 0
-        for k, o in enumerate(opens):
-            bound = opens[k + 1] if k + 1 < len(opens) else len(text)
-            within = [c for c in closes if o < c < bound]
-            if within:
-                last += span_words(o, within[-1])
-        # First closer after the opener, skipping openers inside a span.
-        first, reach = 0, -1
-        for o in opens:
-            if o <= reach:
-                continue
-            after = [c for c in closes if c > o]
-            if after:
-                first += span_words(o, after[0])
-                reach = after[0]
-        # Nesting like brackets; the outermost closed pairs count.
-        stack, closed = [], []
-        for j in sorted(opens + closes):
-            if j in opens:
-                stack.append(j)
-            elif stack:
-                closed.append((stack.pop(), j))
-        nested = sum(span_words(o, c) for o, c in closed
-                     if not any(o2 < o and c < c2 for o2, c2 in closed))
-        best = max(best, last, first, nested)
-    return max(words + best, _main_quoted_words(text))
-
-
-def _main_quoted_words(text):
-    # The scanner on main before this change, frozen: doubles and singles in
-    # one pass, ASCII prefixes, first closer after a non-space.
-    def opens(i):
-        before_ok = i == 0 or text[i - 1] in " \t\n\r([{—–-/"
-        return before_ok and i + 1 < len(text) and text[i + 1].isalpha()
-
-    def closes(i):
-        return i > 0 and not text[i - 1].isspace() and (i + 1 == len(text) or not text[i + 1].isalnum())
-
-    spans, i = [], 0
-    while i < len(text):
-        mark = text[i]
-        if mark in {'"': '"', '“': '”'}:
-            close = text.find({'"': '"', '“': '”'}[mark], i + 1)
-            close = len(text) if close == -1 else close
-            spans.append(text[i + 1:close])
-            i = close + 1
-            continue
-        if mark in "'‘" and opens(i):
-            close = next((j for j in range(i + 1, len(text)) if text[j] in "'’" and closes(j)), None)
-            if close is not None:
-                spans.append(text[i + 1:close])
-                i = close + 1
-                continue
-        i += 1
-    return sum(_ref_word_count(span) for span in spans)
+@settings(max_examples=2000, deadline=None)
+@example(text="It wrote 'the workers' plan won't cover 'em all'")
+@example(text="It wrote 'the workers' policy is to deny every 'special' claim'")
+@example(text="The sections are 'Benefits' and the '2026 changes'.")
+@example(text="It wrote 'the '90s rules' policy is to deny every claim'")
+@example(text="It wrote 'the 'Benefits' section ends here'")
+@example(text="It wrote 'em \u201cx'\u201d all at once'")
+@given(text=quote_texts)
+def test_quoted_words_agree_with_a_reference(text):
+    assert sc.quoted_words(text) == _reference_words(text)
 
 
 @settings(max_examples=2000, deadline=None)
-@given(text=st.text(alphabet=QUOTE_ALPHABET, max_size=60))
-def test_quoted_words_agree_with_a_reference(text):
-    assert sc.quoted_words(text) == _reference_words(text)
+@example(text='It wrote "one two three four \u2026"')
+@example(text="'one' and 'two \u2019 three'")
+@given(text=quote_texts)
+def test_the_main_floor_is_mains_count(text):
+    # #1867 review round 2 (P1): the floor is main's count exactly, its
+    # whitespace word count included, not a copy with this change's rules.
+    assert sc._main_words(text) == _main_quoted_words(text)
 
 
 @settings(max_examples=2000, deadline=None)
 @example(text="It wrote:\u00a0'about \"the workers' policy is to deny every such claim\"'")
 @example(text="'one' and\u00a0'two three four'")
 @example(text="It wrote 'one two three 'inner' four'")
-@given(text=st.text(alphabet=QUOTE_ALPHABET, max_size=60))
+@example(text='It wrote "one two three four \u2026"')
+@given(text=quote_texts)
 def test_quoted_words_never_count_below_main(text):
     # #1867 review (P1): this change must not accept a description main's
     # scanner refused, so it never counts fewer quoted words than main did.
@@ -920,7 +1036,7 @@ def test_quoted_words_never_count_below_main(text):
 @settings(max_examples=2000, deadline=None,
           suppress_health_check=[HealthCheck.function_scoped_fixture])
 @example(text="'one' and\u00a0'two three four'")
-@given(text=st.text(alphabet=QUOTE_ALPHABET, max_size=60))
+@given(text=quote_texts)
 def test_quoted_words_monotonic_when_opener_prefixes_expand(monkeypatch, text):
     # The count also reads single marks with the ASCII prefixes, so widening
     # the opener prefixes never lowers it.
@@ -928,9 +1044,79 @@ def test_quoted_words_monotonic_when_opener_prefixes_expand(monkeypatch, text):
 
     def ascii_opens(value, index):
         return (index + 1 < len(value) and value[index + 1].isalpha()
-                and (index == 0 or value[index - 1] in " \t\n\r([{—–-/"))
+                and (index == 0 or value[index - 1] in " \t\n\r([{\u2014\u2013-/"))
 
     with monkeypatch.context() as patch:
         patch.setattr(sc, "_opens_single", ascii_opens)
         old_prefixes = sc.quoted_words(text)
     assert expanded >= old_prefixes, (text, expanded, old_prefixes)
+
+
+# Plain prose: words, contractions, possessives (singular, plural and before
+# a quotation) and elided years, with no opening mark and no closing mark
+# but a possible possessive's.
+PROSE_WORDS = ["the", "agency", "workers", "policy", "claims", "yes", "no", "case", "rules", "Benefits"]
+PROSE_TOKENS = PROSE_WORDS + ["won't", "agency's", "it\u2019s", "don\u2019t", "6'7", "'90s", "the workers'", "claimants\u2019"]
+
+
+@st.composite
+def prose_with_quotations(draw):
+    """A sentence of plain prose with closed single quotations of plain
+    words in it, and how many words those quotations hold."""
+
+    pieces, quoted = [], 0
+    for _ in range(draw(st.integers(0, 12))):
+        if draw(st.booleans()):
+            words = draw(st.lists(st.sampled_from(PROSE_WORDS), min_size=1, max_size=4))
+            opener = draw(st.sampled_from(["'", "\u2018", "\uff07", "\u2019"]))
+            # main's scanner opens at ' and \u2018 but can't close at \uff07, so
+            # it reads such a quotation on to a later mark; the main floor
+            # keeps that count, which this property doesn't cover.
+            closer = draw(st.sampled_from(["'", "\u2019"] if opener in "'\u2018" else ["'", "\u2019", "\uff07"]))
+            pieces.append(opener + " ".join(words) + closer)
+            quoted += len(words)
+        else:
+            pieces.append(draw(st.sampled_from(PROSE_TOKENS)))
+    # A possessive token closes its sentence with a word, as English does.
+    return " ".join(pieces) + " today.", quoted
+
+
+@settings(max_examples=2000, deadline=None)
+@example(case=("The agency called it 'routine' and won't reopen the workers' case today.", 1))
+@example(case=("The agency's reply was 'yes' after reviewing the workers' policy today.", 1))
+@example(case=("The form's 'Dependents' box and the workers' 'right to disconnect' today.", 4))
+@example(case=("'Yes' after reviewing the claims, the agency said 'no' today.", 2))
+@given(case=prose_with_quotations())
+def test_closed_quotations_in_plain_prose_count_exactly(case):
+    # #1867 review round 2 (P1): an apostrophe or possessive in prose outside
+    # a closed quotation never lengthens it, so plain prose that quotes four
+    # words passes.
+    text, quoted = case
+    assert sc.quoted_words(text) == quoted, text
+
+
+@st.composite
+def text_around_a_quotation(draw):
+    """Any marks and words around one recognisable quotation of plain words,
+    and how many words it holds."""
+
+    before = draw(st.lists(st.sampled_from(QUOTE_TOKENS + PROSE_TOKENS), max_size=12))
+    after = draw(st.lists(st.sampled_from(QUOTE_TOKENS + PROSE_TOKENS), max_size=12))
+    words = draw(st.lists(st.sampled_from(PROSE_WORDS), min_size=1, max_size=8))
+    if draw(st.booleans()):
+        opener = draw(st.sampled_from(["'", "\u2018", "\uff07", "\u2019"]))
+        closer = draw(st.sampled_from(["'", "\u2019", "\uff07"]))
+    else:
+        opener = draw(st.sampled_from(sorted(REF_PAIRS)))
+        closer = draw(st.sampled_from(REF_PAIRS[opener]))
+    quotation = opener + " ".join(words) + closer
+    return " ".join(["".join(before), quotation, "".join(after)]), len(words)
+
+
+@settings(max_examples=2000, deadline=None)
+@given(case=text_around_a_quotation())
+def test_every_recognisable_quotation_counts_in_full(case):
+    # Whatever surrounds it, a quotation the scanner recognises (an opener
+    # after a space, a closer before one) counts at least its own words.
+    text, words = case
+    assert sc.quoted_words(text) >= words, text

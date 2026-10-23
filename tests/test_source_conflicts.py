@@ -15,8 +15,14 @@ import ast
 import copy
 import hashlib
 import importlib.util
+import io
+import json
 import math
+import os
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -1131,8 +1137,9 @@ def test_a_single_closer_depends_only_on_what_follows_it():
         # Two quotations are two, however the marks are read.
         ("'one' and 'two three four'", 4),
         ("The agency's reply 'approves it' and the county's 'denies it'", 4),
-        # The ASCII reading still sees one span here, as main did.
-        ("'one' and\u00a0'two three four'", 5),
+        # Two quotations of four words in all: no reading runs the first past
+        # its closer (#1867 round 2 counted 5 through the last-closer reading).
+        ("'one' and\u00a0'two three four'", 4),
         # A nested quotation opened after a no-break space, with one closer:
         # only the first-closer reading keeps the outer words.
         ("It wrote:\u00a0'one two three 'four five'", 5),
@@ -1146,27 +1153,105 @@ def test_quoted_words_take_the_largest_reading(text, words):
     assert sc.quoted_words(text) == words
 
 
+@pytest.mark.parametrize(
+    ("description", "count", "refused"),
+    [
+        # #1867 round 2, P1: an apostrophe or plural possessive in prose after
+        # a closed quotation doesn't lengthen it.
+        ("The agency called it 'routine' and won't reopen the workers' case.", 1, False),
+        ("The agency's reply was 'yes' after reviewing the workers' policy.", 1, False),
+        ("The form's 'Dependents' box and the workers' 'right to disconnect' are separate.", 4, False),
+        ("'Yes' after reviewing the claims, the agency said 'no'.", 2, False),
+        # A mark that opens nothing ('2026) ends a possible possessive's reach.
+        ("The sections are 'Benefits' and the '2026 changes for every filer'.", 1, False),
+        # P1: the floor is main's own count, so a standalone ellipsis still
+        # counts as main counted it.
+        ('It wrote "one two three four \u2026"', 5, True),
+        # P2: a possessive with an elision or a nested quotation inside.
+        ("It wrote 'the workers' plan won't cover 'em all'", 7, True),
+        ("It wrote 'the workers' policy is to deny every 'special' claim'", 9, True),
+        ("It wrote 'the workers' policy covers 2026 and every later year'", 9, True),
+        # Mutation round 3: an elided year inside a quotation, before its
+        # possessive, doesn't end it in the possessive reading.
+        ("It wrote 'the '90s rules' policy is to deny every claim'", 9, True),
+        # A nested quotation of a word ending in s: only the nesting reading
+        # keeps the outer quotation's five words.
+        ("It wrote 'the 'Benefits' section ends here'", 5, True),
+        # An elision opens a quotation in the first-closer reading, over a
+        # delimited region that takes the one-pass reading's closer.
+        ("It wrote 'em \u201cx'\u201d all at once'", 5, True),
+        # P2: an inch mark inside a single quotation, after a no-break space.
+        ("It wrote:\u00a0'the adult must be at least 6\" tall'", 8, True),
+        # An inch mark before a double quotation (the strict delimited reading).
+        ('He is 6" tall and wrote "one two three four five"', 5, True),
+        # A stray low mark (\u201a) can't take a single opener as its closer.
+        ("It wrote \u201ax \u2019one two three four five\u2019", 6, True),
+        # P2: German and Danish reversed guillemets, Swedish and Finnish
+        # same-direction marks, and a closer before a footnote mark.
+        ("It wrote \u00bbone two three four five\u00ab", 5, True),
+        ("It wrote \u203aone two three four five\u2039", 5, True),
+        ("It wrote \u201done two three four five\u201d", 5, True),
+        ("It wrote \u00bbone two three four five\u00bb", 5, True),
+        ("It wrote \u2019one two three four five\u2019", 5, True),
+        ("It wrote \u2018one two three four five\u2019\u00b9", 5, True),
+        # An inch mark (6\u201d) opens nothing.
+        ("A 6\u201d gap and four more words here", 0, False),
+    ],
+)
+def test_publication_round_three_regressions(tmp_path, description, count, refused):
+    assert sc.quoted_words(description) == count
+    issues = check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))
+    assert any("quotes more than 4 words in all" in issue for issue in issues) is refused
+
+
+def test_possessive_and_elision_rules():
+    assert sc._weak_closer("the workers' policy", 11) is True
+    assert sc._weak_closer("the workers' 'right'", 11) is True
+    assert sc._weak_closer("the workers'.", 11) is False
+    assert sc._weak_closer("the workers'", 11) is False
+    assert sc._weak_closer("a routine' case", 9) is False
+    for text, elided in (("'em all", True), ("'Tis so", True), ("'twas.", True), ("'emma", False), ("'round", False), ("'n'", False)):
+        assert sc._elision(text, 0) is elided, text
+    # The elision ('em) opens nothing in the possessive reading, so the outer
+    # quotation runs to its closer; the first-closer reading still opens it.
+    assert sc.quoted_spans("It wrote 'the workers' plan won't cover 'em all'") == ["the workers' plan won't cover 'em all"]
+    assert sc.quoted_words("He wrote 'em all must leave the premises at once'") == 8
+
+
+def test_delimited_openers_that_also_close_need_context():
+    assert sc._opens_delimited("x \u201done", 2) is True
+    assert sc._opens_delimited("6\u201d tall", 1) is False
+    assert sc._opens_delimited("x \u201d y", 2) is False
+    assert sc._opens_delimited("\u00bbone", 0) is True
+    assert sc._opens_delimited("x\u00bbone", 1) is False
+    assert sc._opens_delimited("x\u201cone", 1) is True  # \u201c only opens
+    # The strict reading closes only at a word's end.
+    assert sc._delimited('6" and "a b"', strict=True) == ([(7, "a b")], [(7, 12)])
+    assert sc._delimited('6" and "a b"') == ([(1, " and "), (11, "")], [(1, 8), (11, 12)])
+
+
 def test_quoted_spans_finds_each_closer_once(monkeypatch):
     # #1825 round-3 review (P3): unclosed openers made the scan quadratic
-    # (24,000 characters took 6 s). Each mark is now tested as a closer once.
+    # (24,000 characters took 6 s). Each mark is now tested as a closer at
+    # most once.
     calls = []
     real = sc._closes_single
     monkeypatch.setattr(sc, "_closes_single", lambda text, index: calls.append(index) or real(text, index))
     text = "'a " * 20_000 + "end'"
-    # Every opener now stops at the next opener. Only the last one has a
-    # closer in its interval, so the old whole-text span becomes this suffix.
+    # The marks nest, so only the last opener is closed.
     assert sc.quoted_spans(text) == ["a end"]
-    assert len(calls) == text.count("'")
+    assert len(calls) <= text.count("'")
     calls.clear()
     assert sc.quoted_spans("'a " * 20_000) == []
-    assert len(calls) == 20_000
+    assert len(calls) <= 20_000
 
 
 @pytest.mark.parametrize(
     ("opening", "closing"),
     [
-        ('"', '"'), ("“", "”"), ("„", "“"), ("‚", "‘"),
-        ("«", "»"), ("‹", "›"), ("「", "」"), ("『", "』"), ("＂", "＂"),
+        ('"', '"'), ("“", "”"), ("„", "“"), ("„", "”"), ("‚", "‘"), ("‚", "’"),
+        ("«", "»"), ("‹", "›"), ("»", "«"), ("»", "»"), ("›", "‹"), ("›", "›"), ("”", "”"),
+        ("「", "」"), ("『", "』"), ("〝", "〞"), ("〝", "〟"), ("＂", "＂"),
     ],
 )
 @pytest.mark.parametrize("closed", [True, False])
@@ -1178,12 +1263,15 @@ def test_delimited_quotations(tmp_path, opening, closing, closed, include_other_
     words = "one two three four five" + (f" {other_closer} six" if include_other_closer else "")
     description = "It wrote " + opening + words + (closing if closed else "")
     assert sc.quoted_spans(description) == [words]
-    assert sc.quoted_words(description) == len([word for word in words.split() if any(char.isalnum() for char in word)])
+    # main's scanner reads " and “ too, counting a stray mark inside as a
+    # word, and its count is the floor.
+    expected = len(words.split()) if opening in ('"', "“") else len([word for word in words.split() if any(char.isalnum() for char in word)])
+    assert sc.quoted_words(description) == expected
     issues = check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))
     assert any("quotes more than 4 words in all" in issue for issue in issues)
 
 
-@pytest.mark.parametrize("opening", ["'", "‘", "＇"])
+@pytest.mark.parametrize("opening", ["'", "‘", "＇", "’"])
 @pytest.mark.parametrize("closing", ["'", "’", "＇"])
 def test_single_quote_combinations(tmp_path, opening, closing):
     words = "one two three four five"
@@ -1204,7 +1292,7 @@ def test_single_quote_combinations(tmp_path, opening, closing):
          ["about  ", "the workers' policy is to deny every such claim"], 10, True),
         # P2: trailing whitespace no longer disables a closing single mark.
         ("It wrote 'one two three four five '", ["one two three four five "], 5, True),
-        # P2: the last closer includes the plural possessive in the span.
+        # P2: the possessive reading keeps the plural possessive in the span.
         ("It wrote 'the workers' policy is to deny every such claim'",
          ["the workers' policy is to deny every such claim"], 9, True),
         ("It wrote ‘the workers’ policy is to deny every such claim’",
@@ -1243,26 +1331,11 @@ def test_single_quotations_do_not_count_delimited_regions_twice(description, spa
 
 
 @pytest.mark.parametrize(
-    ("values", "index", "end", "expected"),
-    [
-        ([], 0, 99, 99), ([0, 2, 4], -1, 99, 0), ([0, 2, 4], 0, 99, 2),
-        ([0, 2, 4], 1, 99, 2), ([0, 2, 4], 2, 99, 4), ([0, 2, 4], 4, 99, 99),
-    ],
+    ("values", "index", "expected"),
+    [([], 0, None), ([0, 2, 4], -1, 0), ([0, 2, 4], 0, 2), ([0, 2, 4], 1, 2), ([0, 2, 4], 2, 4), ([0, 2, 4], 4, None)],
 )
-def test_next_opener_bisection_helper_is_exact(values, index, end, expected):
-    assert sc._next_opener(values, index, end) == expected
-
-
-@pytest.mark.parametrize(
-    ("values", "start", "end", "expected"),
-    [
-        ([], 0, 9, None), ([0, 2, 4], -1, 9, 4), ([0, 2, 4], -1, 4, 2),
-        ([0, 2, 4], 0, 4, 2), ([0, 2, 4], 2, 4, None), ([0, 2, 4], 0, 2, None),
-        ([0, 2, 4], 4, 9, None), ([0, 2, 4], -1, 0, None),
-    ],
-)
-def test_last_closer_bisection_helper_is_exact(values, start, end, expected):
-    assert sc._last_closer(values, start, end) == expected
+def test_next_after_is_exact(values, index, expected):
+    assert sc._next_after(values, index) == expected
 
 
 class _CountedPositions:
@@ -1281,41 +1354,63 @@ class _CountedPositions:
 
 
 @pytest.mark.parametrize("index", [-1, 0, 100_000, 199_998, 200_000])
-def test_quote_bisection_helpers_use_logarithmic_accesses(index):
+def test_next_after_uses_logarithmic_accesses(index):
     # Count sequence accesses so a linear lookup mutant fails deterministically,
     # even when the scanner classifies each mark only once.
     size = 100_000
-    bound = 2 * math.ceil(math.log2(size)) + 4
     positions = _CountedPositions(size)
     expected = min(size, max(0, index // 2 + 1))
-    assert sc._next_opener(positions, index, 200_001) == (2 * expected if expected < size else 200_001)
-    assert positions.accesses <= bound
-    positions = _CountedPositions(size)
-    expected = min(size - 1, (index - 1) // 2)
-    assert sc._last_closer(positions, -1, index) == (2 * expected if expected >= 0 else None)
-    assert positions.accesses <= bound
+    assert sc._next_after(positions, index) == (2 * expected if expected < size else None)
+    assert positions.accesses <= 2 * math.ceil(math.log2(size)) + 4
 
 
-def test_quoted_spans_uses_bounded_lookups_per_opener(monkeypatch):
-    # Review finding 5: cached closers alone did not prevent quadratic lookup
-    # work on this family. Both lookups must stay bounded per eligible opener.
+def test_every_successor_lookup_is_bounded(monkeypatch):
+    # #1867 review round 2 (P2): a linear search for the closer in the
+    # first-closer reading or the one-pass readings kept every result, so
+    # only their running time showed it. Every successor lookup goes through
+    # _next_after (bounded above), once per eligible opener: on this family
+    # 4 first-closer readings (2 delimited readings x 2 prefix rules), 2
+    # one-pass readings and main's, 7 lookups per opener. A mutant that
+    # searches the closers itself makes fewer calls and fails here.
     size = 20_000
     text = "a' " * size + "'a " * size
-    calls = {"next": 0, "last": 0}
-    next_opener, last_closer = sc._next_opener, sc._last_closer
+    calls = []
+    real = sc._next_after
+    monkeypatch.setattr(sc, "_next_after", lambda positions, index: calls.append(index) or real(positions, index))
+    assert sc.quoted_words(text) == 0
+    assert len(calls) == 7 * size
+    calls.clear()
+    marks = sc._single_marks(text, [], sc._opens_single)
+    assert sc._pairs_first(marks) == [] and len(calls) == size
+    calls.clear()
+    closers = [index for index, mark in enumerate(text) if mark == "'" and sc._closes_single(text, index)]
+    assert sc._one_pass_words(text, sc._opens_single, closers) == 0 and len(calls) == size
+    calls.clear()
+    assert sc._main_words(text) == 0 and len(calls) == size
 
-    def counted_next(*args):
-        calls["next"] += 1
-        return next_opener(*args)
 
-    def counted_last(*args):
-        calls["last"] += 1
-        return last_closer(*args)
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a' " * 40_000 + "'a " * 40_000,
+        "'a " * 80_000,
+        '"a ' * 80_000,
+        "\u201ea " * 80_000,
+        "'as " * 40_000 + "x' " * 40_000,
+        "'a '1 as' " * 20_000,
+        '6" "a ' * 40_000,
+    ],
+    ids=["closers-then-openers", "unclosed-singles", "unclosed-doubles", "unclosed-low-doubles", "weak-then-strong",
+         "barriers", "inch-marks"],
+)
+def test_quote_scans_stay_fast(text):
+    # Coarse wall-clock guard on families that are quadratic under a linear
+    # lookup: each scan of 240,000 or so characters takes well under a second.
+    import time
 
-    monkeypatch.setattr(sc, "_next_opener", counted_next)
-    monkeypatch.setattr(sc, "_last_closer", counted_last)
-    assert sc.quoted_spans(text) == []
-    assert calls == {"next": size, "last": size}
+    started = time.perf_counter()
+    sc.quoted_words(text)
+    assert time.perf_counter() - started < 10
 
 
 # ---------------------------------------------------------------------------
@@ -1772,3 +1867,112 @@ def test_verify_lists_proposed_implementations():
     assert len(proposed) == 1 and "pull/10200" in proposed[0]
     # Review of #1825 (P3): a proposal is listed, never counted as an implementation.
     assert report[0] == "verified: 1 texts, 1 pending texts, 1 implementations, 2 tests"
+
+
+# ---------------------------------------------------------------------------
+# #1844 round 7 review (P3): files read beside the payload
+
+
+@pytest.mark.parametrize("value", ["2026-02-30", "1" * 5000])
+def test_a_value_yaml_cannot_construct_is_a_register_error(tmp_path, capsys, value):
+    # PyYAML raises ValueError for an impossible date or an integer too long
+    # to convert; the register's readers report it instead of raising.
+    path = tmp_path / sc.REGISTER_FILENAME
+    path.write_text(f"version: 1\nentries: []\nextra: {value}\n")
+    with pytest.raises(sc.RegisterError, match="holds a value YAML cannot construct"):
+        sc.load_register(path)
+    assert sc.main(["check", "--root", str(tmp_path)]) == 1
+    assert sc.main(["verify", "--root", str(tmp_path)]) == 1
+    assert "holds a value YAML cannot construct" in capsys.readouterr().err
+
+
+def test_yaml_test_case_names_is_total():
+    assert sc.yaml_test_case_names("- name: a\n  period: 2026-02-30\n") == set()
+    assert sc.yaml_test_case_names("[" * 600 + "]" * 600) == set()
+
+
+def test_a_local_test_that_cannot_be_read_is_an_issue(tmp_path):
+    ctx = sc.RepoContext(root=tmp_path, repo=REPO)
+    (tmp_path / "tests").mkdir()
+    test_file = tmp_path / "tests" / "default.test.yaml"
+
+    def screen():
+        issues: list[str] = []
+        sc.check_local_test("tests/default.test.yaml", "Local default", label="tests[0]", ctx=ctx, issues=issues)
+        return issues
+
+    test_file.write_text("- name: Local default\n  period: 2026\n")
+    assert screen() == []
+    for text in ("- name: Local default\n  period: 2026-02-30\n", "[" * 600 + "]" * 600):
+        test_file.write_text(text)
+        assert screen() == ["tests[0].name Local default is not a test case in tests/default.test.yaml."]
+    if os.geteuid() != 0:  # root reads a chmod-0 file
+        test_file.write_text("- name: Local default\n")
+        test_file.chmod(0)
+        try:
+            assert screen() == ["tests[0].path tests/default.test.yaml cannot be read: Permission denied."]
+        finally:
+            test_file.chmod(0o644)
+
+
+class _Response(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def _fake_github(files):
+    """urlopen for discover_registers: an organisation listing with one
+    repository per name in `files`, and each repository's raw file (None
+    for a repository without one)."""
+
+    def urlopen(target, timeout=None):
+        url = target if isinstance(target, str) else target.full_url
+        if "/orgs/" in url:
+            page = int(urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["page"][0])
+            listing = [{"full_name": f"TheAxiomFoundation/{name}", "name": name, "default_branch": "main"} for name in files]
+            return _Response(json.dumps(listing if page == 1 else []).encode())
+        name = url.split("/")[4]
+        if files[name] is None:
+            raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+        return _Response(files[name])
+
+    return urlopen
+
+
+@pytest.mark.parametrize("filename", [sc.REGISTER_FILENAME, sc.CHOICES_FILENAME])
+def test_discovery_reads_each_repository_on_its_own(monkeypatch, filename):
+    # One repository's unreadable file no longer aborts the Axiom-wide view,
+    # and an alias cycle can't reach the JSON renderer.
+    good = yaml.safe_dump({"version": 1, "entries": []}).encode()
+    files = {
+        "rulespec-us": good,
+        "rulespec-us-co": b"entries: [\n",
+        "rulespec-us-mt": b"version: 1\nentries: []\nextra: &a\n  self: *a\n",
+        "rulespec-us-ca": b"version: 1\nentries: []\nextra: 2026-02-30\n",
+        "rulespec-us-tx": b"\xff\xfe",
+        "rulespec-us-ny": None,
+    }
+    monkeypatch.setattr(sc.urllib.request, "urlopen", _fake_github(files))
+    registers, issues = sc.discover_registers(None, filename=filename)
+    assert registers == {"TheAxiomFoundation/rulespec-us": {"version": 1, "entries": []}}
+    assert len(issues) == 4
+    for name in ("rulespec-us-co", "rulespec-us-mt", "rulespec-us-ca", "rulespec-us-tx"):
+        assert any(issue.startswith(f"TheAxiomFoundation/{name}: {filename}") for issue in issues), (name, issues)
+    rows, _ = sc.aggregate(registers)
+    json.dumps(rows, default=sc._json_default)
+
+
+def test_aggregate_cli_reports_an_unreadable_local_file(tmp_path, capsys):
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("version: 1\nentries: []\nextra: 2026-02-30\n")
+    good = tmp_path / "good.yaml"
+    good.write_text(yaml.safe_dump({"version": 1, "entries": [entry()]}))
+    out = tmp_path / "rows.json"
+    argv = ["aggregate", "--register", f"TheAxiomFoundation/rulespec-us={good}",
+            "--register", f"TheAxiomFoundation/rulespec-uk={bad}", "--json", str(out)]
+    assert sc.main(argv) == 1
+    assert "TheAxiomFoundation/rulespec-uk: " in capsys.readouterr().err
+    assert [row["repository"] for row in json.loads(out.read_text())] == ["TheAxiomFoundation/rulespec-us"]
