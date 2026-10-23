@@ -1338,6 +1338,15 @@ def test_quoted_words(text, words):
         ('It wrote "one """two" three" four" five" today.', 4, False),
         ('It wrote "one \u2014"\u00abtwo\u00bb three four" five" today.', 3, False),
         ("It wrote \u201eone \u201c[sic] two three\u201d four five\u201d today.", 3, False),
+        # The same after a stray mark (#1867 round 7): its quotation is open, so
+        # a quotation after punctuation whose first mark opens a nested one
+        # reads as two. After whitespace instead, it counts in full.
+        ("A stray \u201e mark, then (\u201c\u201cone\u201d two three four five\u201d).", 3, False),
+        ('\u201e :\u201c\u201cthe\u201d the\u201d ', 1, False),
+        ('\u201e \u2014\u201c\u201cthe\u201d the\u201d ', 1, False),
+        ('\u201e /\u201c\u201cthe\u201d the\u201d ', 1, False),
+        ('\u201e \u201c\u201cthe\u201d the\u201d ', 2, False),
+        ("A stray \u201e mark, then \u201c\u201cone\u201d two three four five\u201d.", 7, True),
         # Intended (#1867 round 6): \u2018\u2026\u2019 nested in a double quotation is read
         # conservatively, so a later word-end apostrophe stretches it; nested
         # in \u00ab\u2026\u00bb, which the refusal recommends, it counts exactly.
@@ -1371,6 +1380,16 @@ def test_quoted_words(text, words):
         ("The agency called it \"routine\" and won't reopen the workers' case.", 1, False),
         ("'one' and 'two three four'", 5, True),
         ('"one" and "two three four"', 4, False),
+        # A stray mark leaves a quotation open; a mark after a colon still
+        # starts one (round 7, from the recognisable-quotation property).
+        ('" :"one two three four five" ', 5, True),
+        ('\u00bba :\u00abthe the\u00bb ', 3, False),
+        ('\u203aa :\u2039the the\u203a ', 3, False),
+        ('\u201e :\u201dthe\u201d ', 1, False),
+        ('\u00ab :\u00bbthe\u00ab ', 1, False),
+        ('\uff02 :\uff02the\uff02 ', 1, False),
+        ('\u2039 :\u203athe\u2039 ', 1, False),
+        ('A 12" form said\uff1a"one two three four five"', 6, True),
     ],
 )
 def test_publication_regressions(tmp_path, description, count, refused):

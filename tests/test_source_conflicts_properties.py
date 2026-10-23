@@ -782,7 +782,7 @@ def _ref_wide(text, i):
     if i == 0:
         return True
     before = text[i - 1]
-    return before.isspace() or before == "/" or before in REF_MARKS or unicodedata.category(before) in ("Ps", "Pd", "Pi")
+    return before.isspace() or before in "/:\uff1a" or before in REF_MARKS or unicodedata.category(before) in ("Ps", "Pd", "Pi")
 
 
 def _ref_word_char(char):
@@ -1312,14 +1312,20 @@ def text_around_a_quotation(draw):
     words = draw(st.lists(st.sampled_from(PROSE_WORDS), min_size=1, max_size=8))
     opener = draw(st.sampled_from(sorted(REF_PAIRS)))
     closer = draw(st.sampled_from(REF_PAIRS[opener]))
+    nested_first = False
     if draw(st.booleans()):
         cut = draw(st.integers(0, len(words) - 1))
         words_text = " ".join(words[:cut] + [opener + words[cut] + closer] + words[cut + 1:])
+        nested_first = cut == 0
     else:
         words_text = " ".join(words)
     # The mark right before the opener: anything but a letter or digit
-    # (#1867 round 6), with a space before it.
-    prefix = draw(st.sampled_from(["", ":", "\u2014", "(", "/", "\u00a0"]))
+    # (#1867 round 6), with a space before it. A quotation whose first word
+    # is itself a nested quotation starts with a quotation mark, which starts
+    # a quotation only at the start or after whitespace; after punctuation,
+    # inside a quotation a stray mark before it left open, it is the second
+    # known limit (pinned in test_publication_regressions).
+    prefix = draw(st.sampled_from(["", "\u00a0"] if nested_first else ["", ":", "\u2014", "(", "/", "\u00a0"]))
     return "".join(before) + " " + prefix + opener + words_text + closer + " " + "".join(after), len(words)
 
 

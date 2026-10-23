@@ -217,20 +217,22 @@ _QUOTATION_MARKS = _DELIMITER_MARKS | _SINGLE_MARKS
 # and a slash: opening brackets (Ps), dashes (Pd) and opening quotation marks
 # (Pi).
 _BEFORE_OPENER_CATEGORIES = frozenset({"Ps", "Pd", "Pi"})
+_PREFIX_MARKS = frozenset("/:\uff1a")  # a slash, a colon, a fullwidth colon
 # The prefixes a single opener could follow on main, for the main floor.
 _ASCII_BEFORE_OPENER = frozenset(" \t\n\r([{\u2014\u2013-/")
 
 
 def _opener_prefix(text: str, index: int) -> bool:
     """The mark starts the text or follows whitespace (any Unicode space,
-    such as a no-break space), a slash, an opening bracket, a dash or a
-    quotation mark (so ""one" two" nests)."""
+    such as a no-break space), a slash, a colon, an opening bracket, a dash
+    or a quotation mark (so ""one" two" nests, and so does said:"…" inside
+    a quotation a stray mark left open)."""
 
     if index == 0:
         return True
     before = text[index - 1]
     return (
-        before.isspace() or before == "/" or before in _QUOTATION_MARKS
+        before.isspace() or before in _PREFIX_MARKS or before in _QUOTATION_MARKS
         or unicodedata.category(before) in _BEFORE_OPENER_CATEGORIES
     )
 
@@ -395,10 +397,10 @@ def _delimited(text: str, reading: str = "standard") -> tuple[list[tuple[int, st
 
     Three readings (_delimited_close): standard; strict, for marks that aren't
     quotation marks where they stand (an inch mark, 6"; a low mark used as a
-    comma), where a mark opens only after an opener prefix and closes at the
-    first closing mark that doesn't start a quotation itself, so 6" and "one
-    two three four five" quotes five words; and nested, for a quotation
-    inside a quotation (_nested_close)."""
+    comma), where a mark opens unless it directly follows a letter or digit
+    and closes at the first closing mark that doesn't start a quotation
+    itself, so 6" and "one two three four five" quotes five words; and
+    nested, for a quotation inside a quotation (_nested_close)."""
 
     spans: list[tuple[int, str]] = []
     regions: list[tuple[int, int]] = []
