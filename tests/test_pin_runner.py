@@ -628,6 +628,22 @@ def test_the_oracle_records_values_as_bounded_json():
     assert "computed no value of v" in runner.optimum_shown(item, ("v", True, False, None))
 
 
+def test_the_oracle_decodes_fixed_length_strings():
+    # #1844 review round 5 (P2): core returns a str variable with max_length
+    # as bytes; the oracle records the text, so `|S20` values compare by name.
+    class Array(list):
+        def tolist(self):
+            return list(self)
+
+    assert oracle_module._listed(Array([b"16777220", b"SEPARATE"])) == ["16777220", "SEPARATE"]
+    assert oracle_module._listed([True, 0.5, "a"]) == [True, 0.5, "a"]
+    with pytest.raises(UnicodeDecodeError):
+        oracle_module._listed(Array([b"\xff"]))
+    item = {"case": AS_SHIPPED, "choices": {"v": record("16777220", variable="v", inputs=(), dtype="|S20")}}
+    assert runner.optimum_shown(item, ("v", "16777220", "0", None)) is None
+    assert "computed v = '16777220'" in runner.optimum_shown(item, ("v", "16777219", "0", None))
+
+
 def test_cache_key_covers_an_optimum_pins_expectation():
     plain = pin("Itemizes", path="tests/a.yaml")
     keys = {

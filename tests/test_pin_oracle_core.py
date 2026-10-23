@@ -29,6 +29,7 @@ TOOLS = Path(__file__).resolve().parents[1] / "tools"
 
 MODEL = textwrap.dedent(
     """\
+    import numpy as np
     from policyengine_core.entities import build_entity
     from policyengine_core.enums import Enum
     from policyengine_core.model_api import where
@@ -125,6 +126,18 @@ MODEL = textwrap.dedent(
             return person("income", period.this_year) * 0 + 0.0625
 
 
+    class bounded_name(Variable):
+        # A fixed-length string: core stores it as bytes (dtype |S20).
+        value_type = str
+        max_length = 20
+        entity = Person
+        definition_period = YEAR
+        label = "bounded name"
+
+        def formula(person, period, parameters):
+            return np.full(person.count, "16777220")
+
+
     NumericStatus = Enum("NumericStatus", {"0": "Zero", "16777219": "One", "16777220": "Two"})
 
 
@@ -167,7 +180,7 @@ MODEL = textwrap.dedent(
         def __init__(self):
             super().__init__([Person, Household])
             for variable in (income, elects, checked, p0, always_true, count, monthly_share, monthly_rate, numeric_status,
-                             share, filing_status):
+                             bounded_name, share, filing_status):
                 self.add_variable(variable)
             self.parameters = ParameterNode("", data={"gov": {"flag": {"values": {"2000-01-01": True}}}})
     """
@@ -220,6 +233,8 @@ CASES = {
     "a monthly choice at a monthly period": {"period": "2026-01", "input": {"income": 0}, "output": {"monthly_share": 0.3}},
     # Round 4 (P1): an enum whose names are digits compares by name.
     "an enum with numeric names": {"input": {"income": 0}, "output": {"numeric_status": "16777220"}},
+    # Round 5 (P2): a fixed-length string is recorded as text, not bytes.
+    "a fixed-length string": {"input": {"income": 20}, "output": {"income": 20}},
 }
 
 # Cases whose test outcome depends on the numpy under core: each must either
@@ -253,6 +268,8 @@ PINS = [
     ("a monthly choice at a monthly period", ("monthly_share", "0.3", "0.5", None), True),
     ("an enum with numeric names", ("numeric_status", "16777219", "0", None), False),
     ("an enum with numeric names", ("numeric_status", "16777220", "0", None), True),
+    ("a fixed-length string", ("bounded_name", "16777220", "0", None), True),
+    ("a fixed-length string", ("bounded_name", "16777219", "0", None), False),
 ]
 
 DRIVER = textwrap.dedent(
@@ -332,6 +349,8 @@ def test_the_oracle_reads_what_core_computed(tmp_path):
     assert "defined by month, over 2026" in detail[("a monthly choice at a yearly period", "monthly_share", '0.3', None)]
     assert "defined by month, over 2026" in detail[("twelve monthly defaults sum to another option", "monthly_rate", '0.75', None)]
     assert "computed numeric_status = '16777220'" in detail[("an enum with numeric names", "numeric_status", '16777219', None)]
+    bounded = items["a fixed-length string"]["choices"]["bounded_name"]
+    assert bounded["computed"] == ["16777220"] and bounded["dtype"].startswith(("|S", "<S")), bounded
     # The record says what it read: the definition period and the period's unit and size.
     yearly = items["a monthly choice at a yearly period"]["choices"]["monthly_share"]
     assert (yearly["definition_period"], yearly["period_unit"], yearly["period_size"]) == ("month", "year", 1)

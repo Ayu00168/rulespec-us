@@ -84,6 +84,15 @@ def _jsonable(value: object) -> object:
         return None
 
 
+def _listed(values: object) -> list:
+    """Computed values as a list of plain Python values. A fixed-length string
+    variable comes back as bytes, which is decoded as UTF-8 text; bytes that
+    aren't UTF-8 raise, so the record holds the error."""
+
+    listed = list(values.tolist() if hasattr(values, "tolist") else values)
+    return [value.decode("utf-8") if isinstance(value, bytes) else value for value in listed]
+
+
 def _period(simulation: object, raw: object) -> object:
     """The period `simulation.calculate` reads for `raw` (the case's period,
     or the simulation's default), parsed by the simulation's own package."""
@@ -111,7 +120,7 @@ def _read_choice(item: pytest.Item, variable: str) -> dict:
         ids = simulation.get_variable_population(variable).ids
         return {
             "variable": variable,
-            "computed": _jsonable(list(values.tolist() if hasattr(values, "tolist") else values)),
+            "computed": _jsonable(_listed(values)),
             "ids": _jsonable([str(each) for each in (ids.tolist() if hasattr(ids, "tolist") else ids)]),
             "dtype": dtype,
             "definition_period": str(definition),

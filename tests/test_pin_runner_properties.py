@@ -64,7 +64,7 @@ from pathlib import Path
 import pytest
 
 hypothesis = pytest.importorskip("hypothesis")
-from hypothesis import HealthCheck, given, settings, strategies as st  # noqa: E402
+from hypothesis import HealthCheck, assume, given, settings, strategies as st  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -458,3 +458,60 @@ def test_optimum_shown_matches_a_reference(item, chooses, default, instances):
         and all(_ref_same_stored(value, chooses, choice.get("dtype")) for value in selected)
     )
     assert (runner.optimum_shown(item, ("v", chooses, default, instances)) is None) is expected
+
+
+# Round 5 (P3): random records are almost never accepted, so this property
+# builds one that is, checks it is, then changes one field and checks the
+# runner and the reference agree on the result.
+ACCEPTABLE_OPTIONS = st.sampled_from([True, False, "a", "b", "0.5", "1", "16777219", "16777220"])
+FIELD_CHANGES = st.sampled_from([
+    None, "input", "override", "reform", "extension", "other value", "no value", "other variable", "missing record",
+    "month at year", "two years", "no period", "error", "missing instance", "is the default",
+])
+
+
+@SETTINGS
+@given(ACCEPTABLE_OPTIONS, ACCEPTABLE_OPTIONS, st.integers(1, 3), st.sampled_from([None, "bool", "float32", "int64", "enum", "object"]),
+       st.booleans(), FIELD_CHANGES)
+def test_optimum_shown_accepts_a_built_record_and_one_change_matters(chooses, default, count, dtype, named, change):
+    assume(not _ref_same(chooses, default))
+    dtype = {bool: "bool"}.get(type(chooses), dtype) if dtype is not None else None
+    assume(_ref_same_stored(chooses, chooses, dtype))  # a dtype that holds the option
+    ids = [f"u{index}" for index in range(count)]
+    choice = {"variable": "v", "computed": [chooses] * count, "ids": ids, "dtype": dtype, "definition_period": "year",
+              "period": "2026", "period_unit": "year", "period_size": 1, "input_variables": ["age"]}
+    item = {"case": {"parameters": [], "reforms": False, "extensions": False}, "choices": {"v": choice}}
+    instances = (ids[0],) if named else None
+    assert runner.optimum_shown(item, ("v", chooses, default, instances)) is None
+    if change is None:
+        return
+    if change == "input":
+        choice["input_variables"].append("v")
+    elif change == "override":
+        item["case"]["parameters"] = ["gov.x"]
+    elif change == "reform":
+        item["case"]["reforms"] = True
+    elif change == "extension":
+        item["case"]["extensions"] = True
+    elif change == "other value":
+        other = next(option for option in (False, True, "zz", "0.25", "7") if not _ref_same_stored(option, chooses, dtype))
+        choice["computed"][0] = other
+    elif change == "no value":
+        choice["computed"], choice["ids"] = [], []
+    elif change == "other variable":
+        choice["variable"] = "w"
+    elif change == "missing record":
+        item["choices"] = {"w": {**choice, "variable": "w"}}
+    elif change == "month at year":
+        choice["definition_period"] = "month"
+    elif change == "two years":
+        choice["period_size"] = 2
+    elif change == "no period":
+        del choice["period_unit"]
+    elif change == "error":
+        choice["error"] = "ValueError: x"
+    elif change == "missing instance":
+        instances = ("nobody",)
+    elif change == "is the default":
+        default = chooses
+    assert runner.optimum_shown(item, ("v", chooses, default, instances)) is not None, change
