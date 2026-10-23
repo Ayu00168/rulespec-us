@@ -202,6 +202,8 @@ def entries(draw, jurisdiction="us"):
             value["implementations"][0]["basis"] = draw(prose)
             if draw(st.booleans()):
                 value["implementations"][0]["ruling"] = draw(records)
+                if draw(st.booleans()):
+                    value["implementations"][0]["ruling"]["principle"] = draw(st.sampled_from(sc.PRINCIPLES))
         value["tests"] = [
             {"repo": "PolicyEngine/microcosm-dynamics", "commit": commit, "path": "tests/test_x.py", "name": "test_default", "pins": ["reading"]}
         ] + [
