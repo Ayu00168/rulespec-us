@@ -813,7 +813,7 @@ entries:
     type: calendar
   implementations:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/parameters/gov/states/co/ssa/oap/income/sources/unearned.yaml
     follows: reading
     adopts: reading
@@ -826,7 +826,7 @@ entries:
     cites_entry: false
   tests:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/tests/policy/baseline/gov/states/co/ssa/oap/co_oap_own_countable_income.yaml
     name: Case 12, interest and dividends on countable resources are exempt.
     pins:
@@ -906,7 +906,7 @@ entries:
     excerpt: Increased by amounts included in net investment income
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: '0000000000000000000000000000000000000000'
+      commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
       path: source_conflicts/sources/us/treas-reg-1-1411-10-2025-p6.txt
       sha256: 1e7b45794e9936fb24e083738647d45456891118ffa377cc37b4c73d0a755784
   - citation: 2025 Instructions for Form 8960, line 7, distributions from estates and trusts, code H
@@ -915,7 +915,7 @@ entries:
     excerpt: and increase your MAGI on Form 8960, line 13 (or Form 8960, line 19a), by the same amount.
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: '0000000000000000000000000000000000000000'
+      commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
       path: source_conflicts/sources/us/form-8960-instructions-2025-p13.txt
       sha256: 54af89dcc01302b2739514f4f5c7ae53961179c1ab4a5be9b22be6023a422638
   reading: Apply applicable regulatory MAGI adjustments passed through an estate or trust alongside section 1411(d)'s section 911 addition. A positive Schedule
@@ -934,7 +934,7 @@ entries:
     note: NIIT begins in 2013; Treas. Reg. 1.1411-10(i) makes the final regulation applicable from 2014 and permits application to 2013.
   implementations:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/variables/gov/irs/tax/federal_income/niit_magi.py
     follows: reading
     adopts: reading
@@ -942,11 +942,11 @@ entries:
     ruling:
       by: PolicyEngine
       date: '2026-10-20'
-      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/0
+      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/1871
     cites_entry: false
   tests:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/tests/policy/baseline/gov/irs/tax/federal_income/net_investment_income_tax.yaml
     name: A positive code H adjustment also increases MAGI
     pins:
@@ -976,7 +976,7 @@ entries:
       for the taxable year.
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: '0000000000000000000000000000000000000000'
+      commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
       path: source_conflicts/sources/us/treas-reg-1-199a-1-2025-p1.txt
       sha256: 8d159ac9ce602ec4a19fe5be16e77a6104955bf101d94f52a63e2711bf588856
   reading: Use section 1222(11) net capital gain plus qualified dividend income as defined in section 1(h)(11)(B), without reducing either component for
@@ -996,7 +996,7 @@ entries:
     type: tax
   implementations:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/variables/gov/irs/income/taxable_income/deductions/qualified_business_income_deduction/section_199a_net_capital_gain.py
     follows: reading
     adopts: reading
@@ -1004,11 +1004,11 @@ entries:
     ruling:
       by: PolicyEngine
       date: '2026-10-20'
-      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/0
+      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/1871
     cites_entry: false
   tests:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/tests/policy/baseline/gov/irs/income/taxable_income/deductions/qbid/qualified_business_income_deduction.yaml
     name: Income limitation ignores the Form 4952 investment income election
     pins:
@@ -1038,7 +1038,7 @@ entries:
     excerpt: For purposes of this paragraph, marital status shall be determined under the rules of paragraphs (3) and (4) of section 21(e).
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: '0000000000000000000000000000000000000000'
+      commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
       path: source_conflicts/sources/us/usc-26-129-2024-p1.txt
       sha256: e4996b059a39580953e44713517051b4f684b3a1847aebb1ec5b9abf6037f447
   - citation: 2025 Instructions for Form 2441, line 19, married filing separately, p. 5
@@ -1047,7 +1047,7 @@ entries:
     excerpt: Yes. Enter your earned income (from line 18) on line 19.
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: '0000000000000000000000000000000000000000'
+      commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
       path: source_conflicts/sources/us/i2441-2025-p5.txt
       sha256: ead8f61983188c9ea1a6ecd9def8f44f48652f7818545120784313bf535d5496
   reading: A separate filer who satisfies section 21(e)(4)'s living-apart rule is treated as unmarried for section 129(b)(1), so the earned-income ceiling
@@ -1067,7 +1067,7 @@ entries:
     note: Every edition of the Form 2441 instructions from 2018 through 2025 carries the line 19 rule; 2018 is the earliest edition checked.
   implementations:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/variables/gov/irs/credits/cdcc/min_head_spouse_earned.py
     follows: reading
     adopts: reading
@@ -1075,11 +1075,11 @@ entries:
     ruling:
       by: PolicyEngine
       date: '2026-10-20'
-      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/0
+      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/1871
     cites_entry: false
   tests:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/tests/policy/baseline/gov/irs/credits/cdcc/dependent_care_assistance_exclusion.yaml
     name: Separate filer treated as unmarried uses the $5,000 cap
     pins:
@@ -1099,7 +1099,7 @@ entries:
     excerpt: eligible to be claimed as a dependent by any taxpayer for federal or Hawaii income tax purposes, you do not qualify for this credit.
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: '0000000000000000000000000000000000000000'
+      commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
       path: source_conflicts/sources/us-hi/n11-instructions-2025-p21.txt
       sha256: 2fc6d5bcf4e0d1092cd45e33c55ab03cd45ac7d0ba3d93910da3429a9384a155
   - citation: 2018 Form N-11 instructions, line 30, p. 23
@@ -1108,7 +1108,7 @@ entries:
     excerpt: Do not claim this credit if you are being claimed or eligible to be claimed
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: '0000000000000000000000000000000000000000'
+      commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
       path: source_conflicts/sources/us-hi/n11-instructions-2018-p23.txt
       sha256: c63685c5d87d053cec3fbbfab3822ff7ecd5f2b006117c02e36030c4144726dd
   reading: Exclude a taxpayer eligible to be claimed as a dependent by another taxpayer for federal or Hawaii income tax purposes, whether or not anyone
@@ -1128,7 +1128,7 @@ entries:
     note: Every edition of the Form N-11 instructions from 2018 through 2025 carries the exclusion; 2018 is the earliest edition checked.
   implementations:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/variables/gov/states/hi/tax/income/credits/cdcc/hi_cdcc_eligible.py
     follows: reading
     adopts: reading
@@ -1136,11 +1136,11 @@ entries:
     ruling:
       by: PolicyEngine
       date: '2026-10-20'
-      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/0
+      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/1871
     cites_entry: false
   tests:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/tests/policy/baseline/gov/states/hi/tax/income/credits/cdcc/hi_cdcc_eligible.yaml
     name: 2025 claimable but unclaimed single filer cannot claim the care credit
     pins:
@@ -1166,7 +1166,7 @@ entries:
       return $8,000
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: '0000000000000000000000000000000000000000'
+      commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
       path: source_conflicts/sources/us-ny/it201-instructions-2025.html
       sha256: 933704619ab93e01a75796c5934bdd6c532b14260202b970efc6a2ffcea977ca
   reading: Apply the dependent standard deduction amount only to single filers who can be claimed as dependents on another taxpayer's federal return; claimable
@@ -1187,7 +1187,7 @@ entries:
     note: Scope begins with the dependent-deduction parameter's first year; the statutory provisions predate that coverage.
   implementations:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/variables/gov/states/ny/tax/income/taxable_income/deductions/ny_standard_deduction.py
     follows: reading
     adopts: reading
@@ -1195,11 +1195,11 @@ entries:
     ruling:
       by: PolicyEngine
       date: '2026-10-20'
-      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/0
+      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/1871
     cites_entry: false
   tests:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/tests/policy/baseline/gov/states/ny/tax/income/taxable_income/deductions/ny_standard_deduction.yaml
     name: 2025 separate filer who can be claimed as a dependent keeps the regular amount
     pins:
@@ -1227,7 +1227,7 @@ entries:
     excerpt: Income not included in lines 35 to 46 (NOT TO EXCEED $8000)
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: '0000000000000000000000000000000000000000'
+      commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
       path: source_conflicts/sources/us-wv/it140-schedule-m-2025-p6.txt
       sha256: 619d7d21e1cdc369fcbd422c58aa4208e3e7d385811ad3a49b97175d23cdbdff
   reading: Use each eligible person's federal AGI after excluding that person's amounts already modified on Schedule M lines 35 to 46, apply the cap, then
@@ -1247,7 +1247,7 @@ entries:
     note: Subdivision (c)(8) before 2019 and (c)(9) from 2019; Schedule M line references are for 2025.
   implementations:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/variables/gov/states/wv/tax/income/subtractions/senior_citizen_disability/wv_senior_citizen_disability_deduction_person.py
     follows: reading
     adopts: reading
@@ -1255,11 +1255,11 @@ entries:
     ruling:
       by: PolicyEngine
       date: '2026-10-20'
-      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/0
+      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/1871
     cites_entry: false
   tests:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/tests/policy/baseline/gov/states/wv/tax/income/subtractions/senior_citizen_disability/wv_senior_citizen_disability_deduction_person.yaml
     name: A senior with a taxable state refund subtracts no more than own income.
     pins:
@@ -1277,7 +1277,7 @@ entries:
     excerpt: This rate shall not exceed five percent of the assistance unit's gross monthly income up to a maximum of $100 per month.
     snapshot:
       repo: PolicyEngine/policyengine-us
-      commit: '0000000000000000000000000000000000000000'
+      commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
       path: source_conflicts/sources/us-mn/minn-stat-256d44.html
       sha256: e45fa2a9ccd185384a45f9ca2214296f78aeff1f08b0ce0bff13af12320cc8ea
   unpublished_sources:
@@ -1299,7 +1299,7 @@ entries:
     type: calendar
   implementations:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/variables/gov/states/mn/dhs/msa/payment/mn_msa_guardian_fee.py
     follows: reading
     adopts: reading
@@ -1307,11 +1307,11 @@ entries:
     ruling:
       by: PolicyEngine
       date: '2026-10-19'
-      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/0
+      record: https://github.com/TheAxiomFoundation/rulespec-us/pull/1871
     cites_entry: false
   tests:
   - repo: PolicyEngine/policyengine-us
-    commit: '0000000000000000000000000000000000000000'
+    commit: 7bb70aab8c162e45e6cbabb45049cf1f01b0ee4a
     path: policyengine_us/tests/policy/baseline/gov/states/mn/dhs/msa/payment/mn_msa_guardian_fee.yaml
     name: Case 3, guardian fee bound by 5% of low gross income.
     pins:
