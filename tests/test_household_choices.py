@@ -886,10 +886,16 @@ def test_verify_passes_and_reports_the_worklist():
         (b"class tax_unit_itemizes(Variable):\n    pass\n", None),
         (b"import x\n\nclass tax_unit_itemizes(x.Variable):\n    value_type = bool\n", None),
         # #1844 review round 4 (P2): class-shaped text that defines nothing.
-        (b'DOC = """\nclass tax_unit_itemizes(Variable):\n    pass\n"""\n', "does not define `class tax_unit_itemizes` at module level"),
-        (b"# class tax_unit_itemizes(Variable):\nx = 1\n", "does not define `class tax_unit_itemizes` at module level"),
-        (b"def f():\n    class tax_unit_itemizes(Variable):\n        pass\n", "does not define `class tax_unit_itemizes` at module level"),
-        (b"class tax_unit_itemizes_other(Variable):\n    pass\n", "does not define `class tax_unit_itemizes` at module level"),
+        (b'DOC = """\nclass tax_unit_itemizes(Variable):\n    pass\n"""\n', "does not define `class tax_unit_itemizes` in module scope"),
+        (b"# class tax_unit_itemizes(Variable):\nx = 1\n", "does not define `class tax_unit_itemizes` in module scope"),
+        (b"def f():\n    class tax_unit_itemizes(Variable):\n        pass\n", "does not define `class tax_unit_itemizes` in module scope"),
+        (b"class Outer:\n    class tax_unit_itemizes(Variable):\n        pass\n", "does not define `class tax_unit_itemizes` in module scope"),
+        (b"class tax_unit_itemizes_other(Variable):\n    pass\n", "does not define `class tax_unit_itemizes` in module scope"),
+        # Round 6 (P2): an if, try or with opens no scope, so a class inside
+        # one at module level is a module-level class, as core loads it.
+        (b"if True:\n    class tax_unit_itemizes(Variable):\n        pass\n", None),
+        (b"try:\n    import x\nexcept ImportError:\n    class tax_unit_itemizes(Variable):\n        pass\n", None),
+        (b"with open('x') as f:\n    class tax_unit_itemizes(Variable):\n        pass\n", None),
         (b"class tax_unit_itemizes(Variable:\n", "does not parse as Python"),
     ],
 )
@@ -906,7 +912,7 @@ def test_verify_checks_the_implementation_defines_its_variable():
     issues, _ = hc.verify_choices(choices, fetch=net, matches=substring, resolve=corpus.get, on_default_branch=lambda r, c: True)
     assert issues == [
         "us:itemized-deduction-election (entries[0]).implementations[0]: policyengine_us/variables/tax_unit_itemizes.py "
-        "does not define `class tax_unit_itemizes` at module level."
+        "does not define `class tax_unit_itemizes` in module scope."
     ]
     # A parameter file can't be checked that way: the report says so.
     choices, net, corpus = verified_inputs()

@@ -914,15 +914,17 @@ def worklist(entry: Mapping[str, Any]) -> list[str]:
 
 
 def defines_class(source: str, name: str) -> bool | None:
-    """Does the Python source define `class <name>` at module level, as a
-    model variable is defined? A class in a docstring, a comment or a function
-    body doesn't count. None when the source doesn't parse."""
+    """Does the Python source define `class <name>` in module scope, as a
+    model variable is defined? That includes a class inside a module-level
+    if, try, with, loop or match, which open no scope; a class in a
+    docstring, a comment, or a function or class body doesn't count. None
+    when the source doesn't parse."""
 
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return None
-    return any(isinstance(node, ast.ClassDef) and node.name == name for node in tree.body)
+    return any(isinstance(node, ast.ClassDef) and node.name == name for node in sc._scope_statements(tree.body))
 
 
 def cites(source: str, gid: str) -> bool:
@@ -981,7 +983,7 @@ def verify_choices(
                 if defined is None:
                     issues.append(f"{i_label}: {item['path']} does not parse as Python, so its `class {variable}` can't be found.")
                 elif not defined:
-                    issues.append(f"{i_label}: {item['path']} does not define `class {variable}` at module level.")
+                    issues.append(f"{i_label}: {item['path']} does not define `class {variable}` in module scope.")
             elif isinstance(variable, str):
                 report.append(f"unchecked: {i_label} names {variable}, but {item['path']} is not a Python file")
         for r_index, item in enumerate(entry.get("proposed") or []):
