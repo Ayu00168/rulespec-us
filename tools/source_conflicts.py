@@ -103,6 +103,11 @@ INLINE_TAG_RE = re.compile(
 PERIODS = ("once", "week", "month", "year")
 STATUSES = ("open", "ruled", "confirmed", "contradicted")
 OUTCOMES = ("computed", "refused")
+# The principle a consumer's own ruling applies (implementations[].ruling.principle,
+# optional). Register-only, so a module interpretation's core is unchanged. These are
+# PolicyEngine's: statute over forms, instructions and practice; regulations as law;
+# the administering agency's reading on a true tie; the taxpayer's cheapest choice.
+PRINCIPLES = ("statute-first", "regulations-are-law", "agency-breaks-ties", "taxpayer-choice")
 # A reading reference (`follows`, `adopts`, `pins`) is `reading` (the entry's
 # adopted reading) or the `id` of one of its alternatives. Positions are never
 # used: inserting or reordering an alternative must not flip a consumer's pick.
@@ -887,8 +892,8 @@ def _relative_path(value: Any) -> bool:
     return not path.is_absolute() and ".." not in path.parts and "\\" not in value
 
 
-def _check_record(record: Any, *, label: str, confirmation: bool, issues: list[str]) -> None:
-    allowed = {"by", "date", "record"} | ({"excerpt"} if confirmation else set())
+def _check_record(record: Any, *, label: str, confirmation: bool, issues: list[str], extra: Iterable[str] = ()) -> None:
+    allowed = {"by", "date", "record"} | ({"excerpt"} if confirmation else set()) | set(extra)
     if not _mapping(record, label=label, allowed=allowed, issues=issues):
         return
     _string(record.get("by"), label=f"{label}.by", issues=issues)
@@ -1658,7 +1663,10 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
             elif "adopts" in item or "ruling" in item:
                 issues.append(f"{i_label}.basis is required with adopts or ruling: say why this consumer adopts that reading.")
             if "ruling" in item:
-                _check_record(item["ruling"], label=f"{i_label}.ruling", confirmation=False, issues=issues)
+                _check_record(item["ruling"], label=f"{i_label}.ruling", confirmation=False, issues=issues, extra=("principle",))
+                ruling = item["ruling"]
+                if isinstance(ruling, dict) and "principle" in ruling and ruling["principle"] not in PRINCIPLES:
+                    issues.append(f"{i_label}.ruling.principle must be one of {', '.join(PRINCIPLES)}.")
             if not isinstance(item.get("cites_entry"), bool):
                 issues.append(f"{i_label}.cites_entry must be true or false.")
 
@@ -2355,6 +2363,7 @@ def aggregate(registers: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[
                         {
                             **{key: item.get(key) for key in ("repo", "path", "follows")},
                             "adopts": item.get("adopts", ADOPTED_READING),
+                            "principle": item["ruling"].get("principle") if isinstance(item.get("ruling"), dict) else None,
                         }
                         for item in _as_list(entry.get("implementations"))
                         if isinstance(item, dict)
