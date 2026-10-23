@@ -962,6 +962,18 @@ def test_summarize_bounds_the_whole_output(tmp_path, capsys):
     assert runner.summarize(path) == ["- ... and 1 more; see the report artifact."]
 
 
+def test_summarize_counts_utf16_units(tmp_path):
+    # #1867 build report: a character outside the basic plane is two UTF-16
+    # units, which GitHub counts; 99 names of 200 such characters made 57,608
+    # characters but 77,408 units.
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(_yaml_summary_report(["\U0001F600" * 200] * 99, path="tests/" + "b" * 300 + ".yaml")))
+    lines = runner.summarize(path)
+    rendered = "\n".join(lines) + "\n"
+    assert lines[-1].startswith("- ... and ")
+    assert len(rendered.encode("utf-16-le")) // 2 <= 60_000
+
+
 @pytest.mark.parametrize("extra", [0, 1])
 def test_summarize_character_budget_boundary(tmp_path, extra):
     path = tmp_path / "report.json"

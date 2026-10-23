@@ -1089,7 +1089,13 @@ def _safe_id(value: Any) -> bool:
 _SAFE_ENTRY_RE = re.compile(r"[a-z0-9-]+:[a-z0-9-]+")
 _SAFE_LABEL_RE = re.compile(r"(?:choices\.)?entries\[[0-9]+\]\.tests\[[0-9]+\]")
 _SUMMARY_LIMIT = 100
-_SUMMARY_CHAR_LIMIT = 60_000
+# GitHub counts an issue body in UTF-16 code units (65,536 at most); the
+# summary keeps room for the workflow's own text.
+_SUMMARY_UTF16_LIMIT = 60_000
+
+
+def _utf16_units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
 _CASE_NAME_LIMIT = 200
 
 
@@ -1157,14 +1163,14 @@ def _summary_lines(report: Mapping[str, Any]) -> list[str]:
         # Count the newline main() prints after every line as well. All
         # fields, including an unusually long repository or path, fit only
         # if the complete rendered summary stays within the budget.
-        if len(kept) >= _SUMMARY_LIMIT or characters + len(line) + 1 > _SUMMARY_CHAR_LIMIT:
+        if len(kept) >= _SUMMARY_LIMIT or characters + _utf16_units(line) + 1 > _SUMMARY_UTF16_LIMIT:
             while True:
                 overflow = f"- ... and {len(lines) - len(kept)} more; see the report artifact."
-                if characters + len(overflow) + 1 <= _SUMMARY_CHAR_LIMIT:
+                if characters + _utf16_units(overflow) + 1 <= _SUMMARY_UTF16_LIMIT:
                     return [*kept, overflow]
-                characters -= len(kept.pop()) + 1
+                characters -= _utf16_units(kept.pop()) + 1
         kept.append(line)
-        characters += len(line) + 1
+        characters += _utf16_units(line) + 1
     return kept
 
 

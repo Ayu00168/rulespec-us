@@ -53,12 +53,17 @@ Invariants, for every input:
 16. Shipped commits: verify reports an external commit (snapshot,
     implementation or test) exactly when it is not reachable from its
     repository's default branch.
-17. Quoted spans, differentially: `quoted_spans` returns exactly the spans an
-    independently written reference finds. The reference rescans the rest of
-    the text for each single opener (quadratic), and states the opening and
-    closing rules again without the implementation's helpers. The spans
-    together are no longer than the text, and `quoted_words` counts exactly
-    the words in them.
+17. Quoted words, differentially and against main:
+    - `quoted_spans` returns exactly the spans an independently written
+      quadratic reference finds for the default reading. The spans together
+      are no longer than the text.
+    - `quoted_words` equals an independent envelope: delimited words once,
+      plus the largest single-quotation count over three pairings (last
+      closer before the next opener, first closer, nesting) and two prefix
+      rules, never below main's one-pass reading.
+    - It never counts fewer words than main's scanner did, so this change
+      accepts no description main refused, and widening the opener prefixes
+      never lowers it.
 
 Hypothesis is not installed in the shared validate workflow's pytest leg, so
 these skip there; the source-conflicts workflow installs it and runs them.
@@ -787,21 +792,138 @@ def test_quoted_spans_agree_with_a_reference(text):
     spans = sc.quoted_spans(text)
     assert spans == _reference_spans(text)
     assert sum(len(span) for span in spans) <= len(text)
-    assert sc.quoted_words(text) == sum(len(span.split()) for span in spans)
+    # The count reads single marks several ways; the default reading is one.
+    assert sc.quoted_words(text) >= sum(_ref_word_count(span) for span in spans)
 
 
-@pytest.mark.xfail(
-    strict=True, raises=AssertionError,
-    reason="The specified next-opener boundary can remove previously quoted words when opener prefixes expand.",
-)
+def _ref_word_count(span):
+    return len([token for token in span.split() if any(char.isalnum() for char in token)])
+
+
+def _reference_words(text):
+    # quoted_words's envelope, independently and quadratically: delimited
+    # words once, plus the largest single-quotation count over three pairings
+    # and two prefix rules.
+    pairs = {'"': '"', '“': '”', '„': '“', '‚': '‘', '«': '»',
+             '‹': '›', '「': '」', '『': '』', '＂': '＂'}
+    regions, words, i = [], 0, 0
+    while i < len(text):
+        if text[i] in pairs:
+            end = i + 1
+            while end < len(text) and text[end] != pairs[text[i]]:
+                end += 1
+            words += _ref_word_count(text[i + 1:end])
+            regions.append((i, min(end + 1, len(text))))
+            i = end + 1
+        else:
+            i += 1
+
+    def outside(i):
+        return not any(start <= i < end for start, end in regions)
+
+    def unicode_prefix(before):
+        return before.isspace() or before == "/" or unicodedata.category(before) in ("Ps", "Pd", "Pi")
+
+    def ascii_prefix(before):
+        return before in " \t\n\r([{—–-/"
+
+    def opener(i, prefix):
+        return (outside(i) and text[i] in "'‘＇" and i + 1 < len(text) and text[i + 1].isalpha()
+                and (i == 0 or prefix(text[i - 1])))
+
+    def closer(i):
+        return outside(i) and text[i] in "'’＇" and (i + 1 == len(text) or not text[i + 1].isalnum())
+
+    def span_words(start, close):
+        kept = "".join(" " if not outside(j) else text[j] for j in range(start + 1, close))
+        return _ref_word_count(kept)
+
+    best = 0
+    for prefix in (unicode_prefix, ascii_prefix):
+        opens = [i for i in range(len(text)) if opener(i, prefix)]
+        closes = [i for i in range(len(text)) if closer(i)]
+        # Last closer before the next opener.
+        last = 0
+        for k, o in enumerate(opens):
+            bound = opens[k + 1] if k + 1 < len(opens) else len(text)
+            within = [c for c in closes if o < c < bound]
+            if within:
+                last += span_words(o, within[-1])
+        # First closer after the opener, skipping openers inside a span.
+        first, reach = 0, -1
+        for o in opens:
+            if o <= reach:
+                continue
+            after = [c for c in closes if c > o]
+            if after:
+                first += span_words(o, after[0])
+                reach = after[0]
+        # Nesting like brackets; the outermost closed pairs count.
+        stack, closed = [], []
+        for j in sorted(opens + closes):
+            if j in opens:
+                stack.append(j)
+            elif stack:
+                closed.append((stack.pop(), j))
+        nested = sum(span_words(o, c) for o, c in closed
+                     if not any(o2 < o and c < c2 for o2, c2 in closed))
+        best = max(best, last, first, nested)
+    return max(words + best, _main_quoted_words(text))
+
+
+def _main_quoted_words(text):
+    # The scanner on main before this change, frozen: doubles and singles in
+    # one pass, ASCII prefixes, first closer after a non-space.
+    def opens(i):
+        before_ok = i == 0 or text[i - 1] in " \t\n\r([{—–-/"
+        return before_ok and i + 1 < len(text) and text[i + 1].isalpha()
+
+    def closes(i):
+        return i > 0 and not text[i - 1].isspace() and (i + 1 == len(text) or not text[i + 1].isalnum())
+
+    spans, i = [], 0
+    while i < len(text):
+        mark = text[i]
+        if mark in {'"': '"', '“': '”'}:
+            close = text.find({'"': '"', '“': '”'}[mark], i + 1)
+            close = len(text) if close == -1 else close
+            spans.append(text[i + 1:close])
+            i = close + 1
+            continue
+        if mark in "'‘" and opens(i):
+            close = next((j for j in range(i + 1, len(text)) if text[j] in "'’" and closes(j)), None)
+            if close is not None:
+                spans.append(text[i + 1:close])
+                i = close + 1
+                continue
+        i += 1
+    return sum(_ref_word_count(span) for span in spans)
+
+
+@settings(max_examples=2000, deadline=None)
+@given(text=st.text(alphabet=QUOTE_ALPHABET, max_size=60))
+def test_quoted_words_agree_with_a_reference(text):
+    assert sc.quoted_words(text) == _reference_words(text)
+
+
+@settings(max_examples=2000, deadline=None)
+@example(text="It wrote:\u00a0'about \"the workers' policy is to deny every such claim\"'")
+@example(text="'one' and\u00a0'two three four'")
+@example(text="It wrote 'one two three 'inner' four'")
+@given(text=st.text(alphabet=QUOTE_ALPHABET, max_size=60))
+def test_quoted_words_never_count_below_main(text):
+    # #1867 review (P1): this change must not accept a description main's
+    # scanner refused, so it never counts fewer quoted words than main did.
+    assert sc.quoted_words(text) >= _main_quoted_words(text), text
+
+
 @settings(max_examples=2000, deadline=None,
           suppress_health_check=[HealthCheck.function_scoped_fixture])
 @example(text="'one' and\u00a0'two three four'")
 @given(text=st.text(alphabet=QUOTE_ALPHABET, max_size=60))
 def test_quoted_words_monotonic_when_opener_prefixes_expand(monkeypatch, text):
-    # This requested property is false for the author's specified pairing:
-    # the explicit example counts 4 with Unicode prefixes and 5 with ASCII
-    # prefixes. Keep it as a strict expected failure until that policy changes.
+    # The count also reads single marks with the ASCII prefixes, so widening
+    # the opener prefixes never lowers it.
     expanded = sc.quoted_words(text)
 
     def ascii_opens(value, index):

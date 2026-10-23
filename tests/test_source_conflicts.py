@@ -1120,6 +1120,32 @@ def test_a_single_closer_depends_only_on_what_follows_it():
     assert sc._closes_single("'7", 0) is False
 
 
+@pytest.mark.parametrize(
+    ("text", "words"),
+    [
+        # #1867 review round 2: single marks are ambiguous, so the count is the
+        # largest any reading gives. A quotation inside a quotation stays in.
+        ("It wrote 'one two three 'inner' four'", 5),
+        # A possessive inside a quotation doesn't end it.
+        ("It wrote 'the workers' policy is to deny every such claim'", 9),
+        # Two quotations are two, however the marks are read.
+        ("'one' and 'two three four'", 4),
+        ("The agency's reply 'approves it' and the county's 'denies it'", 4),
+        # The ASCII reading still sees one span here, as main did.
+        ("'one' and\u00a0'two three four'", 5),
+        # A nested quotation opened after a no-break space, with one closer:
+        # only the first-closer reading keeps the outer words.
+        ("It wrote:\u00a0'one two three 'four five'", 5),
+        # A word counts once, however many openers its span covers.
+        ("'one 'two three'", 3),
+        # Round 1's P1: a delimited quotation inside a single one counts in full.
+        ("It wrote:\u00a0'about \"the workers' policy is to deny every such claim\"'", 10),
+    ],
+)
+def test_quoted_words_take_the_largest_reading(text, words):
+    assert sc.quoted_words(text) == words
+
+
 def test_quoted_spans_finds_each_closer_once(monkeypatch):
     # #1825 round-3 review (P3): unclosed openers made the scan quadratic
     # (24,000 characters took 6 s). Each mark is now tested as a closer once.
@@ -1152,7 +1178,7 @@ def test_delimited_quotations(tmp_path, opening, closing, closed, include_other_
     words = "one two three four five" + (f" {other_closer} six" if include_other_closer else "")
     description = "It wrote " + opening + words + (closing if closed else "")
     assert sc.quoted_spans(description) == [words]
-    assert sc.quoted_words(description) == len(words.split())
+    assert sc.quoted_words(description) == len([word for word in words.split() if any(char.isalnum() for char in word)])
     issues = check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))
     assert any("quotes more than 4 words in all" in issue for issue in issues)
 

@@ -218,27 +218,20 @@ def _last_closer(closers: Sequence[int], start: int, end: int) -> int | None:
     return None
 
 
-def quoted_spans(text: str) -> list[str]:
-    """Return quoted spans in opening-mark order, counting nested text once.
+# The prefixes a single opener could follow before the Unicode widening. The
+# word count also reads the text with them, so widening never lowers it.
+_ASCII_BEFORE_OPENER = frozenset(" \t\n\r([{\u2014\u2013-/")
 
-    Pass 1 consumes delimited quotations, paired only with their own closer:
-    straight doubles ("..."), curly doubles (“...”), German doubles („...“)
-    and singles (‚...‘), guillemets («...» and ‹...›), CJK marks (「...」 and
-    『...』), and fullwidth doubles (＂...＂). An unclosed delimiter quotes the
-    rest of the text, failing closed.
 
-    Pass 2 recognises single openers ', ‘ and ＇ and closers ', ’ and ＇,
-    outside pass-1 regions, using _opens_single and _closes_single. An opener
-    takes the last eligible closer before the next eligible opener or text
-    end; without a closer it is an apostrophe. Pass-1 regions within a single
-    span become one space, since their words are already counted in pass 1.
-    Single quotations starting with a non-letter or directly following other
-    punctuation are not recognised. Primes (′, ″) and a single quotation
-    closed by a double mark (‘...”) are left to manual publication review.
+def _opens_single_ascii(text: str, index: int) -> bool:
+    if index + 1 >= len(text) or not text[index + 1].isalpha():
+        return False
+    return index == 0 or text[index - 1] in _ASCII_BEFORE_OPENER
 
-    Openers and closers are classified once, then paired with bisection. The
-    complete scan is O(n log n), including strings with many unclosed openers.
-    """
+
+def _delimited(text: str) -> tuple[list[tuple[int, str]], list[tuple[int, int]]]:
+    """Pass 1: delimited quotations, each paired only with its own closer; an
+    unclosed one quotes the rest of the text. Returns (spans, regions)."""
 
     spans: list[tuple[int, str]] = []
     regions: list[tuple[int, int]] = []
@@ -253,6 +246,11 @@ def quoted_spans(text: str) -> list[str]:
             index = close + 1
         else:
             index += 1
+    return spans, regions
+
+
+def _single_marks(text: str, regions: list[tuple[int, int]], opens: Callable[[str, int], bool]) -> tuple[list[int], list[int]]:
+    """Single openers and closers outside pass-1 regions, in order."""
 
     openers: list[int] = []
     closers: list[int] = []
@@ -264,36 +262,181 @@ def quoted_spans(text: str) -> list[str]:
             region_index += 1
             continue
         mark = text[index]
-        if mark in _SINGLE_OPENERS and _opens_single(text, index):
+        if mark in _SINGLE_OPENERS and opens(text, index):
             openers.append(index)
         if mark in _SINGLE_CLOSERS and _closes_single(text, index):
             closers.append(index)
         index += 1
+    return openers, closers
 
-    region_index = 0
+
+def _span_text(text: str, start: int, close: int, regions: list[tuple[int, int]], region_starts: list[int]) -> str:
+    """A single span's text, with each pass-1 region inside it one space."""
+
+    pieces: list[str] = []
+    cursor = start + 1
+    region_index = bisect.bisect_right(region_starts, start)
+    while region_index < len(regions) and regions[region_index][0] < close:
+        region_start, region_end = regions[region_index]
+        pieces.extend((text[cursor:region_start], " "))
+        cursor = region_end
+        region_index += 1
+    pieces.append(text[cursor:close])
+    return "".join(pieces)
+
+
+def _pairs_last(openers: list[int], closers: list[int], length: int) -> list[tuple[int, int]]:
+    """Each opener takes the last closer before the next opener, which keeps
+    a possessive inside a quotation in it ('the workers' policy …')."""
+
+    pairs = []
     for index in openers:
-        following = _next_opener(openers, index, len(text))
-        close = _last_closer(closers, index, following)
-        if close is None:
+        close = _last_closer(closers, index, _next_opener(openers, index, length))
+        if close is not None:
+            pairs.append((index, close))
+    return pairs
+
+
+def _pairs_first(openers: list[int], closers: list[int], length: int) -> list[tuple[int, int]]:
+    """Each opener takes the first closer after it, and an opener inside a
+    span opens nothing."""
+
+    pairs: list[tuple[int, int]] = []
+    after = -1
+    for index in openers:
+        if index <= after:
             continue
-        while region_index < len(regions) and regions[region_index][1] <= index:
-            region_index += 1
-        pieces: list[str] = []
-        cursor = index + 1
-        while region_index < len(regions) and regions[region_index][0] < close:
-            start, end = regions[region_index]
-            pieces.extend((text[cursor:start], " "))
-            cursor = end
-            region_index += 1
-        pieces.append(text[cursor:close])
-        spans.append((index, "".join(pieces)))
+        following = bisect.bisect_right(closers, index)
+        if following < len(closers):
+            pairs.append((index, closers[following]))
+            after = closers[following]
+    return pairs
+
+
+def _pairs_nested(openers: list[int], closers: list[int], length: int) -> list[tuple[int, int]]:
+    """Marks nest like brackets, and the outermost closed pairs count, which
+    keeps a quotation inside a quotation in it ('one 'two' three')."""
+
+    closed: list[tuple[int, int]] = []
+    stack: list[int] = []
+    opener_index = closer_index = 0
+    while opener_index < len(openers) or closer_index < len(closers):
+        if closer_index >= len(closers) or (opener_index < len(openers) and openers[opener_index] < closers[closer_index]):
+            stack.append(openers[opener_index])
+            opener_index += 1
+        else:
+            if stack:
+                closed.append((stack.pop(), closers[closer_index]))
+            closer_index += 1
+    outermost: list[tuple[int, int]] = []
+    reach = -1
+    for start, close in sorted(closed):
+        if close > reach:
+            outermost.append((start, close))
+            reach = close
+    return outermost
+
+
+_PAIRINGS = (_pairs_last, _pairs_first, _pairs_nested)
+
+
+def _one_pass_words(text: str) -> int:
+    """The one-pass reading the scanner used before the two-pass scan:
+    straight and curly doubles and single marks pair in text order, an
+    unclosed double quotes the rest, a single opens after an ASCII prefix and
+    closes at the first mark after a non-space that no letter or digit
+    follows. It reads delimited and single marks together, so it is the floor
+    that keeps this scan from accepting what that one refused. Linear in
+    practice: each double's search ends where the scan resumes, and singles
+    take the first closer by bisection."""
+
+    singles = [
+        index for index, mark in enumerate(text)
+        if mark in ("'", "\u2019") and index > 0 and not text[index - 1].isspace()
+        and (index + 1 == len(text) or not text[index + 1].isalnum())
+    ]
+    words = 0
+    index = 0
+    while index < len(text):
+        mark = text[index]
+        if mark in ('"', "\u201c"):
+            close = text.find('"' if mark == '"' else "\u201d", index + 1)
+            close = len(text) if close == -1 else close
+            words += _words(text[index + 1 : close])
+            index = close + 1
+            continue
+        if mark in ("'", "\u2018") and _opens_single_ascii(text, index):
+            following = bisect.bisect_right(singles, index)
+            if following < len(singles):
+                close = singles[following]
+                words += _words(text[index + 1 : close])
+                index = close + 1
+                continue
+        index += 1
+    return words
+
+
+def quoted_spans(text: str) -> list[str]:
+    """The quoted spans of a text, as the default reading pairs them.
+
+    Pass 1 consumes delimited quotations, paired only with their own closer:
+    straight doubles ("..."), curly doubles (“...”), German doubles („...“)
+    and singles (‚...‘), guillemets («...» and ‹...›), CJK marks (「...」 and
+    『...』), and fullwidth doubles (＂...＂). An unclosed delimiter quotes the
+    rest of the text, failing closed.
+
+    Pass 2 recognises single openers ', ‘ and ＇ and closers ', ’ and ＇
+    outside pass-1 regions (_opens_single and _closes_single). In the
+    default reading an opener takes the last closer before the next opener
+    or the end; without one it is an apostrophe. A pass-1 region inside a
+    single span becomes one space, since pass 1 counted its words.
+    `quoted_words` reads single marks three ways and counts the largest.
+
+    Openers and closers are classified once, then paired by bisection, so a
+    scan is O(n log n) however many openers go unclosed."""
+
+    spans, regions = _delimited(text)
+    region_starts = [start for start, _ in regions]
+    openers, closers = _single_marks(text, regions, _opens_single)
+    for start, close in _pairs_last(openers, closers, len(text)):
+        spans.append((start, _span_text(text, start, close, regions, region_starts)))
     return [span for _, span in sorted(spans)]
 
 
-def quoted_words(text: str) -> int:
-    """How many words a text holds inside quotation marks, across all spans."""
+def _words(span: str) -> int:
+    """The words of a span: its tokens holding a letter or digit, so a stray
+    mark is no word."""
 
-    return sum(len(span.split()) for span in quoted_spans(text))
+    return sum(1 for token in span.split() if any(char.isalnum() for char in token))
+
+
+def quoted_words(text: str) -> int:
+    """How many words a text holds inside quotation marks, failing closed.
+
+    Delimited quotations count once. Single marks are ambiguous (an
+    apostrophe, a possessive, a nested quotation), so they are read three
+    ways (each opener taking the last closer before the next opener, the
+    first closer after it, or marks nesting like brackets) under both the
+    current opener prefixes and the ASCII ones that preceded them. The count
+    is the largest any reading gives, so a description is refused when any
+    reasonable reading quotes too many words. The one-pass reading the
+    scanner used before (_one_pass_words) is a floor under the count.
+    """
+
+    spans, regions = _delimited(text)
+    delimited = sum(_words(span) for _, span in spans)
+    region_starts = [start for start, _ in regions]
+    best = 0
+    for opens in (_opens_single, _opens_single_ascii):
+        openers, closers = _single_marks(text, regions, opens)
+        for pairing in _PAIRINGS:
+            words = sum(
+                _words(_span_text(text, start, close, regions, region_starts))
+                for start, close in pairing(openers, closers, len(text))
+            )
+            best = max(best, words)
+    return max(delimited + best, _one_pass_words(text))
+
 
 # The interpretation core: compared field by field with a module's
 # `module.interpretations` entry, and the only fields a module may carry
