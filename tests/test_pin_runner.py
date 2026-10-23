@@ -74,14 +74,22 @@ def phases(setup="passed", call="passed", teardown="passed", xfail=False):
 
 
 def oracle(items=(), *, reports=None, deselected=(), errors=(), skips=(), exitstatus=0, xdist=False):
-    """A synthetic oracle record; items are (nodeid, path, name)."""
+    """A synthetic oracle record; items are (nodeid, path, name), indexed in
+    order. `reports` and `deselected` name items by node id here, for
+    readability; the record keys them by index, as the oracle does."""
 
+    index = {}
+    for position, (nodeid, _, _) in enumerate(items):
+        index.setdefault(nodeid, position)
     return {
-        "collected": [{"nodeid": nodeid, "path": path, "name": name} for nodeid, path, name in items],
-        "deselected": list(deselected),
+        "collected": [
+            {"index": position, "nodeid": nodeid, "path": path, "name": name}
+            for position, (nodeid, path, name) in enumerate(items)
+        ],
+        "deselected": [index[nodeid] for nodeid in deselected],
         "collect_errors": [{"nodeid": path, "path": path, "message": "boom"} for path in errors],
         "collect_skips": [{"nodeid": path, "path": path, "message": "skip"} for path in skips],
-        "reports": reports or {},
+        "reports": {str(index[nodeid]): record for nodeid, record in (reports or {}).items()},
         "exitstatus": exitstatus,
         "xdist": xdist,
     }
@@ -136,6 +144,54 @@ def test_classify_passes_only_every_case_passing():
     assert results[0]["outcome"] == "skipped" and "1 of 2 case(s) did not pass, first " + two in results[0]["detail"]
     results, _ = runner.classify(oracle(items, reports={one: phases()}), [pin("test_p")], process_exit=0)
     assert results[0]["outcome"] == "not run"  # a collected case that never reported
+
+
+def test_a_yaml_pin_names_exactly_one_case():
+    # #1843 review: two passing cases with one name used to pass the pin.
+    path = "policyengine_us/tests/a.yaml"
+    items = [("policyengine_us/tests/a.yaml::", path, "Twice"), ("policyengine_us/tests/a.yaml::", path, "Twice")]
+    record = oracle(items, reports={})
+    record["reports"] = {"0": phases(), "1": phases()}
+    yaml_pin = runner.Pin("us:fixture", "entries[0].tests[0]", "PolicyEngine/policyengine-us", COMMIT, path, "Twice")
+    results, _ = runner.classify(record, [yaml_pin], process_exit=0)
+    assert results[0]["outcome"] == "ambiguous" and results[0]["cases"] == []
+    record["reports"]["1"] = phases(call="failed")
+    assert runner.classify(record, [yaml_pin], process_exit=0)[0][0]["outcome"] == "ambiguous"
+    # A Python test's parametrized cases are still one pin, all of which must pass.
+    one, two = "tests/test_main.py::test_p[1]", "tests/test_main.py::test_p[2]"
+    py = [(one, "tests/test_main.py", "test_p"), (two, "tests/test_main.py", "test_p")]
+    assert runner.classify(oracle(py, reports={one: phases(), two: phases()}), [pin("test_p")], process_exit=0)[0][0]["outcome"] == "passed"
+
+
+def test_two_pins_that_join_to_one_id_never_share_a_cached_pass(tmp_path):
+    # #1843 review: (tests/a.yaml, "b.yaml::c") and (tests/a.yaml::b.yaml, "c")
+    # both display as tests/a.yaml::b.yaml::c. A path with `::` can't run at
+    # all now, and the cache matches on the (path, name) pair, never the id.
+    first = runner.Pin("us:x", "entries[0].tests[0]", "PolicyEngine/a", COMMIT, "tests/a.yaml", "b.yaml::c")
+    second = runner.Pin("us:x", "entries[0].tests[1]", "PolicyEngine/a", COMMIT, "tests/a.yaml::b.yaml", "c")
+    assert first.id == second.id and first.key != second.key
+    assert runner.cache_key("PolicyEngine/a", COMMIT, [first], "v") != runner.cache_key("PolicyEngine/a", COMMIT, [second], "v")
+    groups, unrun = runner.collect_pins(register(
+        {"repo": "PolicyEngine/policyengine-us", "commit": COMMIT, "path": "tests/a.yaml::b.yaml", "name": "c", "pins": ["reading"]},
+    ))
+    assert groups == {} and "has `::` in its path" in unrun[0]["reason"]
+    # A stored pass of the first, forged under the second's key, is not reused for the second.
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    key = runner.cache_key("PolicyEngine/a", COMMIT, [second], "v")
+    passed_case = [{"nodeid": "tests/a.yaml::", "index": 0, "outcome": "passed"}]
+    stored = {
+        "key": key, "repo": "PolicyEngine/a", "commit": COMMIT, "issues": [], "pytest_exit": 0,
+        "pins": [{**runner._failed(first, "passed", ""), "cases": passed_case}],
+    }
+    stored["pins"][0].pop("detail")
+    (cache / f"{key}.json").write_text(json.dumps(stored))
+    settings_ = runner.Settings(uv="uv", git="git", work=tmp_path, cache_dir=cache)
+    assert runner._cached(settings_, key, "PolicyEngine/a", COMMIT, [second]) is None
+    # The same record does serve the pin it belongs to.
+    stored["key"] = runner.cache_key("PolicyEngine/a", COMMIT, [first], "v")
+    (cache / f"{stored['key']}.json").write_text(json.dumps(stored))
+    assert runner._cached(settings_, stored["key"], "PolicyEngine/a", COMMIT, [first]) is not None
 
 
 def test_classify_matches_by_path_and_name_not_node_id():
@@ -233,14 +289,21 @@ def test_collect_pins_groups_runnable_pins_and_refuses_the_rest():
         {**good, "commit": "abc"},
         {**good, "path": "tests/helpers.py"},
         "junk",
+        # A YAML case runs where YAML_RUNNERS names its repository's runner.
+        {**good, "repo": "PolicyEngine/policyengine-us", "path": "policyengine_us/tests/a.yaml", "name": "A case (2024)"},
+        {**good, "repo": "PolicyEngine/policyengine-us", "path": "policyengine_us/tests/a.yaml", "name": "two\nlines"},
     ))
-    assert sorted(groups) == [("PolicyEngine/a", COMMIT)]
+    assert sorted(groups) == [("PolicyEngine/a", COMMIT), ("PolicyEngine/policyengine-us", COMMIT)]
     assert [p.name for p in groups[("PolicyEngine/a", COMMIT)]] == ["test_x", "TestK::test_y"]
+    (yaml_pin,) = groups[("PolicyEngine/policyengine-us", COMMIT)]
+    assert (yaml_pin.kind, yaml_pin.name) == ("yaml", "A case (2024)")
+    assert all(p.kind == "python" for p in groups[("PolicyEngine/a", COMMIT)])
     reasons = [item["reason"] for item in unrun]
-    assert len(reasons) == 7
+    assert len(reasons) == 8
+    assert "has a malformed name" in reasons[7]
     assert reasons[0].startswith("the runner won't execute pins in policyengine/b")
     assert reasons[1].startswith("the runner won't execute pins in SomeoneElse/c")
-    assert "YAML test case" in reasons[2]
+    assert "is a YAML test case in PolicyEngine/a, which has no YAML test runner here" in reasons[2]
     assert "this repository" in reasons[3]
     assert "malformed commit" in reasons[4]
     assert "not in a test_*.py file" in reasons[5]
@@ -315,7 +378,8 @@ def test_the_cache_holds_and_returns_only_passing_commits(tmp_path):
     def result(*outcomes, issues=(), exit_code=0, cases=case, **extra):
         return {
             "repo": repo, "commit": COMMIT, "issues": list(issues), "logs": {"pytest": "x"}, "pytest_exit": exit_code,
-            "pins": [{"entry": "us:old", "label": "entries[9].tests[9]", "id": p.id, "outcome": o, "cases": cases}
+            "pins": [{"entry": "us:old", "label": "entries[9].tests[9]", "id": p.id, "path": p.path, "name": p.name,
+                      "outcome": o, "cases": cases}
                      for p, o in zip(pins, outcomes, strict=True)],
             **extra,
         }
@@ -476,6 +540,24 @@ def test_summarize_never_raises(tmp_path, monkeypatch, capsys):
     assert capsys.readouterr().out == runner.MALFORMED_ARTIFACT + "\n"
 
 
+def test_summarize_prints_yaml_case_ids_but_nothing_that_formats(tmp_path):
+    # A YAML case name is free text, so only names without a backtick, @,
+    # angle bracket or line break are printed; anything else is malformed.
+    pins = [
+        {"entry": "us-md:x", "label": "entries[0].tests[0]", "id": "policyengine_us/tests/a.yaml::A farm loss (2024), $3,000", "outcome": "failed"},
+        {"entry": "us-md:x", "label": "entries[0].tests[1]", "id": "policyengine_us/tests/a.yaml::x `@team`", "outcome": "failed"},
+        {"entry": "us-md:x", "label": "entries[0].tests[2]", "id": "policyengine_us/tests/a.yaml::<img src=x>", "outcome": "failed"},
+        {"entry": "us-md:x", "label": "entries[0].tests[3]", "id": "policyengine_us/tests/a.yaml::@everyone", "outcome": "failed"},
+    ]
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({"commits": [{"repo": "PolicyEngine/policyengine-us", "commit": COMMIT, "issues": [], "pins": pins}],
+                                "unrun": [], "issues": []}))
+    assert runner.summarize(path) == [
+        "- `us-md:x` entries[0].tests[0]: `PolicyEngine/policyengine-us@cccccccccccc:policyengine_us/tests/a.yaml::A farm loss (2024), $3,000` failed",
+        "- pinned-tests artifact malformed (3 item(s)); the `pinned-tests` job's log has the details.",
+    ]
+
+
 def test_summarize_without_a_report(tmp_path):
     assert runner.summarize(tmp_path / "absent.json") == [runner.MISSING_ARTIFACT]
     (tmp_path / "list.json").write_text("[]")
@@ -629,6 +711,50 @@ def test_pinned_tests_job_holds_no_secrets():
             assert step["with"]["persist-credentials"] is False, step
 
 
+def test_pin_provenance_job_holds_only_the_read_token_and_runs_no_pinned_code():
+    # The pinned-tests job asks GitHub unauthenticated, and shared runners use
+    # up the 60-request limit. This job asks with the run's read-only token
+    # instead; it runs no pinned code, so no other repository's code sees it.
+    jobs = workflow()["jobs"]
+    job = jobs["pin-provenance"]
+    assert job["permissions"] == {"contents": "read"}
+    assert "env" not in job and "outputs" not in job
+    text = steps_text(job)
+    for forbidden in ("secrets.", "R2_", "ACTIONS_ID_TOKEN", "vars.", "uv", "pytest"):
+        assert forbidden not in text, forbidden
+    with_token = [step for step in job["steps"] if "github.token" in steps_text(step)]
+    assert len(with_token) == 1 and with_token[0]["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    runs = [step["run"] for step in job["steps"] if "tools/pin_runner.py" in step.get("run", "")]
+    assert len(runs) == 1 and "--record-provenance" in runs[0] and "--report" not in runs[0]
+    for step in job["steps"]:
+        if str(step.get("uses", "")).startswith("actions/checkout@"):
+            assert step["with"]["persist-credentials"] is False, step
+    uploads = [step for step in job["steps"] if str(step.get("uses", "")).startswith("actions/upload-artifact@")]
+    assert len(uploads) == 1 and uploads[0]["with"]["name"] == "pin-provenance"
+    assert uploads[0]["with"]["if-no-files-found"] == "error"
+    # pinned-tests waits for the record and reads it.
+    pinned = jobs["pinned-tests"]
+    assert pinned["needs"] == "pin-provenance"
+    downloads = [step for step in pinned["steps"] if str(step.get("uses", "")).startswith("actions/download-artifact@")]
+    assert len(downloads) == 1 and downloads[0]["with"]["name"] == "pin-provenance"
+    (run,) = [step["run"] for step in pinned["steps"] if "tools/pin_runner.py" in step.get("run", "")]
+    assert "--provenance" in run
+
+
+def test_the_alarm_fires_when_pin_provenance_fails():
+    # A failed pin-provenance skips pinned-tests (it needs the record), and a
+    # skipped pinned-tests is not a success, so main and scheduled runs still
+    # raise the alarm: always() keeps the alarm job from being skipped too.
+    jobs = workflow()["jobs"]
+    assert jobs["pinned-tests"]["needs"] == "pin-provenance"
+    alarm = jobs["alarm"]
+    assert "pinned-tests" in alarm["needs"]
+    condition = alarm["if"]
+    assert condition.startswith("${{ always() &&")
+    assert "needs.pinned-tests.result != 'success'" in condition
+    assert "== 'failure'" not in condition
+
+
 def test_pinned_tests_job_passes_its_result_only_as_a_json_artifact():
     jobs = workflow()["jobs"]
     job = jobs["pinned-tests"]
@@ -648,10 +774,12 @@ def test_pinned_tests_job_passes_its_result_only_as_a_json_artifact():
 
 
 def test_only_the_isolated_job_runs_other_repositories_code():
+    # A runner command runs pinned code unless it only records provenance or
+    # summarizes a report.
     jobs = workflow()["jobs"]
     for name, job in jobs.items():
-        runs = " ".join(step.get("run", "") for step in job.get("steps", []))
-        runs_pins = "tools/pin_runner.py --root" in runs or "pin_runner.py --register" in runs
+        commands = [step.get("run", "") for step in job.get("steps", []) if "tools/pin_runner.py" in step.get("run", "")]
+        runs_pins = any("--record-provenance" not in command and "--summarize" not in command for command in commands)
         assert runs_pins == (name == "pinned-tests"), name
 
 
@@ -824,6 +952,95 @@ PARTIAL_SKIP = textwrap.dedent(
 )
 
 
+# A stand-in for policyengine-core's YAML test runner, with the same shape:
+# it calls pytest.main itself, with a plugin that collects YAML files into
+# items whose name is "" until they run (so every case shares the node id
+# `path::`), and it is started as `python -m <module> test <files>`.
+FIXTURE_CORE = textwrap.dedent(
+    """\
+    import sys
+
+    import pytest
+    import yaml
+
+
+    class YamlFile(pytest.File):
+        def collect(self):
+            for test in yaml.safe_load(self.path.read_text()):
+                yield YamlItem.from_parent(self, name="", test=test)
+
+
+    class YamlItem(pytest.Item):
+        def __init__(self, *, test, **kwargs):
+            super().__init__(**kwargs)
+            self.test = test
+
+        def runtest(self):
+            self.name = self.test.get("name", "")
+            output = self.test.get("output")
+            if output == "skip":
+                pytest.skip("planted")
+            assert output == "ok", f"expected ok, got {output!r}"
+
+        def reportinfo(self):
+            return self.path, 0, self.test.get("name", "")
+
+
+    class Plugin:
+        def pytest_collect_file(self, parent, file_path):
+            if file_path.suffix in (".yaml", ".yml"):
+                return YamlFile.from_parent(parent, path=file_path)
+
+
+    def main():
+        args = sys.argv[1:]
+        assert args[0] == "test", args
+        paths = [arg for arg in args[1:] if arg.endswith((".yaml", ".yml"))]
+        return pytest.main(["--capture", "no", "--maxfail", "0", "--tb", "short", *paths], plugins=[Plugin()])
+
+
+    if __name__ == "__main__":
+        sys.exit(main())
+    """
+)
+FIXTURE_CORE_PYPROJECT = textwrap.dedent(
+    """\
+    [project]
+    name = "fixture-yaml"
+    version = "0"
+    requires-python = ">=3.10"
+
+    [project.optional-dependencies]
+    dev = ["pytest==9.1.1", "pyyaml==6.0.3"]
+
+    [build-system]
+    requires = ["setuptools>=68"]
+    build-backend = "setuptools.build_meta"
+
+    [tool.setuptools]
+    packages = ["fixture_core"]
+    """
+)
+YAML_CASES = textwrap.dedent(
+    """\
+    - name: A case that passes (2024)
+      output: ok
+    - name: A case that fails
+      output: bad
+    - name: A skipped case
+      output: skip
+    - name: Twice
+      output: ok
+    - name: Twice
+      output: bad
+    - name: Both pass
+      output: ok
+    - name: Both pass
+      output: ok
+    """
+)
+
+
 def _git(cwd: Path, *args: str) -> str:
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -955,6 +1172,14 @@ def fixtures(tmp_path_factory):
         "duplicate": fixture_repo(base, "PolicyEngine/fixture-duplicate", {
             "tests/test_a.py": "calls = 0\n\n\ndef test_a():\n    global calls\n    calls += 1\n    assert calls == 2\n",
             "conftest.py": "def pytest_collection_modifyitems(items):\n    items[:] = [items[0], items[0]]\n",
+        }),
+        "yaml": fixture_repo(base, "PolicyEngine/fixture-yaml", {
+            "pyproject.toml": FIXTURE_CORE_PYPROJECT,
+            "fixture_core/__init__.py": "",
+            "fixture_core/cli.py": FIXTURE_CORE,
+            "tests/policy/cases.yaml": YAML_CASES,
+            "tests/policy/passing.yaml": "- name: Only passing\n  output: ok\n",
+            "tests/test_py.py": "def test_ok():\n    pass\n",
         }),
         "slow": fixture_repo(base, "PolicyEngine/fixture-slow", {
             "tests/test_slow.py": "import time\n\n\ndef test_sleep():\n    time.sleep(600)\n",
@@ -1134,6 +1359,157 @@ def test_an_unexpected_api_failure_refuses(tmp_path):
     assert not any(work.iterdir())
 
 
+def test_recorded_provenance_is_used_without_asking(tmp_path):
+    def unreachable(path):
+        raise AssertionError(f"asked GitHub for {path}")
+
+    work = tmp_path / "work"
+    work.mkdir()
+    recorded = {("PolicyEngine/a", COMMIT): {"repo": "PolicyEngine/a", "commit": COMMIT, "shipped": False, "reason": "recorded: a fork"}}
+    settings_ = runner.Settings(uv="uv", git="git", work=work, api=unreachable, provenance=recorded)
+    report = runner.run_register(register(*pinned("PolicyEngine/a", COMMIT, ["tests/test_a.py::test_a"])), settings_)
+    assert outcomes(report) == {"tests/test_a.py::test_a": "untrusted commit"}
+    assert "recorded: a fork" in report["issues"][0]
+    assert not any(work.iterdir())
+
+
+def _seed_passing_cache(settings_, payload):
+    """A valid cached pass for every commit the payload pins, as _store
+    would write it after a passing run."""
+
+    groups, _ = runner.collect_pins(payload)
+    for (repo, commit), pins in groups.items():
+        key = runner.cache_key(repo, commit, pins, runner.runner_version())
+        runner._store(settings_, key, {
+            "repo": repo, "commit": commit, "issues": [], "logs": {}, "pytest_exit": 0,
+            "pins": [{"entry": p.entry, "label": p.label, "id": p.id, "path": p.path, "name": p.name,
+                      "outcome": "passed", "cases": [{"nodeid": p.id, "outcome": "passed"}]} for p in pins],
+        })
+
+
+def _unreachable(path):
+    raise AssertionError(f"asked GitHub for {path}")
+
+
+@pytest.mark.parametrize("shipped", [False, True])
+def test_a_recorded_answer_decides_before_the_cache_and_asks_nothing(tmp_path, shipped):
+    # #1843 fix review (P2): a recorded refusal refuses even with a valid
+    # cached pass for that commit, and a recorded success serves the cached
+    # pass without asking GitHub, whose unauthenticated limit runs out.
+    work = tmp_path / "work"
+    work.mkdir()
+    cache = tmp_path / "cache"
+    payload = register(*pinned("PolicyEngine/a", COMMIT, ["tests/test_a.py::test_a"]))
+    record = {"repo": "PolicyEngine/a", "commit": COMMIT, "shipped": shipped, "reason": None if shipped else "recorded: a fork"}
+    settings_ = runner.Settings(uv="uv", git="git", work=work, cache_dir=cache, api=_unreachable,
+                                provenance={("PolicyEngine/a", COMMIT): record})
+    _seed_passing_cache(settings_, payload)
+    report = runner.run_register(payload, settings_)
+    if shipped:
+        assert outcomes(report) == {"tests/test_a.py::test_a": "passed"}
+        assert report["commits"][0]["cached"] is True and report["commits"][0]["provenance"] == record
+    else:
+        assert outcomes(report) == {"tests/test_a.py::test_a": "untrusted commit"}
+        assert report["commits"][0]["cached"] is False and "recorded: a fork" in report["issues"][0]
+    assert not any(work.iterdir())  # nothing was fetched
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        ("PolicyEngine/a", "d" * 40),  # the same repository, another commit
+        ("PolicyEngine/b", COMMIT),  # another repository, the same commit
+        ("PolicyEngine/A", COMMIT),  # the repository name in another case
+        ("policyengine/a", COMMIT),  # the owner in another case
+    ],
+)
+def test_a_record_serves_only_its_exact_repository_and_commit(tmp_path, recorded):
+    # #1843 fix review (P2): a record for anything but the exact (repository,
+    # commit) is not used, so the run asks GitHub, which here refuses.
+    calls = []
+
+    def refusing(path):
+        calls.append(path)
+        return {"full_name": "PolicyEngine/a", "fork": True, "default_branch": "main"}
+
+    work = tmp_path / "work"
+    work.mkdir()
+    cache = tmp_path / "cache"
+    payload = register(*pinned("PolicyEngine/a", COMMIT, ["tests/test_a.py::test_a"]))
+    record = {"repo": recorded[0], "commit": recorded[1], "shipped": True, "reason": None}
+    settings_ = runner.Settings(uv="uv", git="git", work=work, cache_dir=cache, api=refusing, provenance={recorded: record})
+    _seed_passing_cache(settings_, payload)
+    report = runner.run_register(payload, settings_)
+    assert outcomes(report) == {"tests/test_a.py::test_a": "untrusted commit"}
+    assert "is a fork" in report["issues"][0] and calls == ["/repos/PolicyEngine/a"]
+    assert report["commits"][0]["cached"] is False and not any(work.iterdir())
+
+
+def test_a_commit_the_record_lacks_is_asked_of_github(tmp_path):
+    base = tmp_path / "repos"
+    head = fixture_repo(base, "PolicyEngine/fixture-meta", {"tests/test_a.py": "def test_a():\n    pass\n"})
+    fake = FakeGitHub(base, meta={"PolicyEngine/fixture-meta": {"fork": True}})
+    other = {("PolicyEngine/b", COMMIT): {"repo": "PolicyEngine/b", "commit": COMMIT, "shipped": True, "reason": None}}
+    payload = register(*pinned("PolicyEngine/fixture-meta", head, ["tests/test_a.py::test_a"]))
+    report = runner.run_register(payload, settings(tmp_path, base, api=fake, provenance=other))
+    assert "is a fork" in report["issues"][0] and fake.calls
+
+
+def test_record_provenance_asks_with_the_token_and_runs_nothing(tmp_path, monkeypatch, capsys):
+    base = tmp_path / "repos"
+    head = fixture_repo(base, "PolicyEngine/fixture-meta", {"tests/test_a.py": "def test_a():\n    pass\n"})
+    tokens = []
+
+    def github_api(token=None, base_url=None):
+        tokens.append(token)
+        return FakeGitHub(base)
+
+    monkeypatch.setattr(sc, "github_api", github_api)
+    monkeypatch.setenv("GH_TOKEN", "read-only")
+    register_path = tmp_path / "register.yaml"
+    register_path.write_text(yaml.safe_dump(register(*pinned("PolicyEngine/fixture-meta", head, ["tests/test_a.py::test_a"]))))
+    out = tmp_path / "out" / "provenance.json"
+    assert runner.main(["--register", str(register_path), "--record-provenance", str(out)]) == 0
+    assert tokens == ["read-only"]
+    record = json.loads(out.read_text())
+    assert record["provenance_version"] == runner.PROVENANCE_VERSION
+    assert [(item["repo"], item["commit"], item["shipped"]) for item in record["records"]] == [("PolicyEngine/fixture-meta", head, True)]
+    assert runner.load_provenance(out)[("PolicyEngine/fixture-meta", head)]["shipped"] is True
+    assert "1 pinned commit(s); 0 not shipped" in capsys.readouterr().out
+    assert not (tmp_path / "work").exists()
+    # Without a register there is no record, and the command fails.
+    assert runner.main(["--register", str(tmp_path / "absent.yaml"), "--record-provenance", str(tmp_path / "none.json")]) == 1
+    assert not (tmp_path / "none.json").exists()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "not json",
+        "[]",
+        '{"provenance_version": 2, "records": []}',
+        '{"provenance_version": 1}',
+        '{"provenance_version": 1, "records": [{"repo": "a/b", "commit": "c"}]}',
+        '{"provenance_version": 1, "records": [{"repo": "a/b", "commit": "c", "shipped": "yes"}]}',
+        '{"provenance_version": 1, "records": [{"repo": 1, "commit": 2, "shipped": false}]}',
+        '{"provenance_version": 1, "records": [{"repo": 1, "commit": "' + "c" * 40 + '", "shipped": false}]}',
+        '{"provenance_version": 1, "records": [{"repo": "a/b", "commit": 2, "shipped": false}]}',
+        '{"provenance_version": 1, "records": ["a/b"]}',
+    ],
+)
+def test_a_malformed_provenance_record_fails_the_run_closed(tmp_path, content):
+    path = tmp_path / "provenance.json"
+    path.write_text(content)
+    with pytest.raises(ValueError):
+        runner.load_provenance(path)
+    register_path = tmp_path / "register.yaml"
+    register_path.write_text(yaml.safe_dump(register(*pinned("PolicyEngine/a", COMMIT, ["tests/test_a.py::test_a"]))))
+    report_path = tmp_path / "report.json"
+    argv = ["--register", str(register_path), "--report", str(report_path), "--provenance", str(path), "--uv", "uv", "--git", "git"]
+    assert runner.main(argv) == 1
+    assert json.loads(report_path.read_text())["issues"][0].startswith("runner error:")
+
+
 @needs_tools
 def test_an_install_without_pytest_fails_every_pin(tmp_path, fixtures):
     base, commits = fixtures
@@ -1141,6 +1517,65 @@ def test_an_install_without_pytest_fails_every_pin(tmp_path, fixtures):
     report = runner.run_register(payload, settings(tmp_path, base))
     assert outcomes(report) == {"tests/test_a.py::test_a": "install failed"}
     assert report["issues"][0].endswith("the install (-e .[dev]) does not provide pytest")
+
+
+YAML_EXPECTED = {
+    "tests/policy/cases.yaml::A case that passes (2024)": "passed",
+    "tests/policy/cases.yaml::A case that fails": "failed",
+    "tests/policy/cases.yaml::A skipped case": "skipped",
+    # #1843 review: a YAML pin names exactly one case. Two cases sharing the
+    # name are ambiguous, whether one fails or both pass.
+    "tests/policy/cases.yaml::Twice": "ambiguous",
+    "tests/policy/cases.yaml::Both pass": "ambiguous",
+    "tests/policy/cases.yaml::No such case": "missing",
+    "tests/policy/missing.yaml::Anything": "missing file",
+    # A Python pin at the same commit runs under pytest, separately.
+    "tests/test_py.py::test_ok": "passed",
+}
+
+
+@needs_tools
+def test_yaml_cases_run_through_the_repositorys_own_yaml_runner(tmp_path, fixtures, monkeypatch):
+    base, commits = fixtures
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-yaml", ("fixture_core.cli", ()))
+    payload = register(*pinned("PolicyEngine/fixture-yaml", commits["yaml"], list(YAML_EXPECTED)))
+    report = runner.run_register(payload, settings(tmp_path, base))
+    assert outcomes(report) == YAML_EXPECTED
+    (result,) = report["commits"]
+    # Each kind ran once, with its own exit: pytest passed, the YAML run failed.
+    assert result["runs"]["python"]["exit"] == 0
+    assert result["runs"]["yaml"]["exit"] == 1
+    assert result["runs"]["yaml"]["files"] == ["tests/policy/cases.yaml"]
+    assert result["pytest_exit"] == 1
+    assert "the YAML test runner's process exited 1" in result["issues"]
+    by_id = {pin["id"]: pin for pin in result["pins"]}
+    assert "2 cases in tests/policy/cases.yaml are named 'Both pass'" in by_id["tests/policy/cases.yaml::Both pass"]["detail"]
+
+
+@needs_tools
+def test_a_passing_yaml_commit_passes_and_is_cached(tmp_path, fixtures, monkeypatch):
+    base, commits = fixtures
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-yaml", ("fixture_core.cli", ()))
+    payload = register(*pinned("PolicyEngine/fixture-yaml", commits["yaml"], [
+        "tests/policy/passing.yaml::Only passing", "tests/policy/cases.yaml::A case that passes (2024)",
+    ]))
+    cache = tmp_path / "cache"
+    first = runner.run_register(payload, settings(tmp_path, base, cache_dir=cache))
+    assert outcomes(first) == {"tests/policy/passing.yaml::Only passing": "passed",
+                               "tests/policy/cases.yaml::A case that passes (2024)": "passed"}
+    assert first["issues"] == [] and first["commits"][0]["pytest_exit"] == 0
+    second = runner.run_register(payload, settings(tmp_path, base, cache_dir=cache))
+    assert second["commits"][0]["cached"] is True
+
+
+@needs_tools
+def test_an_install_without_the_yaml_runner_fails_closed(tmp_path, fixtures, monkeypatch):
+    base, commits = fixtures
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-yaml", ("no_such_core.cli", ()))
+    payload = register(*pinned("PolicyEngine/fixture-yaml", commits["yaml"], ["tests/policy/passing.yaml::Only passing"]))
+    report = runner.run_register(payload, settings(tmp_path, base))
+    assert outcomes(report) == {"tests/policy/passing.yaml::Only passing": "install failed"}
+    assert "does not provide no_such_core" in report["issues"][0]
 
 
 @needs_tools
