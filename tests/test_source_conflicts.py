@@ -1078,9 +1078,12 @@ def test_unpublished_sources_shape(tmp_path):
         # After an opening bracket, a dash, a slash, an opening quotation mark
         # that pass 1 does not consume (U+201B), or other punctuation.
         *[(f"x{before}'one two'", ["one two"]) for before in ("(", "[", "{", "\u2014", "\u2013", "-", "/", "\u201b", ":", ".", "!")],
-        # These start unclosed pass-1 regions; their inner single marks are
+        # This starts an unclosed pass-1 region; its inner single marks are
         # literal text, consumed in pass 1.
-        *[(f"x{before}'one two'", ["'one two'"]) for before in ("\u00ab", "\u300c")],
+        ("x\u300c'one two'", ["'one two'"]),
+        # \u00ab also closes \u00bb, so glued to a word it opens nothing (the first
+        # known limit), and the single quotation after it is read.
+        ("x\u00ab'one two'", ["one two"]),
         # The text's first character, and a combining mark after the opener.
         ("'one two three' said the agency.", ["one two three"]),
         ("\u2018one two\u2019 it said", ["one two"]),
@@ -1231,7 +1234,7 @@ def test_quoted_words(text, words):
         # A double mark closes a single quotation too, even behind a stray low
         # mark (found by Hypothesis), and when it also closes a quotation
         # inside it (the one-pass reading).
-        ("\u201aa 'claimants\u2019 the the\u201d ", 3, False),
+        ("\u201aa 'claimants\u2019 the the\u201d ", 4, False),
         ("It wrote 'one two \u201cthree four\u201d", 4, False),
         # #1867 round 4 (P1): a closing double mark after a dash or an
         # apostrophe, before punctuation, closes; a space inside either mark
@@ -1242,19 +1245,58 @@ def test_quoted_words(text, words):
         ('It wrote " one" today.', 1, False),
         ('It wrote "one two three four " today.', 4, False),
         # A mark before another quotation mark starts a quotation, so straight
-        # marks nest at the start too; and inside a quotation, a single mark
-        # that doesn't start one (the spaced closer of \u201athe \u2018) opens no
-        # whole-text span (mutation round 6).
+        # marks nest at the start too (mutation round 6).
         ('It wrote ""one" two three four five"', 5, True),
         ('It wrote " ""one two" three four five"', 5, True),
-        ("\u201athe \u2018 the the the workers' today.", 1, False),
+        # Intended (#1867 round 5): \u2018 is a single mark that may open, so the
+        # whole-text span reads \u2018 the the the workers' as a quotation; \u201a\u2026\u2018
+        # is outside the double-quotation exactness scope.
+        ("\u201athe \u2018 the the the workers' today.", 5, True),
+        # Round 5 (P1): a single quotation that a stray low mark's region
+        # swallows still counts in full, whatever its opener follows or its
+        # body starts with.
+        ("\u201ax \u2019 one two three four five\u2019", 6, True),
+        ("\u201ax \u2019\u2014one two three four five\u2019", 6, True),
+        ("\u201ax :\u2019one two three four five\u2019", 6, True),
+        ("\u201ax:'one workers\u2019 two three four five'", 6, True),
+        # Round 5 (P1): a closer before a bracketed citation closes.
+        ('It wrote "one two three four\u2014"[1] today.', 4, False),
+        ('It wrote "one two three workers\'"[1] today.', 4, False),
+        ('It wrote "one two three four "[1] today.', 4, False),
+        ('It wrote "one two three four "[1] today, and later "five six".', 6, True),
+        # Known limit (#1867 round 5, accepted by ruling): a quotation nested in
+        # the same marks whose inner quotation starts with a bracket reads as
+        # two quotations, so the words between aren't counted. It is the
+        # second fail-open the scanner accepts; changing it is a deliberate
+        # decision. Nested in another pair, it counts in full.
+        ('It wrote "one two "[sic] three four" five"', 3, False),
+        ("It wrote \u201cone two \u00ab[sic] three four\u00bb five\u201d", 6, True),
+        # Outside the exactness scope, as the README states: a space after a
+        # mark that also closes (read as a closer), a word holding its own
+        # quotation's closing mark, and main's floor after \u201e\u2026\u201c.
+        ("It wrote \u201d one\u201d today.", 1, False),
+        ("It wrote \u201aclaimants\u2019 policy\u2019 today.", 1, False),
+        ("It wrote \u201eone\u201c then denied every remaining claim.", 5, True),
+        # The boundary rules (mutation round 8): an outer closer after a dash
+        # or right after an inner closer opens nothing; a closer before an
+        # opening quotation character or after an apostrophe closes.
+        ('It wrote "one "two" wait\u2014"[1] today.', 3, False),
+        ('It wrote "one "two"" today.', 2, False),
+        ('It wrote \u00bbone "two\u2014"\u00ab today.', 2, False),
+        ("It wrote \"one \u00abtwo workers'\u00bb\" today.", 3, False),
         # Found by fuzzing: only the standard delimited reading counts both words.
+        ("'\u00abb\u2014\u00bbb\u2019", 2, False),
         ("'a\"b\u00ab\"\u00bb", 2, False),
-        # Known limit (#1867 round 4): a quotation whose opening mark directly
-        # follows a letter or digit is read as an apostrophe and not counted.
-        # It is the one fail-open the scanner accepts; changing it is a
-        # deliberate decision.
+        # Known limit (#1867 round 4, accepted by ruling): a quotation whose
+        # opening mark directly follows a letter or digit, where that mark can
+        # also close (a single mark, or ” » › ″ “ « ‹), isn't
+        # counted. It is one of the two fail-opens the scanner accepts;
+        # changing it is a deliberate decision. Main's floor still reads a
+        # glued “, and marks that only open (" „ 「 …) open anywhere.
         ("It wrote x'one two three four five'", 0, False),
+        ("It wrote x\u00abone two three four five\u00bb", 0, False),
+        ("It wrote x\u201cone two three four five\u201d", 5, True),
+        ('It wrote x"one two three four five"', 5, True),
         # Plain prose: apostrophes inside or at the end of a word, inch marks
         # and footnote marks open nothing.
         ("Since the 1990s the clerks in each county office have handled the clerks' files", 0, False),
@@ -1285,7 +1327,7 @@ def test_the_refusal_shows_the_span_and_the_remedy(tmp_path):
     issues = check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))
     (issue,) = [issue for issue in issues if "quotes more than 4 words in all" in issue]
     assert "(6, counted in \"routine' and won't reopen the workers\")" in issue
-    assert "double quotation marks, which are counted exactly" in issue
+    assert 'one style of double quotation marks ("\u2026" or \u201c\u2026\u201d), nesting with \u2018\u2026\u2019 or \u00ab\u2026\u00bb if needed and never in the same marks; those are counted exactly in plain prose' in issue
     assert "Describe it instead" in issue
     long = "It wrote '" + " ".join(["word"] * 40) + "'"
     (issue,) = [issue for issue in check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": long}]))
@@ -1299,7 +1341,16 @@ def test_delimited_readings():
     assert sc._opens_delimited("x \u201d y", 2) is False
     assert sc._opens_delimited("\u00bbone", 0) is True
     assert sc._opens_delimited("x\u00bbone", 1) is False
-    assert sc._opens_delimited("x\u201cone", 1) is True  # “ only opens
+    # “ also closes „, so glued to a word it opens nothing (main's floor still
+    # reads it there); after a space it opens.
+    assert sc._opens_delimited("x\u201cone", 1) is False
+    assert sc._opens_delimited("x \u201cone", 2) is True
+    assert sc._opens_delimited("x\u201eone", 1) is True  # „ only opens
+    # « with a space after it opens (French spacing), in each reading.
+    assert sc._delimited("\u00ab oui \u00bb") == ([(0, " oui ")], [(0, 7)])
+    # The strict reading skips a closer that starts a quotation (the “
+    # after a stray „) and closes at the next.
+    assert sc._delimited("\u201ex \u201cone two\u201d", "strict") == ([(0, "x \u201cone two")], [(0, 12)])
     # The strict reading opens after an opener prefix and closes at a word's end.
     assert sc._delimited('6" and "a b"', "strict") == ([(7, "a b")], [(7, 12)])
     assert sc._delimited('6" and "a b"') == ([(1, " and "), (11, "")], [(1, 8), (11, 12)])

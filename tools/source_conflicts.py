@@ -195,6 +195,8 @@ _DELIMITERS: dict[str, str] = {
 # would and before a non-space (_opens_delimited): the inch marks in 6” and
 # 6″ open nothing.
 _CONTEXT_OPENERS = frozenset("\u201d\u00bb\u203a\u2033")
+# Openers that also close another pair (“ closes „, « closes », …).
+_ALSO_CLOSES = frozenset(mark for mark in _DELIMITERS if any(mark in closers for opener, closers in _DELIMITERS.items() if opener != mark))
 _DELIMITER_CLOSE = {mark: re.compile("[" + re.escape(closers) + "]") for mark, closers in _DELIMITERS.items()}
 # Every delimiter mark, opening or closing: the nested reading steps through them.
 _DELIMITER_MARKS = frozenset("".join(_DELIMITERS) + "".join(_DELIMITERS.values()))
@@ -238,9 +240,9 @@ def _opens_single(text: str, index: int) -> bool:
     """A single mark may open a quotation unless it follows a letter or digit
     (past any combining marks on it) or ends the text. So the apostrophes in
     "agency's", "the workers'" and 6'7 open nothing, while 'one, wrote:'one,
-    ('one, '30 days, ' one and the elided year in "the '90s" all may. The one
-    known limit, documented in tools/README.md, is a quotation whose opening
-    mark directly follows a letter or digit (x'one …'), which is read as an
+    ('one, '30 days, ' one and the elided year in "the '90s" all may. This is
+    the first known limit documented in tools/README.md: a quotation whose
+    opening mark directly follows a letter or digit (x'one …') is read as an
     apostrophe."""
 
     if index + 1 >= len(text):
@@ -268,37 +270,65 @@ def _next_after(positions: Sequence[int], index: int) -> int | None:
     return positions[following] if following < len(positions) else None
 
 
+def _opening_context(text: str, index: int) -> bool:
+    """The mark starts the text or follows whitespace, a slash or an opening
+    bracket: where a quotation opens, unlike after another quotation mark or
+    a dash, which a closer may follow (the second » in «a «b»», wait—"[1])."""
+
+    if index == 0:
+        return True
+    before = text[index - 1]
+    return before.isspace() or before == "/" or unicodedata.category(before) == "Ps"
+
+
 def _opens_in_context(text: str, index: int) -> bool:
-    """A mark stands where an opener would: after an opener prefix and before
+    """A mark stands where an opener would: in an opening context and before
     a non-space."""
 
-    return index + 1 < len(text) and not text[index + 1].isspace() and _opener_prefix(text, index)
+    return index + 1 < len(text) and not text[index + 1].isspace() and _opening_context(text, index)
 
 
 def _starts_a_quotation(text: str, index: int) -> bool:
     """A mark that can both close and open reads as an opener: after an
-    opener prefix and before a letter, a digit, an opening bracket or a
-    quotation mark. So the inner marks in "one "two" three" and ""one" two"
-    open, while the closers in "wait—". and "workers'", close."""
+    opener prefix and before a letter or a digit; or, after the text's start
+    or whitespace, before a quotation mark. So the inner marks in "one "two"
+    three", ""one" two" and " ""one" two" open, while the closers in
+    "wait—"., "workers'",, "four—"[1], «wait—»", «workers'»" and »a "b—"«
+    close (« and “ open quotations but close others too). One limit follows, documented in
+    tools/README.md: a quotation nested in the same marks that starts with a
+    bracket ("one "[sic] two" three") reads as two quotations."""
 
     if index + 1 >= len(text) or not _opener_prefix(text, index):
         return False
     after = text[index + 1]
-    return _word_char(after) or after in _QUOTATION_MARKS or unicodedata.category(after) in ("Ps", "Pi")
+    if _word_char(after):
+        return True
+    return after in _QUOTATION_MARKS and (index == 0 or text[index - 1].isspace())
 
 
 def _opens_delimited(text: str, index: int) -> bool:
     """A delimited opener opens anywhere, except a mark that also closes
-    another pair (_CONTEXT_OPENERS): it opens only where an opener would."""
+    another pair (”, », ›, ″, “, «, ‹, 🙶). That opens only where it starts a
+    quotation (_starts_a_quotation) or in an opening context
+    (_opening_context; for ” » › ″, also before a non-space). So the inch
+    mark in 6” opens nothing, and nor do the inner closers in „a „b“ c“ and
+    »a »b« c«, while « oui » opens. One limit follows, documented in
+    tools/README.md: such a mark directly after a letter or digit
+    (x«one …») opens nothing; main's floor still reads “ there."""
 
-    return text[index] not in _CONTEXT_OPENERS or _opens_in_context(text, index)
+    mark = text[index]
+    if mark not in _ALSO_CLOSES or _starts_a_quotation(text, index):
+        return True
+    return _opens_in_context(text, index) if mark in _CONTEXT_OPENERS else _opening_context(text, index)
 
 
 def _opens_strict(text: str, index: int) -> bool:
-    """The strict reading's opener: a delimiter mark after an opener prefix,
-    so the inch mark in 6" opens nothing."""
+    """The strict reading's opener: a delimiter mark that starts a quotation
+    (_starts_a_quotation), or that stands in an opening context
+    (_opening_context), so the inch mark in 6" and the second closer in "the
+    "the"" open nothing, and " one" opens."""
 
-    return index + 1 < len(text) and _opener_prefix(text, index)
+    return index + 1 < len(text) and (_starts_a_quotation(text, index) or _opening_context(text, index))
 
 
 def _delimited_close(text: str, index: int, reading: str) -> int:
@@ -400,13 +430,11 @@ def _single_span(text: str, regions: list[tuple[int, int]]) -> tuple[int, int] |
 
 def _whole_text_span(text: str, regions: list[tuple[int, int]]) -> tuple[int, int] | None:
     """The single span over the whole text: from the first single mark that
-    may open, to the last mark after it that may close. Inside `regions` (the
-    standard reading's quotations) a single mark opens only where it starts
-    a quotation (_starts_a_quotation), so the closer of ‚the ‘ opens nothing;
-    a closer is a single mark anywhere or another quotation mark outside
-    them, so the closer of a double quotation after it, as in 'approves it'
-    and "the waiver", ends nothing. A stray delimiter can't swallow a single
-    quotation's opener (‚x 'one …')."""
+    may open, anywhere, to the last mark after it that may close, where a
+    closer is a single mark anywhere or another quotation mark outside
+    `regions` (the standard reading's quotations, so the closer of a double
+    quotation after it, as in 'approves it' and "the waiver", ends nothing).
+    A stray delimiter can't swallow a single quotation's opener (‚x 'one …')."""
 
     first = last = None
     region_index = 0
@@ -417,7 +445,7 @@ def _whole_text_span(text: str, regions: list[tuple[int, int]]) -> tuple[int, in
             region_index += 1
         inside = region_index < len(regions) and regions[region_index][0] <= index
         if first is None:
-            if mark in _SINGLE_OPENERS and _opens_single(text, index) and (not inside or _starts_a_quotation(text, index)):
+            if mark in _SINGLE_OPENERS and _opens_single(text, index):
                 first = index
         elif (mark in _SINGLE_MARKS or not inside) and _closes_single(text, index):
             last = index
@@ -560,16 +588,28 @@ def _readings(text: str) -> Iterator[tuple[int, list[str]]]:
         if single is not None:
             spans.append(_span_text(text, single[0], single[1], regions))
         yield sum(_words(span) for span in spans), spans
-    # The single span over the whole text (_whole_text_span), with the
-    # standard reading's delimited quotations outside it.
+    # The single span over the whole text (_whole_text_span), together with
+    # the standard reading's delimited quotations: the words of every
+    # character inside either, the rest blanked, so a span that starts inside
+    # a quotation loses none of its words and splits none in two.
     located, regions = _delimited(text)
     single = _whole_text_span(text, regions)
     if single is not None:
         start, close = single
-        spans = [text[start + 1 : close]] + [
-            span for (_, span), (region_start, region_end) in zip(located, regions)
-            if region_end <= start or region_start > close
-        ]
+        inside = [False] * len(text)
+        for position in range(start + 1, close):
+            inside[position] = True
+        for region_start, span in located:
+            for position in range(region_start + 1, region_start + 1 + len(span)):
+                inside[position] = True
+        spans: list[str] = []
+        run_start = None
+        for position in range(len(text) + 1):
+            if position < len(text) and inside[position]:
+                run_start = position if run_start is None else run_start
+            elif run_start is not None:
+                spans.append(text[run_start:position])
+                run_start = None
         yield sum(_words(span) for span in spans), spans
     every_closer = [index for index, mark in enumerate(text) if mark in _QUOTATION_MARKS and _closes_single(text, index)]
     # The one-pass reading under main's single openers too: a wider opener can
@@ -589,19 +629,25 @@ def quoted_reading(text: str) -> tuple[int, list[str]]:
     conservatively: every word from the first single mark that may open to
     the last quotation mark that may close counts (_single_span), outside
     each reading's delimited quotations and over the whole text
-    (_whole_text_span). So a quotation of N words opened and closed by single
-    marks at word boundaries always counts at least N: in the whole-text
-    reading the first opener is at or before it, and the last closer at or
-    after it. A double mark may close a single quotation too (‘…”); that
-    case is counted but not part of the guarantee, since the same mark may be
-    closing a quotation inside it. The count is the largest over the delimited readings of their
-    delimited words plus that single span, over the whole-text single span,
-    over a one-pass reading, and over main's count, so this scan refuses
-    whatever main's did. A description that quotes with
-    single marks and also has a later apostrophe at a word's end (the
-    workers' case) or a second single quotation is read as one quotation
-    from the first mark to the last; tools/README.md says to use double
-    quotation marks then, which are counted exactly.
+    (_whole_text_span, with the parts of the delimited quotations outside
+    it). So a quotation of N words opened and closed by single marks at word
+    boundaries always counts at least N: in the whole-text reading the first
+    opener is at or before it, and the last closer at or after it. A double
+    mark may close a single quotation too (‘…”); that case is counted but not
+    part of the guarantee, since the same mark may be closing a quotation
+    inside it.
+
+    The count is the largest over the delimited readings of their delimited
+    words plus that single span, over the whole-text reading, over a
+    one-pass reading (under this scan's single openers and main's), and over
+    main's count, so this scan refuses whatever main's did. A description
+    that quotes with single marks and also has a later apostrophe at a
+    word's end (the workers' case) or a second single quotation is read as
+    one quotation from the first mark to the last. tools/README.md says to
+    quote with one style, "…" or “…”, nesting with ‘…’ or «…» if needed and
+    never in the same marks: in plain prose, each delimited reading counts a
+    double quotation exactly (within the scope the README states), and main
+    reads those two pairs exactly too.
     """
 
     return max(_readings(text), key=lambda reading: reading[0])
@@ -1333,9 +1379,10 @@ def _check_unpublished_source(item: Any, *, label: str, issues: list[str]) -> No
             issues.append(
                 f"{label}.description quotes more than {MAX_QUOTED_WORDS} words in all ({count}, counted in "
                 f"{shown}); an unpublished source is described, never quoted. Describe it instead, or put a "
-                f"quotation of at most {MAX_QUOTED_WORDS} words in double quotation marks, which are counted "
-                "exactly: single marks can't be told from apostrophes, so every word from the first single mark "
-                "to the last quotation mark counts."
+                f"quotation of at most {MAX_QUOTED_WORDS} words in one style of double quotation marks (\"\u2026\" or "
+                "\u201c\u2026\u201d), nesting with \u2018\u2026\u2019 or \u00ab\u2026\u00bb if needed and never in the same marks; "
+                "those are counted exactly in plain prose. Single marks can't be told from apostrophes, so every "
+                "word from the first single mark to the last quotation mark counts."
             )
 
 

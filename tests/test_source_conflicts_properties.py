@@ -58,8 +58,10 @@ Invariants, for every input:
       quadratic reference finds for the standard reading, and `quoted_words`
       equals an independent envelope: under each delimited reading (standard,
       strict, nested), delimited words once plus the single span from the
-      first mark that may open to the last that may close; a one-pass
-      reading; and main's count. A refusal shows that reading's spans.
+      first mark that may open to the last that may close; that span over
+      the whole text, with the delimited quotations' parts outside it; a
+      one-pass reading under both opener rules; and main's count. A refusal
+      shows that reading's spans.
     - Every Unicode Quotation_Mark character is read.
     - A quotation of N words delimited by single marks at word boundaries
       counts at least N, whatever apostrophes it holds (possessives,
@@ -67,7 +69,14 @@ Invariants, for every input:
       whatever surrounds it; so does any recognisable delimited quotation,
       nested in the same marks or not.
     - Double quotations in plain prose are counted exactly in each delimited
-      reading and overall, and plain prose quotes nothing.
+      reading, within the README's scope: every pair but ‚…‘ and ‚…’ (single
+      marks), words holding none of the quotation's own closing marks, and no
+      space after ” » › ″ as an opener; whatever the words end in or follows
+      the closer, citations included. Overall they are too, unless main's
+      count is higher (main read “ as an opener). Quotations nested in a
+      different pair, or in the same pair with no bracket at the inner
+      quotation's start, count in full: exactly in the nested reading and
+      overall, and no reading counts more. Plain prose quotes nothing.
     - The floor is main's scanner exactly (`_main_words` equals a verbatim
       copy of main's function), so the count is never below main's; and
       widening the single openers never lowers it.
@@ -780,19 +789,35 @@ def _ref_word_count(span):
     return len([token for token in span.split() if any(char.isalnum() for char in token)])
 
 
+def _ref_opening_context(text, i):
+    return i == 0 or text[i - 1].isspace() or text[i - 1] == "/" or unicodedata.category(text[i - 1]) == "Ps"
+
+
 def _ref_context_opens(text, i):
-    return i + 1 < len(text) and not text[i + 1].isspace() and _ref_wide(text, i)
+    return i + 1 < len(text) and not text[i + 1].isspace() and _ref_opening_context(text, i)
+
+
+# Openers that also close another pair.
+REF_ALSO_CLOSES = {mark for mark in REF_PAIRS if any(mark in closers for opener, closers in REF_PAIRS.items() if opener != mark)}
 
 
 def _ref_starts(text, i):
-    # Reads as an opener: an opener prefix, then a letter, a digit, an opening
-    # bracket or an opening quotation mark.
-    return (i + 1 < len(text) and _ref_wide(text, i)
-            and (_ref_word_char(text[i + 1]) or text[i + 1] in REF_MARKS or unicodedata.category(text[i + 1]) in ("Ps", "Pi")))
+    # Reads as an opener: an opener prefix, then a letter or a digit; or,
+    # after the start or whitespace, then a mark.
+    if not (i + 1 < len(text) and _ref_wide(text, i)):
+        return False
+    after = text[i + 1]
+    if _ref_word_char(after):
+        return True
+    return after in REF_MARKS and (i == 0 or text[i - 1].isspace())
 
 
 def _ref_opens_delimited(text, i):
-    return text[i] in REF_PAIRS and (text[i] not in REF_CONTEXT or _ref_context_opens(text, i))
+    if text[i] not in REF_PAIRS:
+        return False
+    if text[i] not in REF_ALSO_CLOSES or _ref_starts(text, i):
+        return True
+    return _ref_context_opens(text, i) if text[i] in REF_CONTEXT else _ref_opening_context(text, i)
 
 
 def _ref_close(text, i, reading):
@@ -817,7 +842,10 @@ def _ref_close(text, i, reading):
 def _ref_delimited(text, reading="standard"):
     spans, regions, i = [], [], 0
     while i < len(text):
-        opens = (text[i] in REF_PAIRS and i + 1 < len(text) and _ref_wide(text, i)) if reading == "strict" else _ref_opens_delimited(text, i)
+        if reading == "strict":
+            opens = text[i] in REF_PAIRS and i + 1 < len(text) and (_ref_starts(text, i) or _ref_opening_context(text, i))
+        else:
+            opens = _ref_opens_delimited(text, i)
         if not opens:
             i += 1
             continue
@@ -854,10 +882,7 @@ def _ref_single(text, regions):
 def _ref_whole_text(text, regions):
     # The first opener anywhere, and the last closer after it that is a
     # single mark, or another mark outside the standard reading's regions.
-    def inside(i):
-        return any(rs <= i < re for rs, re in regions)
-
-    opens = [i for i in range(len(text)) if _ref_opener(text, i) and (not inside(i) or _ref_starts(text, i))]
+    opens = [i for i in range(len(text)) if _ref_opener(text, i)]
     if not opens:
         return None
     closes = [
@@ -929,8 +954,12 @@ def _reference_words(text):
     spans, regions = _ref_delimited(text)
     raw = _ref_whole_text(text, regions)
     if raw is not None:
-        outside = [span for (_, span), (rs, re) in zip(spans, regions) if re <= raw[0] or rs > raw[1]]
-        best = max(best, _ref_word_count(text[raw[0] + 1:raw[1]]) + sum(_ref_word_count(span) for span in outside))
+        # Every character inside the span or a standard quotation, the rest
+        # blanked, counted as one text.
+        kept = set(range(raw[0] + 1, raw[1]))
+        for rs, span in spans:
+            kept |= set(range(rs + 1, rs + 1 + len(span)))
+        best = max(best, _ref_word_count("".join(text[j] if j in kept else " " for j in range(len(text)))))
     return max(best, _ref_one_pass(text), _ref_one_pass(text, _ref_main_opener), _main_quoted_words(text))
 
 
@@ -1034,6 +1063,7 @@ def test_quoted_words_never_count_below_main(text):
           suppress_health_check=[HealthCheck.function_scoped_fixture])
 @example(text="'one' and\u00a0'two three four'")
 @example(text="\u2019a[\"'\"\u00b9")
+@example(text="\u00aba b \u20191\u00bb \u00ab 'c\u00bb d'")
 @given(text=quote_texts)
 def test_quoted_words_monotonic_when_openers_widen(monkeypatch, text):
     # Narrowing single openers to main's rule (an ASCII prefix before a
@@ -1091,9 +1121,13 @@ def single_quotation_in_text(draw):
     after = draw(st.lists(st.sampled_from(QUOTE_TOKENS + PROSE_TOKENS), max_size=10))
     opener = draw(st.sampled_from(sorted(REF_SINGLE_OPENERS)))
     closer = draw(st.sampled_from(["'", "\u2019", "\uff07", "\u2032", "\u275c", "\u2018"]))
-    body = " ".join(inside)
+    # The mark right before the opener (anything but a letter or digit) and
+    # the start of its body vary too (#1867 round 5).
+    prefix = draw(st.sampled_from([" ", " ", ":", "(", "\u2014", "/", "\u00a0", "\u201a", "\u201ax ", " \u201ax "]))
+    lead = draw(st.sampled_from(["", " ", "\u2014", "\u2026", "("]))
+    body = lead + " ".join(inside)
     words = _ref_word_count(body)
-    return " ".join(["".join(before), opener + body + closer, "".join(after)]), words
+    return "".join(before) + prefix + opener + body + closer + " " + "".join(after), words
 
 
 @settings(max_examples=3000, deadline=None)
@@ -1102,6 +1136,10 @@ def single_quotation_in_text(draw):
 @example(case=("It wrote 'the workers' '90s policy is to deny every claim'", 9))
 @example(case=("It wrote 'one \u201ctwo three\u201d four'", 4))
 @example(case=("\u201a\u201d 'claimants\u2019 the' ", 2))
+@example(case=("\u201ax \u2019 one two three four five\u2019", 5))
+@example(case=("\u201ax \u2019\u2014one two three four five\u2019", 5))
+@example(case=("\u201ax :\u2019one two three four five\u2019", 5))
+@example(case=("\u201ax:'one workers\u2019 two three four five'", 6))
 @given(case=single_quotation_in_text())
 def test_a_single_quotation_counts_at_least_its_words(case):
     # The invariant (#1867 round 4): for any text where a quotation of N words
@@ -1122,7 +1160,8 @@ def double_quotations_in_prose(draw):
     pieces, quoted = [], 0
     for _ in range(draw(st.integers(0, 8))):
         if draw(st.booleans()):
-            opener = draw(st.sampled_from(sorted(REF_PAIRS)))
+            # Every pair but \u201a\u2026\u2018 and \u201a\u2026\u2019, whose closers are single marks.
+            opener = draw(st.sampled_from(sorted(set(REF_PAIRS) - {"\u201a"})))
             # Its words hold none of its own closing marks (‚claimants’ …’
             # can't be told apart), and no single mark starts a word.
             own = [word for word in QUOTED_WORDS if not any(mark in word for mark in REF_PAIRS[opener])]
@@ -1130,7 +1169,7 @@ def double_quotations_in_prose(draw):
             # A space after an opening mark that also closes (\u201d \u00bb \u203a \u2033) reads
             # it as a closer, as in French \u00ab \u2026 \u00bb spacing, so those open with none.
             inside = draw(st.sampled_from([""] if opener in REF_CONTEXT else ["", " ", "\u00a0"])), draw(st.sampled_from(["", " "]))
-            after = draw(st.sampled_from(["", ".", ",", ";", ":", "!", "?", ")", "\u2014"]))
+            after = draw(st.sampled_from(["", ".", ",", ";", ":", "!", "?", ")", "\u2014", "[1]", "(2026)", "[1]."]))
             before = draw(st.sampled_from(["", "("]))
             pieces.append(before + opener + inside[0] + " ".join(words) + inside[1] + draw(st.sampled_from(REF_PAIRS[opener])) + after)
             quoted += len(words)
@@ -1145,6 +1184,9 @@ def double_quotations_in_prose(draw):
 @example(case=('He said "workers\'", then denied every claim.', 1))
 @example(case=('It wrote " one" today.', 1))
 @example(case=('It wrote "one two three four " today.', 4))
+@example(case=('It wrote "one two three four\u2014"[1] today.', 4))
+@example(case=('It wrote "one two three workers\'"[1] today.', 4))
+@example(case=('It wrote "one two three four "[1] today.', 4))
 @given(case=double_quotations_in_prose())
 def test_double_quotations_are_counted_exactly(case):
     # The invariant (#1867 round 4): double quotations in plain prose are
@@ -1155,6 +1197,58 @@ def test_double_quotations_are_counted_exactly(case):
         assert sum(sc._words(span) for _, span in spans) == quoted, (reading, text)
     # Overall too, unless main's floor counts more: main read \u201c as an
     # opener, so after a German \u201e\u2026\u201c it quoted the rest.
+    assert sc.quoted_words(text) == max(quoted, _main_quoted_words(text)), text
+
+
+def _pair_marks(opener):
+    return set(opener) | set(REF_PAIRS[opener])
+
+
+@st.composite
+def nested_double_quotations_in_prose(draw):
+    """Plain prose with double quotations in it, some holding another
+    quotation (in a different pair, or in the same pair with no bracket at
+    the inner quotation's start), citations after closers; and how many
+    words they hold in all. Neither documented limit's shape is drawn."""
+
+    openers = sorted(set(REF_PAIRS) - {"\u201a"})
+    pieces, quoted = [], 0
+    for _ in range(draw(st.integers(1, 5))):
+        if draw(st.booleans()):
+            outer = draw(st.sampled_from(openers))
+            same = draw(st.booleans())
+            others = [o for o in openers if not _pair_marks(o) & _pair_marks(outer)]
+            inner = outer if same or not others else draw(st.sampled_from(others))
+            own = [w for w in QUOTED_WORDS if not any(m in w for m in _pair_marks(outer) | _pair_marks(inner))]
+            head = draw(st.lists(st.sampled_from(own), min_size=1, max_size=3))
+            # The inner quotation starts with a plain word, never a bracket.
+            middle = [draw(st.sampled_from(PROSE_WORDS))] + draw(st.lists(st.sampled_from(own), max_size=2))
+            tail = draw(st.lists(st.sampled_from(own), max_size=2))
+            inner_close = draw(st.sampled_from(REF_PAIRS[inner])) + draw(st.sampled_from(["", ",", "[1]"]))
+            body = " ".join(head) + " " + inner + " ".join(middle) + inner_close + (" " + " ".join(tail) if tail else "")
+            after = draw(st.sampled_from(["", ".", ",", "[1]", "(2026)"]))
+            pieces.append(outer + body + draw(st.sampled_from(REF_PAIRS[outer])) + after)
+            quoted += len(head) + len(middle) + len(tail)
+        else:
+            pieces.append(draw(st.sampled_from(PROSE_TOKENS)))
+    return " ".join(pieces) + " today.", quoted
+
+
+@settings(max_examples=3000, deadline=None)
+@example(case=('It wrote "one "two" three" today.', 3))
+@example(case=("It wrote \u201eone \u201ctwo\u201d three\u201c today.", 3))
+@example(case=('It wrote "one "two"[1] three"[2] today.', 3))
+@given(case=nested_double_quotations_in_prose())
+def test_nested_double_quotations_count_in_full(case):
+    # The eng hub's round-5 ruling: outside the two documented limits,
+    # quotations nested in a different pair, or in the same pair without a
+    # bracket, count in full. The nested reading counts them exactly, no
+    # reading counts more, and the overall count is exact unless main's
+    # floor counts more.
+    text, quoted = case
+    counts = {reading: sum(sc._words(span) for _, span in sc._delimited(text, reading)[0]) for reading in sc._DELIMITED_READINGS}
+    assert counts["nested"] == quoted, (counts, text)
+    assert max(counts.values()) == quoted, (counts, text)
     assert sc.quoted_words(text) == max(quoted, _main_quoted_words(text)), text
 
 
