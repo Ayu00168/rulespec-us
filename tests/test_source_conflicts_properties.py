@@ -776,20 +776,23 @@ def _ref_closer_context(text, i):
     return i + 1 == len(text) or not _ref_word_char(text[i + 1])
 
 
-def _ref_word_end(text, i):
-    return i > 0 and not text[i - 1].isspace() and _ref_closer_context(text, i)
-
-
 def _ref_word_count(span):
     return len([token for token in span.split() if any(char.isalnum() for char in token)])
 
 
-def _ref_strict_opens(text, i):
+def _ref_context_opens(text, i):
     return i + 1 < len(text) and not text[i + 1].isspace() and _ref_wide(text, i)
 
 
+def _ref_starts(text, i):
+    # Reads as an opener: an opener prefix, then a letter, a digit, an opening
+    # bracket or an opening quotation mark.
+    return (i + 1 < len(text) and _ref_wide(text, i)
+            and (_ref_word_char(text[i + 1]) or text[i + 1] in REF_MARKS or unicodedata.category(text[i + 1]) in ("Ps", "Pi")))
+
+
 def _ref_opens_delimited(text, i):
-    return text[i] in REF_PAIRS and (text[i] not in REF_CONTEXT or _ref_strict_opens(text, i))
+    return text[i] in REF_PAIRS and (text[i] not in REF_CONTEXT or _ref_context_opens(text, i))
 
 
 def _ref_close(text, i, reading):
@@ -798,7 +801,7 @@ def _ref_close(text, i, reading):
         stack = [mark]
         for j in range(i + 1, len(text)):
             opens = _ref_opens_delimited(text, j)
-            if text[j] in REF_PAIRS[stack[-1]] and not (opens and _ref_strict_opens(text, j)):
+            if text[j] in REF_PAIRS[stack[-1]] and not (opens and _ref_starts(text, j)):
                 stack.pop()
                 if not stack:
                     return j
@@ -806,7 +809,7 @@ def _ref_close(text, i, reading):
                 stack.append(text[j])
         return len(text)
     for j in range(i + 1, len(text)):
-        if text[j] in REF_PAIRS[mark] and (reading != "strict" or _ref_word_end(text, j)):
+        if text[j] in REF_PAIRS[mark] and (reading != "strict" or not _ref_starts(text, j)):
             return j
     return len(text)
 
@@ -814,7 +817,7 @@ def _ref_close(text, i, reading):
 def _ref_delimited(text, reading="standard"):
     spans, regions, i = [], [], 0
     while i < len(text):
-        opens = (text[i] in REF_PAIRS and _ref_strict_opens(text, i)) if reading == "strict" else _ref_opens_delimited(text, i)
+        opens = (text[i] in REF_PAIRS and i + 1 < len(text) and _ref_wide(text, i)) if reading == "strict" else _ref_opens_delimited(text, i)
         if not opens:
             i += 1
             continue
@@ -851,7 +854,10 @@ def _ref_single(text, regions):
 def _ref_whole_text(text, regions):
     # The first opener anywhere, and the last closer after it that is a
     # single mark, or another mark outside the standard reading's regions.
-    opens = [i for i in range(len(text)) if _ref_opener(text, i)]
+    def inside(i):
+        return any(rs <= i < re for rs, re in regions)
+
+    opens = [i for i in range(len(text)) if _ref_opener(text, i) and (not inside(i) or _ref_starts(text, i))]
     if not opens:
         return None
     closes = [
@@ -1052,6 +1058,10 @@ PROSE_TOKENS = PROSE_WORDS + [
     "won't", "agency's", "it\u2019s", "don\u2019t", "6'7", "the workers'", "claimants\u2019", "6\u201d", "6\u2033", "note\u00b9", "goin'",
     "o'clock", "1990s",
 ]
+# A double quotation's words: plain, or ending in punctuation, a dash, a
+# possessive or a dropped letter, or holding an apostrophe; none opens a
+# single quotation.
+QUOTED_WORDS = PROSE_WORDS + ["wait\u2014", "workers'", "claimants\u2019", "goin'", "it's", "6'7", "no.", "yes,", "(see)", "x\u2014y", "end?"]
 # Apostrophe contexts that a single quotation may contain: possessives,
 # elisions, elided years, dropped letters, contractions, and nested double and
 # single quotations.
@@ -1103,22 +1113,38 @@ def test_a_single_quotation_counts_at_least_its_words(case):
 
 @st.composite
 def double_quotations_in_prose(draw):
-    """Plain prose with closed double quotations of plain words in it, none
-    nested; and how many words they hold."""
+    """Plain prose with closed double quotations in it, none nested, and how
+    many words they hold. A quotation's words may end in punctuation, a
+    dash, a possessive or a dropped letter, it may have a space inside either
+    mark (except after a mark that also closes), and punctuation may follow
+    its closer (#1867 round 4)."""
 
     pieces, quoted = [], 0
     for _ in range(draw(st.integers(0, 8))):
         if draw(st.booleans()):
-            words = draw(st.lists(st.sampled_from(PROSE_WORDS), min_size=1, max_size=5))
             opener = draw(st.sampled_from(sorted(REF_PAIRS)))
-            pieces.append(opener + " ".join(words) + draw(st.sampled_from(REF_PAIRS[opener])))
+            # Its words hold none of its own closing marks (‚claimants’ …’
+            # can't be told apart), and no single mark starts a word.
+            own = [word for word in QUOTED_WORDS if not any(mark in word for mark in REF_PAIRS[opener])]
+            words = draw(st.lists(st.sampled_from(own), min_size=1, max_size=5))
+            # A space after an opening mark that also closes (\u201d \u00bb \u203a \u2033) reads
+            # it as a closer, as in French \u00ab \u2026 \u00bb spacing, so those open with none.
+            inside = draw(st.sampled_from([""] if opener in REF_CONTEXT else ["", " ", "\u00a0"])), draw(st.sampled_from(["", " "]))
+            after = draw(st.sampled_from(["", ".", ",", ";", ":", "!", "?", ")", "\u2014"]))
+            before = draw(st.sampled_from(["", "("]))
+            pieces.append(before + opener + inside[0] + " ".join(words) + inside[1] + draw(st.sampled_from(REF_PAIRS[opener])) + after)
             quoted += len(words)
         else:
             pieces.append(draw(st.sampled_from(PROSE_TOKENS)))
     return " ".join(pieces) + " today.", quoted
 
 
-@settings(max_examples=2000, deadline=None)
+@settings(max_examples=3000, deadline=None)
+@example(case=('"a\u2014". b', 1))
+@example(case=('He said "wait\u2014". Then he went away.', 1))
+@example(case=('He said "workers\'", then denied every claim.', 1))
+@example(case=('It wrote " one" today.', 1))
+@example(case=('It wrote "one two three four " today.', 4))
 @given(case=double_quotations_in_prose())
 def test_double_quotations_are_counted_exactly(case):
     # The invariant (#1867 round 4): double quotations in plain prose are

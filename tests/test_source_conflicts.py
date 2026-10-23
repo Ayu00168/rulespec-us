@@ -1233,6 +1233,21 @@ def test_quoted_words(text, words):
         # inside it (the one-pass reading).
         ("\u201aa 'claimants\u2019 the the\u201d ", 3, False),
         ("It wrote 'one two \u201cthree four\u201d", 4, False),
+        # #1867 round 4 (P1): a closing double mark after a dash or an
+        # apostrophe, before punctuation, closes; a space inside either mark
+        # is fine. Each reading counts these exactly.
+        ('"a\u2014". b', 1, False),
+        ('He said "wait\u2014". Then he went away.', 1, False),
+        ('He said "workers\'", then denied every claim.', 1, False),
+        ('It wrote " one" today.', 1, False),
+        ('It wrote "one two three four " today.', 4, False),
+        # A mark before another quotation mark starts a quotation, so straight
+        # marks nest at the start too; and inside a quotation, a single mark
+        # that doesn't start one (the spaced closer of \u201athe \u2018) opens no
+        # whole-text span (mutation round 6).
+        ('It wrote ""one" two three four five"', 5, True),
+        ('It wrote " ""one two" three four five"', 5, True),
+        ("\u201athe \u2018 the the the workers' today.", 1, False),
         # Found by fuzzing: only the standard delimited reading counts both words.
         ("'a\"b\u00ab\"\u00bb", 2, False),
         # Known limit (#1867 round 4): a quotation whose opening mark directly
@@ -1482,7 +1497,7 @@ def test_quote_scan_work_is_linear(monkeypatch, family):
     # pattern search; doubling the text must not much more than double it,
     # and it stays under a fixed multiple of the length.
     counter = {"search": 0}
-    for name in ("_opens_single", "_closes_single", "_opens_delimited", "_opens_strictly", "_closes_at_word_end"):
+    for name in ("_opens_single", "_closes_single", "_opens_delimited", "_opens_in_context", "_starts_a_quotation", "_opens_strict"):
         real = getattr(sc, name)
         monkeypatch.setattr(sc, name, lambda *args, _real=real, _name=name: counter.__setitem__(_name, counter.get(_name, 0) + 1) or _real(*args))
     monkeypatch.setattr(sc, "_DELIMITER_MARK", _CountedSearch(sc._DELIMITER_MARK, counter))

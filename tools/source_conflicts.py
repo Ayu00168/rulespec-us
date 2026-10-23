@@ -268,39 +268,53 @@ def _next_after(positions: Sequence[int], index: int) -> int | None:
     return positions[following] if following < len(positions) else None
 
 
-def _opens_strictly(text: str, index: int) -> bool:
+def _opens_in_context(text: str, index: int) -> bool:
     """A mark stands where an opener would: after an opener prefix and before
     a non-space."""
 
     return index + 1 < len(text) and not text[index + 1].isspace() and _opener_prefix(text, index)
 
 
+def _starts_a_quotation(text: str, index: int) -> bool:
+    """A mark that can both close and open reads as an opener: after an
+    opener prefix and before a letter, a digit, an opening bracket or a
+    quotation mark. So the inner marks in "one "two" three" and ""one" two"
+    open, while the closers in "wait—". and "workers'", close."""
+
+    if index + 1 >= len(text) or not _opener_prefix(text, index):
+        return False
+    after = text[index + 1]
+    return _word_char(after) or after in _QUOTATION_MARKS or unicodedata.category(after) in ("Ps", "Pi")
+
+
 def _opens_delimited(text: str, index: int) -> bool:
     """A delimited opener opens anywhere, except a mark that also closes
     another pair (_CONTEXT_OPENERS): it opens only where an opener would."""
 
-    return text[index] not in _CONTEXT_OPENERS or _opens_strictly(text, index)
+    return text[index] not in _CONTEXT_OPENERS or _opens_in_context(text, index)
 
 
-def _closes_at_word_end(text: str, index: int) -> bool:
-    """A mark ends a word: it follows a non-space and precedes no letter or
-    decimal digit."""
+def _opens_strict(text: str, index: int) -> bool:
+    """The strict reading's opener: a delimiter mark after an opener prefix,
+    so the inch mark in 6" opens nothing."""
 
-    return index > 0 and not text[index - 1].isspace() and _closes_single(text, index)
+    return index + 1 < len(text) and _opener_prefix(text, index)
 
 
 def _delimited_close(text: str, index: int, reading: str) -> int:
     """Where the delimited quotation opened at index closes, or the end of the
     text when it doesn't: at its first closing mark (standard); at its first
-    closing mark that ends a word (strict); or where the marks inside it,
-    nesting like brackets, close it (nested). Each search resumes after the
-    mark it passes, so it is linear in the region."""
+    closing mark that doesn't start a quotation itself (strict,
+    _starts_a_quotation, so a stray ‚ before ’one …’ closes at five’, not at
+    the opener); or where the marks inside it, nesting like brackets, close
+    it (nested). Each search resumes after the mark it passes, so it is
+    linear in the region."""
 
     if reading == "nested":
         return _nested_close(text, index)
     pattern = _DELIMITER_CLOSE[text[index]]
     found = pattern.search(text, index + 1)
-    while reading == "strict" and found and not _closes_at_word_end(text, found.start()):
+    while reading == "strict" and found and _starts_a_quotation(text, found.start()):
         found = pattern.search(text, found.start() + 1)
     return found.start() if found else len(text)
 
@@ -308,9 +322,9 @@ def _delimited_close(text: str, index: int, reading: str) -> int:
 def _nested_close(text: str, index: int) -> int:
     """The nested reading's close: delimited marks nest like brackets, across
     pairs (“…‘…’…”, „…“…”…“, "…"…"…"). A mark that can close the innermost
-    open quotation closes it, unless it stands where an opener would
-    (_opens_strictly) and can open one, when it opens a quotation inside; any
-    other opener inside opens one too."""
+    open quotation closes it, unless it can open one and reads as an opener
+    (_starts_a_quotation), when it opens a quotation inside; any other opener
+    inside opens one too."""
 
     stack = [text[index]]
     position = index + 1
@@ -318,7 +332,7 @@ def _nested_close(text: str, index: int) -> int:
         position = found.start()
         mark = found.group()
         opens = mark in _DELIMITERS and _opens_delimited(text, position)
-        if mark in _DELIMITERS[stack[-1]] and not (opens and _opens_strictly(text, position)):
+        if mark in _DELIMITERS[stack[-1]] and not (opens and _starts_a_quotation(text, position)):
             stack.pop()
             if not stack:
                 return position
@@ -334,9 +348,10 @@ def _delimited(text: str, reading: str = "standard") -> tuple[list[tuple[int, st
 
     Three readings (_delimited_close): standard; strict, for marks that aren't
     quotation marks where they stand (an inch mark, 6"; a low mark used as a
-    comma), where a mark opens only where an opener would and closes only at
-    a word's end, so 6" and "one two three four five" quotes five words; and
-    nested, for a quotation inside a quotation (_nested_close)."""
+    comma), where a mark opens only after an opener prefix and closes at the
+    first closing mark that doesn't start a quotation itself, so 6" and "one
+    two three four five" quotes five words; and nested, for a quotation
+    inside a quotation (_nested_close)."""
 
     spans: list[tuple[int, str]] = []
     regions: list[tuple[int, int]] = []
@@ -344,7 +359,7 @@ def _delimited(text: str, reading: str = "standard") -> tuple[list[tuple[int, st
     while index < len(text):
         mark = text[index]
         if mark in _DELIMITERS and (
-            _opens_delimited(text, index) if reading != "strict" else _opens_strictly(text, index)
+            _opens_delimited(text, index) if reading != "strict" else _opens_strict(text, index)
         ):
             close = _delimited_close(text, index, reading)
             spans.append((index, text[index + 1 : close]))
@@ -385,11 +400,13 @@ def _single_span(text: str, regions: list[tuple[int, int]]) -> tuple[int, int] |
 
 def _whole_text_span(text: str, regions: list[tuple[int, int]]) -> tuple[int, int] | None:
     """The single span over the whole text: from the first single mark that
-    may open, anywhere, to the last mark after it that may close, where a
-    closer is a single mark anywhere or another quotation mark outside
-    `regions` (the standard reading's quotations, so the closer of a double
-    quotation after it, as in 'approves it' and "the waiver", ends nothing).
-    A stray delimiter can't swallow a single quotation's opener (‚x 'one …')."""
+    may open, to the last mark after it that may close. Inside `regions` (the
+    standard reading's quotations) a single mark opens only where it starts
+    a quotation (_starts_a_quotation), so the closer of ‚the ‘ opens nothing;
+    a closer is a single mark anywhere or another quotation mark outside
+    them, so the closer of a double quotation after it, as in 'approves it'
+    and "the waiver", ends nothing. A stray delimiter can't swallow a single
+    quotation's opener (‚x 'one …')."""
 
     first = last = None
     region_index = 0
@@ -400,7 +417,7 @@ def _whole_text_span(text: str, regions: list[tuple[int, int]]) -> tuple[int, in
             region_index += 1
         inside = region_index < len(regions) and regions[region_index][0] <= index
         if first is None:
-            if mark in _SINGLE_OPENERS and _opens_single(text, index):
+            if mark in _SINGLE_OPENERS and _opens_single(text, index) and (not inside or _starts_a_quotation(text, index)):
                 first = index
         elif (mark in _SINGLE_MARKS or not inside) and _closes_single(text, index):
             last = index
