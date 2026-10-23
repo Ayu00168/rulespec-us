@@ -401,6 +401,42 @@ def test_consumer_adopts_its_own_reading(tmp_path):
     assert any("implementations[0].basis must be a non-blank string" in issue for issue in check(ctx, blank_basis))
 
 
+@pytest.mark.parametrize("principle", sc.PRINCIPLES)
+def test_a_consumer_ruling_may_name_its_principle(tmp_path, principle):
+    ctx = make_repo(tmp_path)
+    value = entry()
+    implementation = value["implementations"][0]
+    implementation["adopts"] = "every-later-month"
+    implementation["basis"] = "This consumer follows the statute when it conflicts with an agency manual."
+    implementation["ruling"] = {
+        "by": "PolicyEngine", "date": "2026-10-20", "record": "https://github.com/x/y/pull/2", "principle": principle,
+    }
+    assert check(ctx, value) == []
+    rows, _ = sc.aggregate({REPO: {"version": 1, "entries": [value]}})
+    assert rows[0]["implementations"][0]["principle"] == principle
+
+
+@pytest.mark.parametrize("principle", ["statute", "Statute-First", "", None, 7, ["statute-first"], {"a": 1}])
+def test_an_unknown_principle_fails(tmp_path, principle):
+    ctx = make_repo(tmp_path)
+    value = entry()
+    implementation = value["implementations"][0]
+    implementation["basis"] = "Why."
+    implementation["ruling"] = {"by": "PolicyEngine", "date": "2026-10-20", "record": "https://github.com/x/y/pull/2", "principle": principle}
+    assert any("implementations[0].ruling.principle must be one of statute-first, regulations-are-law" in issue
+               for issue in check(ctx, value))
+
+
+def test_principle_is_register_only(tmp_path):
+    # The entry's own ruling is part of the interpretation core a module
+    # carries unchanged, so it takes no principle; only a consumer's does.
+    value = entry(status="ruled", ruling={"by": "Axiom Foundation", "date": "2026-10-12",
+                                          "record": "https://github.com/x/y/pull/1", "principle": "statute-first"})
+    assert any("unknown key `principle`" in issue for issue in check(make_repo(tmp_path), value))
+    rows, _ = sc.aggregate({REPO: {"version": 1, "entries": [entry()]}})
+    assert rows[0]["implementations"][0]["principle"] is None
+
+
 def test_every_followed_reading_is_pinned(tmp_path):
     ctx = make_repo(tmp_path)
     bad = entry()
