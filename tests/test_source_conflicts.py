@@ -15,6 +15,7 @@ import ast
 import copy
 import hashlib
 import importlib.util
+import math
 import sys
 from pathlib import Path
 
@@ -1034,7 +1035,7 @@ UNPUBLISHED = {"kind": "agency-practice", "description": "MN DHS correspondence 
         ({"description": "Since the '90s the clerks in each county office have handled the clerks' files"}, None),
         ({"description": "The agency's reply was brief, said the clerks' office"}, None),
         ({"description": 'An unclosed "quotation runs to the end of the text'}, "quotes more than 4 words in all"),
-        # A mark after a space closes nothing: the span runs on to the real closer.
+        # A trailing-space mark is now eligible; the last closer still wins.
         ({"description": "It wrote 'one two ' three four five six seven'"}, "quotes more than 4 words in all"),
         ({"description": "Reply from someone@example.gov"}, "contains `@`"),
         ({"kind": "phone"}, "kind must be one of"),
@@ -1064,8 +1065,12 @@ def test_unpublished_sources_shape(tmp_path):
         # #1825 round-3 review (P3): a single quote opens after any Unicode
         # whitespace, not only an ASCII space.
         *[(f"It wrote:{space}'one two three'", ["one two three"]) for space in ("\u00a0", "\u202f", "\u2009", "\u3000", "\u2003", "\t", "\n")],
-        # After an opening bracket, a dash, a slash or an opening quotation mark.
-        *[(f"x{before}'one two'", ["one two"]) for before in ("(", "[", "{", "\u2014", "\u2013", "-", "/", "\u00ab", "\u300c")],
+        # After an opening bracket, a dash, a slash or an opening quotation
+        # mark that pass 1 does not consume (U+201B, category Pi).
+        *[(f"x{before}'one two'", ["one two"]) for before in ("(", "[", "{", "\u2014", "\u2013", "-", "/", "\u201b")],
+        # These former opener-prefix tests now start unclosed pass-1 regions;
+        # their inner single marks are literal text, consumed in pass 1.
+        *[(f"x{before}'one two'", ["'one two'"]) for before in ("\u00ab", "\u300c")],
         # The text's first character.
         ("'one two three' said the agency.", ["one two three"]),
         ("\u2018one two\u2019 it said", ["one two"]),
@@ -1082,9 +1087,9 @@ def test_unpublished_sources_shape(tmp_path):
         ("'", []),
         ("x '", []),
         ("'a b'", ["a b"]),
-        # Each opener takes the first closer after it.
+        # Each opener takes the last closer before the next opener.
         ("'one' and 'two'", ["one", "two"]),
-        # A closer follows a non-space and precedes no letter or digit.
+        # A closer precedes no letter or digit, including after whitespace.
         ("the 'one two 6'7 tall", []),
         ("the 'one two's end", []),
         ("the 'one two'.", ["one two"]),
@@ -1105,11 +1110,14 @@ def test_quoted_spans(text, spans):
     assert sc.quoted_spans(text) == spans
 
 
-def test_a_mark_at_text_start_closes_nothing():
-    # No opener can precede it, so quoted_spans never pairs it; the helper
-    # still must not read the text's last character as the one before it.
-    assert sc._closes_single("' x", 0) is False
+def test_a_single_closer_depends_only_on_what_follows_it():
+    # The relaxed rule no longer requires a preceding non-space character:
+    # even a mark at text start is eligible, though no opener can precede it.
+    assert sc._closes_single("' x", 0) is True
     assert sc._closes_single("x' y", 1) is True
+    assert sc._closes_single("x '", 2) is True
+    assert sc._closes_single("'x", 0) is False
+    assert sc._closes_single("'7", 0) is False
 
 
 def test_quoted_spans_finds_each_closer_once(monkeypatch):
@@ -1119,11 +1127,169 @@ def test_quoted_spans_finds_each_closer_once(monkeypatch):
     real = sc._closes_single
     monkeypatch.setattr(sc, "_closes_single", lambda text, index: calls.append(index) or real(text, index))
     text = "'a " * 20_000 + "end'"
-    assert sc.quoted_spans(text) == [text[1:-1]]  # the first opener takes the one closer
+    # Every opener now stops at the next opener. Only the last one has a
+    # closer in its interval, so the old whole-text span becomes this suffix.
+    assert sc.quoted_spans(text) == ["a end"]
     assert len(calls) == text.count("'")
     calls.clear()
     assert sc.quoted_spans("'a " * 20_000) == []
     assert len(calls) == 20_000
+
+
+@pytest.mark.parametrize(
+    ("opening", "closing"),
+    [
+        ('"', '"'), ("“", "”"), ("„", "“"), ("‚", "‘"),
+        ("«", "»"), ("‹", "›"), ("「", "」"), ("『", "』"), ("＂", "＂"),
+    ],
+)
+@pytest.mark.parametrize("closed", [True, False])
+@pytest.mark.parametrize("include_other_closer", [True, False])
+def test_delimited_quotations(tmp_path, opening, closing, closed, include_other_closer):
+    # Another pair's closer remains literal inside this delimited region,
+    # including when this pair's own closer is missing entirely.
+    other_closer = "”" if closing == '"' else '"'
+    words = "one two three four five" + (f" {other_closer} six" if include_other_closer else "")
+    description = "It wrote " + opening + words + (closing if closed else "")
+    assert sc.quoted_spans(description) == [words]
+    assert sc.quoted_words(description) == len(words.split())
+    issues = check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))
+    assert any("quotes more than 4 words in all" in issue for issue in issues)
+
+
+@pytest.mark.parametrize("opening", ["'", "‘", "＇"])
+@pytest.mark.parametrize("closing", ["'", "’", "＇"])
+def test_single_quote_combinations(tmp_path, opening, closing):
+    words = "one two three four five"
+    description = f"It wrote {opening}{words}{closing}"
+    assert sc.quoted_spans(description) == [words]
+    assert any(
+        "quotes more than 4 words in all" in issue
+        for issue in check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))
+    )
+
+
+@pytest.mark.parametrize(
+    ("description", "spans", "count", "refused"),
+    [
+        # P1: pass 1 preserves the nine-word double quotation even when an
+        # outer opener follows a newly recognised no-break-space prefix.
+        ("It wrote:\u00a0'about \"the workers' policy is to deny every such claim\"'",
+         ["about  ", "the workers' policy is to deny every such claim"], 10, True),
+        # P2: trailing whitespace no longer disables a closing single mark.
+        ("It wrote 'one two three four five '", ["one two three four five "], 5, True),
+        # P2: the last closer includes the plural possessive in the span.
+        ("It wrote 'the workers' policy is to deny every such claim'",
+         ["the workers' policy is to deny every such claim"], 9, True),
+        ("It wrote ‘the workers’ policy is to deny every such claim’",
+         ["the workers’ policy is to deny every such claim"], 9, True),
+        # These explicitly documented limits remain for manual review.
+        ("It wrote ‘one two three four five”", [], 0, False),
+        ("It wrote ′one two three four five′", [], 0, False),
+        ("It wrote ″one two three four five″", [], 0, False),
+    ],
+)
+def test_publication_quote_review_regressions(tmp_path, description, spans, count, refused):
+    assert sc.quoted_spans(description) == spans
+    assert sc.quoted_words(description) == count
+    issues = check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))
+    assert any("quotes more than 4 words in all" in issue for issue in issues) is refused
+
+
+@pytest.mark.parametrize(
+    ("description", "spans"),
+    [
+        # A pass-1 single mark cannot split the outer span as an opener.
+        ("'outside \"word 'inside\" tail'", ["outside   tail", "word 'inside"]),
+        # A pass-1 single mark cannot truncate the outer span as a closer.
+        ("'outside \"word'\" tail'", ["outside   tail", "word'"]),
+        # Multiple delimited regions are removed separately; their contents
+        # are still returned once, in opening-mark order.
+        ("'one \"two\" three «four» five'", ["one   three   five", "two", "four"]),
+        # Eligible-looking single marks within pass 1 are never scanned.
+        ("\"one 'two' three\"", ["one 'two' three"]),
+        # An unclosed delimited region consumes the putative outer closer.
+        ("'one \"two' three", ["two' three"]),
+    ],
+)
+def test_single_quotations_do_not_count_delimited_regions_twice(description, spans):
+    assert sc.quoted_spans(description) == spans
+
+
+@pytest.mark.parametrize(
+    ("values", "index", "end", "expected"),
+    [
+        ([], 0, 99, 99), ([0, 2, 4], -1, 99, 0), ([0, 2, 4], 0, 99, 2),
+        ([0, 2, 4], 1, 99, 2), ([0, 2, 4], 2, 99, 4), ([0, 2, 4], 4, 99, 99),
+    ],
+)
+def test_next_opener_bisection_helper_is_exact(values, index, end, expected):
+    assert sc._next_opener(values, index, end) == expected
+
+
+@pytest.mark.parametrize(
+    ("values", "start", "end", "expected"),
+    [
+        ([], 0, 9, None), ([0, 2, 4], -1, 9, 4), ([0, 2, 4], -1, 4, 2),
+        ([0, 2, 4], 0, 4, 2), ([0, 2, 4], 2, 4, None), ([0, 2, 4], 0, 2, None),
+        ([0, 2, 4], 4, 9, None), ([0, 2, 4], -1, 0, None),
+    ],
+)
+def test_last_closer_bisection_helper_is_exact(values, start, end, expected):
+    assert sc._last_closer(values, start, end) == expected
+
+
+class _CountedPositions:
+    def __init__(self, size):
+        self.size = size
+        self.accesses = 0
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, index):
+        self.accesses += 1
+        if not 0 <= index < self.size:
+            raise IndexError(index)
+        return index * 2
+
+
+@pytest.mark.parametrize("index", [-1, 0, 100_000, 199_998, 200_000])
+def test_quote_bisection_helpers_use_logarithmic_accesses(index):
+    # Count sequence accesses so a linear lookup mutant fails deterministically,
+    # even when the scanner classifies each mark only once.
+    size = 100_000
+    bound = 2 * math.ceil(math.log2(size)) + 4
+    positions = _CountedPositions(size)
+    expected = min(size, max(0, index // 2 + 1))
+    assert sc._next_opener(positions, index, 200_001) == (2 * expected if expected < size else 200_001)
+    assert positions.accesses <= bound
+    positions = _CountedPositions(size)
+    expected = min(size - 1, (index - 1) // 2)
+    assert sc._last_closer(positions, -1, index) == (2 * expected if expected >= 0 else None)
+    assert positions.accesses <= bound
+
+
+def test_quoted_spans_uses_bounded_lookups_per_opener(monkeypatch):
+    # Review finding 5: cached closers alone did not prevent quadratic lookup
+    # work on this family. Both lookups must stay bounded per eligible opener.
+    size = 20_000
+    text = "a' " * size + "'a " * size
+    calls = {"next": 0, "last": 0}
+    next_opener, last_closer = sc._next_opener, sc._last_closer
+
+    def counted_next(*args):
+        calls["next"] += 1
+        return next_opener(*args)
+
+    def counted_last(*args):
+        calls["last"] += 1
+        return last_closer(*args)
+
+    monkeypatch.setattr(sc, "_next_opener", counted_next)
+    monkeypatch.setattr(sc, "_last_closer", counted_last)
+    assert sc.quoted_spans(text) == []
+    assert calls == {"next": size, "last": size}
 
 
 # ---------------------------------------------------------------------------

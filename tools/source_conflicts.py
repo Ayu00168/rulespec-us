@@ -64,7 +64,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
@@ -156,9 +156,19 @@ RESOLVERS = ("legislation", "agency")
 # a description may hold at most this many words inside quotation marks, in
 # all its quoted spans together (quoted_spans says what a span is).
 MAX_QUOTED_WORDS = 4
-_DOUBLE_CLOSERS = {'"': '"', "\u201c": "\u201d"}
-_SINGLE_OPENERS = ("'", "\u2018")
-_SINGLE_CLOSERS = ("'", "\u2019")
+_DOUBLE_CLOSERS = {
+    '"': '"',
+    "\u201c": "\u201d",
+    "\u201e": "\u201c",
+    "\u201a": "\u2018",
+    "\u00ab": "\u00bb",
+    "\u2039": "\u203a",
+    "\u300c": "\u300d",
+    "\u300e": "\u300f",
+    "\uff02": "\uff02",
+}
+_SINGLE_OPENERS = ("'", "\u2018", "\uff07")
+_SINGLE_CLOSERS = ("'", "\u2019", "\uff07")
 # Unicode categories a single opening mark may directly follow, besides
 # whitespace and a slash: opening brackets (Ps), dashes (Pd) and opening
 # quotation marks (Pi).
@@ -170,10 +180,10 @@ def _opens_single(text: str, index: int) -> bool:
     it starts the text or follows whitespace (any Unicode space, such as a
     no-break space), a slash, an opening bracket, a dash or an opening
     quotation mark. So the apostrophe in "agency's" opens nothing, and neither
-    does the elision in "the '90s". Two limits follow, both documented in
-    tools/README.md: a quotation whose first character is not a letter
-    ('30 days') is not counted, and nor is one that directly follows other
-    punctuation (wrote:'one')."""
+    does the elision in "the '90s". Two limits follow for single quotations,
+    both documented in tools/README.md: a quotation whose first character is
+    not a letter ('30 days') is not counted, and nor is one that directly
+    follows other punctuation (wrote:'one')."""
 
     if index + 1 >= len(text) or not text[index + 1].isalpha():
         return False
@@ -184,49 +194,100 @@ def _opens_single(text: str, index: int) -> bool:
 
 
 def _closes_single(text: str, index: int) -> bool:
-    """A single quotation mark closes a quotation when it follows a non-space
-    and no letter or digit follows it, so the apostrophe in "county's" or
-    "we\u2019ll" closes nothing."""
+    """A single quotation mark closes when no letter or digit follows it.
+    The apostrophe in "county's" or "we\u2019ll" closes nothing, whereas a mark
+    after whitespace may close. An eligible opener cannot also be a closer.
+    """
 
-    return (
-        index > 0
-        and not text[index - 1].isspace()
-        and (index + 1 == len(text) or not text[index + 1].isalnum())
-    )
+    return index + 1 == len(text) or not text[index + 1].isalnum()
+
+
+def _next_opener(openers: Sequence[int], index: int, end: int) -> int:
+    """The first opener strictly after index, or end, with O(log n) lookups."""
+
+    following = bisect.bisect_right(openers, index)
+    return openers[following] if following < len(openers) else end
+
+
+def _last_closer(closers: Sequence[int], start: int, end: int) -> int | None:
+    """The last closer strictly between start and end, with O(log n) lookups."""
+
+    preceding = bisect.bisect_left(closers, end) - 1
+    if preceding >= 0 and closers[preceding] > start:
+        return closers[preceding]
+    return None
 
 
 def quoted_spans(text: str) -> list[str]:
-    """The quoted spans of a text, each opening mark paired with its closing
-    mark. Double quotes (straight or curly) pair with their own closer; an
-    unclosed one quotes the rest of the text, failing closed. Single quotes
-    (straight or curly) open and close only at word edges (_opens_single,
-    _closes_single), so apostrophes and elisions inside a span or a word are
-    neither; an unclosed single quote is read as an apostrophe.
+    """Return quoted spans in opening-mark order, counting nested text once.
 
-    Whether a mark closes depends only on its neighbours, so the closers are
-    found once, and each opener takes the first one after it: the scan is
-    O(n log n) however many openers go unclosed."""
+    Pass 1 consumes delimited quotations, paired only with their own closer:
+    straight doubles ("..."), curly doubles (“...”), German doubles („...“)
+    and singles (‚...‘), guillemets («...» and ‹...›), CJK marks (「...」 and
+    『...』), and fullwidth doubles (＂...＂). An unclosed delimiter quotes the
+    rest of the text, failing closed.
 
-    closers = [position for position, mark in enumerate(text) if mark in _SINGLE_CLOSERS and _closes_single(text, position)]
-    spans: list[str] = []
+    Pass 2 recognises single openers ', ‘ and ＇ and closers ', ’ and ＇,
+    outside pass-1 regions, using _opens_single and _closes_single. An opener
+    takes the last eligible closer before the next eligible opener or text
+    end; without a closer it is an apostrophe. Pass-1 regions within a single
+    span become one space, since their words are already counted in pass 1.
+    Single quotations starting with a non-letter or directly following other
+    punctuation are not recognised. Primes (′, ″) and a single quotation
+    closed by a double mark (‘...”) are left to manual publication review.
+
+    Openers and closers are classified once, then paired with bisection. The
+    complete scan is O(n log n), including strings with many unclosed openers.
+    """
+
+    spans: list[tuple[int, str]] = []
+    regions: list[tuple[int, int]] = []
     index = 0
     while index < len(text):
         mark = text[index]
         if mark in _DOUBLE_CLOSERS:
             close = text.find(_DOUBLE_CLOSERS[mark], index + 1)
             close = len(text) if close == -1 else close
-            spans.append(text[index + 1 : close])
+            spans.append((index, text[index + 1 : close]))
+            regions.append((index, min(close + 1, len(text))))
             index = close + 1
+        else:
+            index += 1
+
+    openers: list[int] = []
+    closers: list[int] = []
+    index = 0
+    region_index = 0
+    while index < len(text):
+        if region_index < len(regions) and index == regions[region_index][0]:
+            index = regions[region_index][1]
+            region_index += 1
             continue
+        mark = text[index]
         if mark in _SINGLE_OPENERS and _opens_single(text, index):
-            following = bisect.bisect_right(closers, index)
-            if following < len(closers):
-                close = closers[following]
-                spans.append(text[index + 1 : close])
-                index = close + 1
-                continue
+            openers.append(index)
+        if mark in _SINGLE_CLOSERS and _closes_single(text, index):
+            closers.append(index)
         index += 1
-    return spans
+
+    region_index = 0
+    for index in openers:
+        following = _next_opener(openers, index, len(text))
+        close = _last_closer(closers, index, following)
+        if close is None:
+            continue
+        while region_index < len(regions) and regions[region_index][1] <= index:
+            region_index += 1
+        pieces: list[str] = []
+        cursor = index + 1
+        while region_index < len(regions) and regions[region_index][0] < close:
+            start, end = regions[region_index]
+            pieces.extend((text[cursor:start], " "))
+            cursor = end
+            region_index += 1
+        pieces.append(text[cursor:close])
+        spans.append((index, "".join(pieces)))
+    return [span for _, span in sorted(spans)]
 
 
 def quoted_words(text: str) -> int:

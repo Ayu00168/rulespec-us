@@ -77,7 +77,7 @@ import pytest
 import yaml
 
 hypothesis = pytest.importorskip("hypothesis")
-from hypothesis import HealthCheck, assume, given, settings, strategies as st  # noqa: E402
+from hypothesis import HealthCheck, assume, example, given, settings, strategies as st  # noqa: E402
 
 TOOL_PATH = Path(__file__).resolve().parent.parent / "tools" / "source_conflicts.py"
 _spec = importlib.util.spec_from_file_location("source_conflicts", TOOL_PATH)
@@ -716,13 +716,34 @@ def test_screen_is_total(source, name):
 
 
 # An alphabet that reaches every branch of the quote scanner: letters, a digit,
-# ASCII and Unicode spaces, both kinds of each quotation mark, opening
-# brackets and dashes, and other punctuation.
-QUOTE_ALPHABET = "ab1 \u00a0\u3000'\u2018\u2019\"\u201c\u201d([-\u2014/:.\u00ab"
+# ASCII and Unicode spaces, every recognised opening and closing mark,
+# brackets and dashes, and other punctuation (plus the unsupported primes).
+QUOTE_ALPHABET = "ab1 \u00a0\u3000'‘’\"“”„‚«»‹›「」『』＂＇([-—/:.′″"
 
 
 def _reference_spans(text):
+    # Deliberately independent of the production constants, predicates and
+    # bisection helpers. Repeated membership and suffix scans are quadratic.
+    pairs = {'"': '"', '“': '”', '„': '“', '‚': '‘', '«': '»',
+             '‹': '›', '「': '」', '『': '』', '＂': '＂'}
+    regions, spans, i = [], [], 0
+    while i < len(text):
+        if text[i] in pairs:
+            end = i + 1
+            while end < len(text) and text[end] != pairs[text[i]]:
+                end += 1
+            spans.append((i, text[i + 1:end]))
+            regions.append((i, min(end + 1, len(text))))
+            i = end + 1
+        else:
+            i += 1
+
+    def outside(i):
+        return not any(start <= i < end for start, end in regions)
+
     def opens(i):
+        if not outside(i) or text[i] not in "'‘＇":
+            return False
         if i + 1 >= len(text) or not text[i + 1].isalpha():
             return False
         if i == 0:
@@ -731,28 +752,33 @@ def _reference_spans(text):
         return before.isspace() or before == "/" or unicodedata.category(before) in ("Ps", "Pd", "Pi")
 
     def closes(i):
-        return i > 0 and not text[i - 1].isspace() and (i + 1 == len(text) or not text[i + 1].isalnum())
+        return (outside(i) and text[i] in "'’＇"
+                and (i + 1 == len(text) or not text[i + 1].isalnum()))
 
-    spans, i = [], 0
+    i = 0
     while i < len(text):
-        if text[i] in "\"\u201c":
-            closer = "\"" if text[i] == "\"" else "\u201d"
-            j = i + 1
-            while j < len(text) and text[j] != closer:
-                j += 1
-            spans.append(text[i + 1 : j])
-            i = j + 1
-            continue
-        if text[i] in "'\u2018" and opens(i):
-            j = i + 1
-            while j < len(text) and not (text[j] in "'\u2019" and closes(j)):
-                j += 1
-            if j < len(text):
-                spans.append(text[i + 1 : j])
-                i = j + 1
+        if opens(i):
+            boundary = i + 1
+            while boundary < len(text) and not opens(boundary):
+                boundary += 1
+            close = None
+            for candidate in range(i + 1, boundary):
+                if closes(candidate):
+                    close = candidate
+            if close is not None:
+                # Each enclosed pass-1 region becomes one space, including
+                # its marks, so no word is counted a second time.
+                pieces, cursor = [], i + 1
+                for start, end in regions:
+                    if i < start < close:
+                        pieces.extend((text[cursor:start], " "))
+                        cursor = end
+                pieces.append(text[cursor:close])
+                spans.append((i, "".join(pieces)))
+                i = close + 1
                 continue
         i += 1
-    return spans
+    return [span for _, span in sorted(spans)]
 
 
 @settings(max_examples=2000, deadline=None)
@@ -762,3 +788,27 @@ def test_quoted_spans_agree_with_a_reference(text):
     assert spans == _reference_spans(text)
     assert sum(len(span) for span in spans) <= len(text)
     assert sc.quoted_words(text) == sum(len(span.split()) for span in spans)
+
+
+@pytest.mark.xfail(
+    strict=True, raises=AssertionError,
+    reason="The specified next-opener boundary can remove previously quoted words when opener prefixes expand.",
+)
+@settings(max_examples=2000, deadline=None,
+          suppress_health_check=[HealthCheck.function_scoped_fixture])
+@example(text="'one' and\u00a0'two three four'")
+@given(text=st.text(alphabet=QUOTE_ALPHABET, max_size=60))
+def test_quoted_words_monotonic_when_opener_prefixes_expand(monkeypatch, text):
+    # This requested property is false for the author's specified pairing:
+    # the explicit example counts 4 with Unicode prefixes and 5 with ASCII
+    # prefixes. Keep it as a strict expected failure until that policy changes.
+    expanded = sc.quoted_words(text)
+
+    def ascii_opens(value, index):
+        return (index + 1 < len(value) and value[index + 1].isalpha()
+                and (index == 0 or value[index - 1] in " \t\n\r([{—–-/"))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sc, "_opens_single", ascii_opens)
+        old_prefixes = sc.quoted_words(text)
+    assert expanded >= old_prefixes, (text, expanded, old_prefixes)
