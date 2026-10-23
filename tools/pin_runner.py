@@ -9,7 +9,7 @@ collects and passes that test depends on import-time code, conftest files,
 plugins and ini settings, which no static check can decide. This runner asks
 pytest.
 
-For each (repository, commit) the register pins, it:
+For each (repository, commit) the register or the household choices pin, it:
 
 0. asks GitHub, before fetching anything, whether the commit is shipped code
    of that repository (`source_conflicts.commit_provenance`), or reads the

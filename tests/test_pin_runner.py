@@ -25,6 +25,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -2108,9 +2109,11 @@ def test_record_provenance_covers_the_household_choices(tmp_path, monkeypatch):
     base = tmp_path / "repos"
     head = fixture_repo(base, "PolicyEngine/fixture-meta", {"tests/test_a.py": "def test_a():\n    pass\n"})
     other = fixture_repo(base, "PolicyEngine/fixture-choice", {"tests/test_b.py": "def test_b():\n    pass\n"})
+    third = fixture_repo(base, "PolicyEngine/fixture-named", {"tests/test_c.py": "def test_c():\n    pass\n"})
+    assert len({head, other, third}) == 3
     monkeypatch.setattr(sc, "github_api", lambda token=None, base_url=None: FakeGitHub(base))
-    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-choice", ("fixture_core.cli", ()))
-    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-meta", ("fixture_core.cli", ()))
+    for repo in ("PolicyEngine/fixture-meta", "PolicyEngine/fixture-choice", "PolicyEngine/fixture-named"):
+        monkeypatch.setitem(runner.YAML_RUNNERS, repo, ("fixture_core.cli", ()))
     root = tmp_path / "root"
     root.mkdir()
     (root / "known-source-conflicts.yaml").write_text(yaml.safe_dump(register(*pinned("PolicyEngine/fixture-meta", head, ["tests/test_a.py::test_a"]))))
@@ -2126,13 +2129,110 @@ def test_record_provenance_covers_the_household_choices(tmp_path, monkeypatch):
     (root / "household-choices.yaml").write_text(yaml.safe_dump(choices(choice)))
     assert runner.main(["--root", str(root), "--record-provenance", str(out)]) == 0
     assert recorded() == [("PolicyEngine/fixture-choice", other), ("PolicyEngine/fixture-meta", head)]
-    # So is one named explicitly, which must exist.
+    # So is one named explicitly, in place of the file beside the register.
+    # Its pin is a third commit, which only reading that file can record.
     named = tmp_path / "named.yaml"
-    named.write_text(yaml.safe_dump(choices({**choice, "commit": head, "repo": "PolicyEngine/fixture-meta"})))
+    named.write_text(yaml.safe_dump(choices({**choice, "repo": "PolicyEngine/fixture-named", "commit": third})))
     assert runner.main(["--root", str(root), "--choices", str(named), "--record-provenance", str(out)]) == 0
-    assert recorded() == [("PolicyEngine/fixture-meta", head)]
+    assert recorded() == [("PolicyEngine/fixture-meta", head), ("PolicyEngine/fixture-named", third)]
+    # A named file that doesn't exist fails, with no record.
     assert runner.main(["--root", str(root), "--choices", str(tmp_path / "absent.yaml"), "--record-provenance", str(tmp_path / "none.json")]) == 1
     assert not (tmp_path / "none.json").exists()
+
+
+def test_a_dangling_household_choices_link_fails_in_both_modes(tmp_path, monkeypatch):
+    # A household-choices.yaml that links to nothing is not an absent file.
+    # Read as absent, its pins would be neither recorded nor run, and both
+    # modes would pass.
+    monkeypatch.setattr(sc, "github_api", lambda token=None, base_url=None: FakeGitHub(tmp_path / "repos"))
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "known-source-conflicts.yaml").write_text(yaml.safe_dump(register()))
+    out = tmp_path / "provenance.json"
+    report_path = tmp_path / "report.json"
+    record = ["--root", str(root), "--record-provenance", str(out)]
+    run = ["--root", str(root), "--report", str(report_path), "--uv", sys.executable, "--git", sys.executable]
+    (root / "household-choices.yaml").symlink_to(tmp_path / "gone.yaml")
+    assert runner.main(record) == 1
+    assert not out.exists()
+    assert runner.main(run) == 1
+    assert json.loads(report_path.read_text())["issues"][0].startswith("runner error:")
+    # With no file at all there are no household choices, and both pass.
+    (root / "household-choices.yaml").unlink()
+    assert runner.main(record) == 0
+    assert json.loads(out.read_text())["records"] == []
+    assert runner.main(run) == 0
+
+
+@pytest.mark.parametrize("selection", ["root", "register", "choices"])
+def test_a_run_finds_every_pin_it_selects_in_the_record(tmp_path, monkeypatch, selection):
+    # Given the same selection, --record-provenance and a run read the same
+    # files, so the run never asks GitHub (unauthenticated) about a pin.
+    base = tmp_path / "repos"
+    head = fixture_repo(base, "PolicyEngine/fixture-meta", {"tests/test_a.py": "def test_a():\n    pass\n"})
+    other = fixture_repo(base, "PolicyEngine/fixture-choice", {"tests/test_b.py": "def test_b():\n    pass\n"})
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-choice", ("fixture_core.cli", ()))
+    folder = tmp_path / ("root" if selection == "root" else "elsewhere")
+    folder.mkdir()
+    register_path = folder / ("known-source-conflicts.yaml" if selection == "root" else "register.yaml")
+    register_path.write_text(yaml.safe_dump(register(*pinned("PolicyEngine/fixture-meta", head, ["tests/test_a.py::test_a"]))))
+    choices_path = tmp_path / "named.yaml" if selection == "choices" else folder / "household-choices.yaml"
+    choice = {**OPTIMUM, "repo": "PolicyEngine/fixture-choice", "commit": other, "path": "tests/b.yaml", "name": "Itemizes"}
+    choices_path.write_text(yaml.safe_dump(choices(choice)))
+    args = {
+        "root": ["--root", str(folder)],
+        "register": ["--register", str(register_path)],
+        "choices": ["--register", str(register_path), "--choices", str(choices_path)],
+    }[selection]
+    out = tmp_path / "provenance.json"
+    monkeypatch.setattr(sc, "github_api", lambda token=None, base_url=None: FakeGitHub(base))
+    assert runner.main([*args, "--record-provenance", str(out)]) == 0
+
+    def refuse(path):
+        raise AssertionError(f"the run asked GitHub for {path}")
+
+    seen = []
+
+    def run_register(payload, settings, choices=None):
+        seen.append((payload, settings, choices))
+        raise RuntimeError("stop before running anything")
+
+    monkeypatch.setattr(sc, "github_api", lambda token=None, base_url=None: refuse)
+    monkeypatch.setattr(runner, "run_register", run_register)
+    tools = ["--uv", sys.executable, "--git", sys.executable]
+    assert runner.main([*args, "--provenance", str(out), "--report", str(tmp_path / "report.json"), *tools]) == 1
+    ((payload, settings, chosen),) = seen
+    groups, _ = runner.collect_pins(payload, chosen)
+    assert set(groups) == {("PolicyEngine/fixture-meta", head), ("PolicyEngine/fixture-choice", other)}
+    assert set(settings.provenance) == set(groups)
+    assert all(settings.provenance[key]["shipped"] is True for key in groups)
+
+
+def pin_runner_selection(run: str) -> dict[str, str]:
+    """The options that choose a pin_runner.py command's files, in a step's script."""
+
+    words = shlex.split(run.replace("\\\n", " "))
+    (start,) = [index for index, word in enumerate(words) if word.endswith("tools/pin_runner.py")]
+    chosen: dict[str, str] = {}
+    rest = words[start + 1:]
+    for index, word in enumerate(rest):
+        flag, equals, value = word.partition("=")
+        if flag in ("--root", "--register", "--choices"):
+            chosen[flag] = value if equals else rest[index + 1]
+    return chosen
+
+
+def test_pin_provenance_and_pinned_tests_select_the_same_files():
+    # The record holds the commits of the files pin-provenance selected. If
+    # pinned-tests selected others, their commits would be asked of GitHub
+    # without a token, where the rate limit runs out.
+    jobs = workflow()["jobs"]
+    (record,) = [step["run"] for step in jobs["pin-provenance"]["steps"] if "tools/pin_runner.py" in step.get("run", "")]
+    (run,) = [step["run"] for step in jobs["pinned-tests"]["steps"] if "tools/pin_runner.py" in step.get("run", "")]
+    assert pin_runner_selection(record) == pin_runner_selection(run)
+    assert pin_runner_selection(run)["--root"] == "rulespec-us"
+    # The parser sees through line continuations and either spelling.
+    assert pin_runner_selection("python a/tools/pin_runner.py --root r \\\n  --choices=c --report x") == {"--root": "r", "--choices": "c"}
 
 
 @pytest.mark.parametrize(

@@ -288,7 +288,7 @@ collects or runs the test: import-time code, conftest files, plugins and ini
 settings decide that, and no static check can.
 
 `tools/pin_runner.py` asks pytest. For each repository and commit the register
-pins, it:
+or the household choices pin, it:
 
 0. asks GitHub's API, before fetching anything, whether the commit is shipped
    code of that repository. GitHub's canonical name must be exactly the pinned
