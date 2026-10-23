@@ -731,6 +731,7 @@ def test_pin_provenance_job_holds_only_the_read_token_and_runs_no_pinned_code():
             assert step["with"]["persist-credentials"] is False, step
     uploads = [step for step in job["steps"] if str(step.get("uses", "")).startswith("actions/upload-artifact@")]
     assert len(uploads) == 1 and uploads[0]["with"]["name"] == "pin-provenance"
+    assert uploads[0]["with"]["if-no-files-found"] == "error"
     # pinned-tests waits for the record and reads it.
     pinned = jobs["pinned-tests"]
     assert pinned["needs"] == "pin-provenance"
@@ -738,6 +739,20 @@ def test_pin_provenance_job_holds_only_the_read_token_and_runs_no_pinned_code():
     assert len(downloads) == 1 and downloads[0]["with"]["name"] == "pin-provenance"
     (run,) = [step["run"] for step in pinned["steps"] if "tools/pin_runner.py" in step.get("run", "")]
     assert "--provenance" in run
+
+
+def test_the_alarm_fires_when_pin_provenance_fails():
+    # A failed pin-provenance skips pinned-tests (it needs the record), and a
+    # skipped pinned-tests is not a success, so main and scheduled runs still
+    # raise the alarm: always() keeps the alarm job from being skipped too.
+    jobs = workflow()["jobs"]
+    assert jobs["pinned-tests"]["needs"] == "pin-provenance"
+    alarm = jobs["alarm"]
+    assert "pinned-tests" in alarm["needs"]
+    condition = alarm["if"]
+    assert condition.startswith("${{ always() &&")
+    assert "needs.pinned-tests.result != 'success'" in condition
+    assert "== 'failure'" not in condition
 
 
 def test_pinned_tests_job_passes_its_result_only_as_a_json_artifact():
@@ -1358,6 +1373,78 @@ def test_recorded_provenance_is_used_without_asking(tmp_path):
     assert not any(work.iterdir())
 
 
+def _seed_passing_cache(settings_, payload):
+    """A valid cached pass for every commit the payload pins, as _store
+    would write it after a passing run."""
+
+    groups, _ = runner.collect_pins(payload)
+    for (repo, commit), pins in groups.items():
+        key = runner.cache_key(repo, commit, pins, runner.runner_version())
+        runner._store(settings_, key, {
+            "repo": repo, "commit": commit, "issues": [], "logs": {}, "pytest_exit": 0,
+            "pins": [{"entry": p.entry, "label": p.label, "id": p.id, "path": p.path, "name": p.name,
+                      "outcome": "passed", "cases": [{"nodeid": p.id, "outcome": "passed"}]} for p in pins],
+        })
+
+
+def _unreachable(path):
+    raise AssertionError(f"asked GitHub for {path}")
+
+
+@pytest.mark.parametrize("shipped", [False, True])
+def test_a_recorded_answer_decides_before_the_cache_and_asks_nothing(tmp_path, shipped):
+    # #1843 fix review (P2): a recorded refusal refuses even with a valid
+    # cached pass for that commit, and a recorded success serves the cached
+    # pass without asking GitHub, whose unauthenticated limit runs out.
+    work = tmp_path / "work"
+    work.mkdir()
+    cache = tmp_path / "cache"
+    payload = register(*pinned("PolicyEngine/a", COMMIT, ["tests/test_a.py::test_a"]))
+    record = {"repo": "PolicyEngine/a", "commit": COMMIT, "shipped": shipped, "reason": None if shipped else "recorded: a fork"}
+    settings_ = runner.Settings(uv="uv", git="git", work=work, cache_dir=cache, api=_unreachable,
+                                provenance={("PolicyEngine/a", COMMIT): record})
+    _seed_passing_cache(settings_, payload)
+    report = runner.run_register(payload, settings_)
+    if shipped:
+        assert outcomes(report) == {"tests/test_a.py::test_a": "passed"}
+        assert report["commits"][0]["cached"] is True and report["commits"][0]["provenance"] == record
+    else:
+        assert outcomes(report) == {"tests/test_a.py::test_a": "untrusted commit"}
+        assert report["commits"][0]["cached"] is False and "recorded: a fork" in report["issues"][0]
+    assert not any(work.iterdir())  # nothing was fetched
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        ("PolicyEngine/a", "d" * 40),  # the same repository, another commit
+        ("PolicyEngine/b", COMMIT),  # another repository, the same commit
+        ("PolicyEngine/A", COMMIT),  # the repository name in another case
+        ("policyengine/a", COMMIT),  # the owner in another case
+    ],
+)
+def test_a_record_serves_only_its_exact_repository_and_commit(tmp_path, recorded):
+    # #1843 fix review (P2): a record for anything but the exact (repository,
+    # commit) is not used, so the run asks GitHub, which here refuses.
+    calls = []
+
+    def refusing(path):
+        calls.append(path)
+        return {"full_name": "PolicyEngine/a", "fork": True, "default_branch": "main"}
+
+    work = tmp_path / "work"
+    work.mkdir()
+    cache = tmp_path / "cache"
+    payload = register(*pinned("PolicyEngine/a", COMMIT, ["tests/test_a.py::test_a"]))
+    record = {"repo": recorded[0], "commit": recorded[1], "shipped": True, "reason": None}
+    settings_ = runner.Settings(uv="uv", git="git", work=work, cache_dir=cache, api=refusing, provenance={recorded: record})
+    _seed_passing_cache(settings_, payload)
+    report = runner.run_register(payload, settings_)
+    assert outcomes(report) == {"tests/test_a.py::test_a": "untrusted commit"}
+    assert "is a fork" in report["issues"][0] and calls == ["/repos/PolicyEngine/a"]
+    assert report["commits"][0]["cached"] is False and not any(work.iterdir())
+
+
 def test_a_commit_the_record_lacks_is_asked_of_github(tmp_path):
     base = tmp_path / "repos"
     head = fixture_repo(base, "PolicyEngine/fixture-meta", {"tests/test_a.py": "def test_a():\n    pass\n"})
@@ -1404,6 +1491,9 @@ def test_record_provenance_asks_with_the_token_and_runs_nothing(tmp_path, monkey
         '{"provenance_version": 1}',
         '{"provenance_version": 1, "records": [{"repo": "a/b", "commit": "c"}]}',
         '{"provenance_version": 1, "records": [{"repo": "a/b", "commit": "c", "shipped": "yes"}]}',
+        '{"provenance_version": 1, "records": [{"repo": 1, "commit": 2, "shipped": false}]}',
+        '{"provenance_version": 1, "records": [{"repo": "a/b", "commit": 2, "shipped": false}]}',
+        '{"provenance_version": 1, "records": ["a/b"]}',
     ],
 )
 def test_a_malformed_provenance_record_fails_the_run_closed(tmp_path, content):

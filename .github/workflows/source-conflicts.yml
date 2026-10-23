@@ -296,7 +296,8 @@ jobs:
         # pin and save fresh results. Each run saves its own snapshot (the key
         # ends in the run id) and restores the newest one; records are keyed
         # inside by repository, commit, ids and runner version, and the runner
-        # re-checks each one and asks GitHub for provenance before using it.
+        # re-checks each one and checks its provenance (from this run's
+        # pin-provenance record, or GitHub) before using it.
         if: github.event_name == 'pull_request'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

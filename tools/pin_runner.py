@@ -989,7 +989,10 @@ def main(argv: list[str] | None = None) -> int:
         "--record-provenance", type=Path, metavar="FILE",
         help="ask GitHub (with GH_TOKEN, when set) for the provenance of every pinned commit, write it here, and exit; runs no pinned code",
     )
-    parser.add_argument("--provenance", type=Path, metavar="FILE", help="read provenance that --record-provenance wrote, instead of asking GitHub")
+    parser.add_argument(
+        "--provenance", type=Path, metavar="FILE",
+        help="read provenance that --record-provenance wrote; a commit the record lacks is asked of GitHub unauthenticated",
+    )
     args = parser.parse_args(argv)
     if args.record_provenance is not None:
         try:
