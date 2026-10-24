@@ -29,7 +29,9 @@ Three commands:
   screen, which says nothing about running), and every ruled, confirmed or
   contradicted module interpretation whose texts cite two or more provisions
   (provisions in tension) is registered; an unregistered open one is a
-  warning, listed by the workflow.
+  warning, listed by the workflow. No global id may also be a household
+  choice's (household-choices.yaml; tools/household_choices.py), checked by
+  one function both files' checks call.
 - `verify` (network; the source-conflicts workflow): every `texts` excerpt is
   verbatim at its citation in the pinned corpus release, and every
   `pending_texts` excerpt is verbatim in its pinned snapshot, both judged by
@@ -69,6 +71,10 @@ from typing import Any
 import yaml
 
 REGISTER_FILENAME = "known-source-conflicts.yaml"
+# The household-choices file (tools/household_choices.py) sits beside the
+# register. Its ids share the register's global-id namespace, so `check` on
+# either file refuses an id the other file uses (id_collision_issues).
+CHOICES_FILENAME = "household-choices.yaml"
 SCHEMA_VERSION = 1
 CONTENT_DIRS = ("statutes", "regulations", "policies", "legislation")
 ORGANISATION = "TheAxiomFoundation"
@@ -309,6 +315,8 @@ def load_register(path: Path) -> Any:
         raise RegisterError(f"{path} must be a regular file")
     try:
         return yaml.load(path.read_text(encoding="utf-8"), Loader=_NoAliasLoader)  # a SafeLoader subclass
+    except OSError as exc:
+        raise RegisterError(f"{path} cannot be read: {exc}") from exc
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
         raise RegisterError(f"{path} is not valid UTF-8 YAML without anchors: {exc}") from exc
     except RecursionError:
@@ -493,29 +501,95 @@ def _prose_fields(entry: Mapping[str, Any], label: str) -> Iterator[tuple[str, s
             yield f"{label}.unpublished_sources[{index}].description", item["description"]
 
 
+def check_texts(texts: Any, *, label: str, require: bool, issues: list[str]) -> None:
+    """`texts`: corpus citations, each a canonical path and an excerpt."""
+
+    if not isinstance(texts, list) or (require and not texts):
+        issues.append(f"{label} must be a non-empty list." if require else f"{label} must be a list.")
+        return
+    for index, text in enumerate(texts):
+        text_label = f"{label}[{index}]"
+        if not _mapping(text, label=text_label, allowed={"corpus_citation_path", "excerpt"}, issues=issues):
+            continue
+        path = text.get("corpus_citation_path")
+        if _string(path, label=f"{text_label}.corpus_citation_path", issues=issues):
+            if CORPUS_PATH_RE.fullmatch(path) is None:
+                issues.append(f"{text_label}.corpus_citation_path is not a canonical corpus citation path.")
+        _string(text.get("excerpt"), label=f"{text_label}.excerpt", issues=issues)
+
+
+def check_pending_texts(pending: Any, *, label: str, issues: list[str]) -> list[Any]:
+    """`pending_texts`: provisions not yet in the corpus, each checked against a
+    pinned snapshot. Returns the items (empty when the field is malformed)."""
+
+    if not _nonempty_list(pending, label=label, issues=issues):
+        return []
+    for index, item in enumerate(pending):
+        p_label = f"{label}[{index}]"
+        if not _mapping(item, label=p_label, allowed={"citation", "kind", "url", "snapshot", "excerpt"}, issues=issues):
+            continue
+        _string(item.get("citation"), label=f"{p_label}.citation", issues=issues)
+        if item.get("kind") not in SOURCE_KINDS:
+            issues.append(f"{p_label}.kind must be one of {', '.join(SOURCE_KINDS)}.")
+        _string(item.get("excerpt"), label=f"{p_label}.excerpt", issues=issues)
+        if not _https_url(item.get("url")):
+            issues.append(f"{p_label}.url must be an https URL.")
+        _check_snapshot(item.get("snapshot"), label=f"{p_label}.snapshot", issues=issues)
+    return pending
+
+
+def cited_corpus_paths(entry: Mapping[str, Any]) -> list[str]:
+    """The entry's well-formed corpus citation paths, in order."""
+
+    texts = entry.get("texts") if isinstance(entry.get("texts"), list) else []
+    return [
+        text["corpus_citation_path"]
+        for text in texts
+        if isinstance(text, dict)
+        and isinstance(text.get("corpus_citation_path"), str)
+        and CORPUS_PATH_RE.fullmatch(text["corpus_citation_path"])
+    ]
+
+
+def check_text_kinds(entry: Mapping[str, Any], *, label: str, issues: list[str]) -> None:
+    """Every cited document class has a DOCUMENT_CLASS_KINDS row, and each
+    `text_kinds` override names a cited path and a kind its class allows."""
+
+    cited_paths = cited_corpus_paths(entry)
+    for path in dict.fromkeys(cited_paths):
+        if document_class(path) not in DOCUMENT_CLASS_KINDS:
+            issues.append(
+                f"{label}.texts cites {path}, whose document class `{document_class(path)}` has no "
+                "DOCUMENT_CLASS_KINDS row; add one rather than leave its kind open."
+            )
+    if "text_kinds" not in entry:
+        return
+    overrides = entry["text_kinds"]
+    if not isinstance(overrides, dict) or not overrides:
+        issues.append(f"{label}.text_kinds must be a non-empty mapping of corpus citation path to kind.")
+        return
+    for path, kind in overrides.items():
+        k_label = f"{label}.text_kinds[{path}]"
+        if path not in cited_paths:
+            issues.append(f"{k_label} names a path that is not one of this entry's texts.")
+            continue
+        allowed = DOCUMENT_CLASS_KINDS.get(document_class(path))
+        if kind not in SOURCE_KINDS:
+            issues.append(f"{k_label} must be one of {', '.join(SOURCE_KINDS)}.")
+        elif allowed is not None and kind not in allowed:
+            issues.append(
+                f"{k_label} is `{kind}`, but a `{document_class(path)}` path can only be "
+                f"{', '.join(allowed)}."
+            )
+
+
 def check_interpretation_core(entry: Mapping[str, Any], *, label: str, require_texts: bool) -> list[str]:
     """The module.interpretations v1 rules, minus `id` and `affects`."""
 
     issues: list[str] = []
     for name in ("question", "reading", "basis"):
         _string(entry.get(name), label=f"{label}.{name}", issues=issues)
-    texts = entry.get("texts")
-    if not isinstance(texts, list) or (require_texts and not texts):
-        issues.append(
-            f"{label}.texts must be a non-empty list."
-            if require_texts
-            else f"{label}.texts must be a list."
-        )
-    else:
-        for index, text in enumerate(texts):
-            text_label = f"{label}.texts[{index}]"
-            if not _mapping(text, label=text_label, allowed={"corpus_citation_path", "excerpt"}, issues=issues):
-                continue
-            path = text.get("corpus_citation_path")
-            if _string(path, label=f"{text_label}.corpus_citation_path", issues=issues):
-                if CORPUS_PATH_RE.fullmatch(path) is None:
-                    issues.append(f"{text_label}.corpus_citation_path is not a canonical corpus citation path.")
-            _string(text.get("excerpt"), label=f"{text_label}.excerpt", issues=issues)
+    check_texts(entry.get("texts"), label=f"{label}.texts", require=require_texts, issues=issues)
     alternatives = entry.get("alternatives")
     if _nonempty_list(alternatives, label=f"{label}.alternatives", issues=issues):
         seen_ids: set[str] = set()
@@ -750,16 +824,57 @@ def _walk_strings(value: Any, label: str) -> Iterator[tuple[str, str]]:
             stack.extend((child, f"{where}[{index}]") for index, child in reversed(list(enumerate(item))))
 
 
-def hygiene_issues(payload: Any) -> list[str]:
+def hygiene_issues(payload: Any, *, root: str = "register", public: str = "the register") -> list[str]:
     issues: list[str] = []
-    for label, text in _walk_strings(payload, "register"):
+    for label, text in _walk_strings(payload, root):
         # Commit and sha256 fields are hex; skip them so a hash never reads
         # as a decision id.
         if label.endswith((".commit", ".sha256")):
             continue
         for pattern, what in HYGIENE_PATTERNS:
             if pattern.search(text):
-                issues.append(f"{label} contains {what}; the register is public.")
+                issues.append(f"{label} contains {what}; {public} is public.")
+    return issues
+
+
+def _global_ids(payload: Any) -> dict[str, int]:
+    """Global id -> index of its first entry, for entries that have one."""
+
+    ids: dict[str, int] = {}
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    for index, entry in enumerate(entries if isinstance(entries, list) else []):
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str) and isinstance(entry.get("jurisdiction"), str):
+            ids.setdefault(global_id(entry), index)
+    return ids
+
+
+def id_collision_issues(root: Path, *, conflicts: Any = None, choices: Any = None) -> list[str]:
+    """A global id names one thing: an entry of the register or a household
+    choice, never both. Both files' `check` call this, each passing its own
+    parsed payload; the other file is read from `root` (an absent file has no
+    ids). Then a register entry added later can't take a choice's id, or the
+    reverse, without failing the check of the file that changed."""
+
+    issues: list[str] = []
+    loaded = {"conflicts": conflicts, "choices": choices}
+    for key, filename in (("conflicts", REGISTER_FILENAME), ("choices", CHOICES_FILENAME)):
+        if loaded[key] is not None:
+            continue
+        path = root / filename
+        if not (path.exists() or path.is_symlink()):
+            loaded[key] = {}
+            continue
+        try:
+            loaded[key] = load_register(path)
+        except RegisterError as exc:
+            return [f"cannot read {filename} to check that no global id is in both files: {exc}"]
+    choice_ids = _global_ids(loaded["choices"])
+    for gid, index in _global_ids(loaded["conflicts"]).items():
+        if gid in choice_ids:
+            issues.append(
+                f"`{gid}` is both {REGISTER_FILENAME} entries[{index}] and {CHOICES_FILENAME} "
+                f"entries[{choice_ids[gid]}]; a global id names one entry in the two files."
+            )
     return issues
 
 
@@ -852,6 +967,79 @@ def _check_external_ref(item: Mapping[str, Any], *, label: str, ctx: RepoContext
     return True
 
 
+def check_test_location(
+    item: Any, *, label: str, ctx: RepoContext, allowed: Iterable[str], issues: list[str]
+) -> tuple[bool, str | None, str | None] | None:
+    """Where a test reference points: (external, path, name), with path or
+    name None when malformed; None when the item is not a mapping. The pins
+    are the caller's: the register pins readings, the household-choices file
+    pins a default or an optimum."""
+
+    if not _mapping(item, label=label, allowed=allowed, issues=issues):
+        return None
+    external = _check_external_ref(item, label=label, ctx=ctx, issues=issues)
+    path = item.get("path")
+    name = item.get("name")
+    # Another repository's YAML test cases (PolicyEngine-US's policy tests)
+    # count, pinned like any external test; here, a companion test is always
+    # .test.yaml.
+    suffixes = (".py", ".yaml") if external else (".py", ".test.yaml")
+    if isinstance(path, str) and "::" in path:
+        issues.append(f"{label}.path {path} contains `::`, which separates a test file from its test name.")
+        path = None
+    elif not _relative_path(path) or not str(path).endswith(suffixes):
+        issues.append(
+            f"{label}.path must be a relative "
+            + (".py or .yaml path." if external else ".py or .test.yaml path.")
+        )
+        path = None
+    elif str(path).endswith(".py") and not python_test_file(path):
+        issues.append(f"{label}.path {path} is not a test file (test_*.py); only a test can pin a reading.")
+        path = None
+    elif external and str(path).endswith(".yaml") and "tests" not in PurePosixPath(path).parts[:-1]:
+        issues.append(
+            f"{label}.path {path} is not under a tests directory; another repository's YAML test "
+            "file must be one of its tests."
+        )
+        path = None
+    if isinstance(path, str) and path.endswith(".yaml"):
+        if not (isinstance(name, str) and name.strip() and "\n" not in name and name == name.strip()):
+            issues.append(f"{label}.name must be a YAML test case's name, on one line.")
+            name = None
+    elif isinstance(name, str) and "[" in name:
+        issues.append(
+            f"{label}.name {name} names a parametrized case; pin the whole test function "
+            "(pytest builds case ids from more than the file shows)."
+        )
+        name = None
+    elif not (isinstance(name, str) and TEST_NAME_RE.fullmatch(name)):
+        issues.append(f"{label}.name must be a test function, optionally Class::function.")
+        name = None
+    return external, path, name
+
+
+def check_repeated_test(
+    item: Mapping[str, Any], path: str | None, name: str | None, *, label: str, seen: set[tuple[Any, Any, Any]], issues: list[str]
+) -> None:
+    repo_key = item.get("repo") if isinstance(item.get("repo"), str) else repr(item.get("repo"))
+    key = (repo_key, path, name)
+    if key in seen and None not in key[1:]:
+        issues.append(f"{label} repeats {path}::{name}.")
+    seen.add(key)
+
+
+def check_local_test(path: str | None, name: str | None, *, label: str, ctx: RepoContext, issues: list[str]) -> None:
+    """A test in this repository exists and defines the named test (a screen)."""
+
+    if not (path and name):
+        return
+    local = ctx.root / path
+    if not local.is_file():
+        issues.append(f"{label}.path {path} does not exist in this repository.")
+    elif not test_exists(path, name, local.read_bytes()):
+        issues.append(f"{label}.name {missing_test(name, path)}")
+
+
 def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: frozenset[str]) -> list[str]:
     location = f"entries[{index}]"
     entry_id = entry.get("id") if isinstance(entry, dict) else None
@@ -881,52 +1069,8 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
         issues.append(f"{label} must cite at least one provision in texts or pending_texts.")
 
     if "pending_texts" in entry:
-        if not _nonempty_list(pending, label=f"{label}.pending_texts", issues=issues):
-            pending = []
-        for p_index, item in enumerate(pending):
-            p_label = f"{label}.pending_texts[{p_index}]"
-            if not _mapping(item, label=p_label, allowed={"citation", "kind", "url", "snapshot", "excerpt"}, issues=issues):
-                continue
-            _string(item.get("citation"), label=f"{p_label}.citation", issues=issues)
-            if item.get("kind") not in SOURCE_KINDS:
-                issues.append(f"{p_label}.kind must be one of {', '.join(SOURCE_KINDS)}.")
-            _string(item.get("excerpt"), label=f"{p_label}.excerpt", issues=issues)
-            if not _https_url(item.get("url")):
-                issues.append(f"{p_label}.url must be an https URL.")
-            _check_snapshot(item.get("snapshot"), label=f"{p_label}.snapshot", issues=issues)
-
-    texts = entry.get("texts") if isinstance(entry.get("texts"), list) else []
-    cited_paths = [
-        text["corpus_citation_path"]
-        for text in texts
-        if isinstance(text, dict)
-        and isinstance(text.get("corpus_citation_path"), str)
-        and CORPUS_PATH_RE.fullmatch(text["corpus_citation_path"])
-    ]
-    for path in dict.fromkeys(cited_paths):
-        if document_class(path) not in DOCUMENT_CLASS_KINDS:
-            issues.append(
-                f"{label}.texts cites {path}, whose document class `{document_class(path)}` has no "
-                "DOCUMENT_CLASS_KINDS row; add one rather than leave its kind open."
-            )
-    if "text_kinds" in entry:
-        overrides = entry["text_kinds"]
-        if not isinstance(overrides, dict) or not overrides:
-            issues.append(f"{label}.text_kinds must be a non-empty mapping of corpus citation path to kind.")
-        else:
-            for path, kind in overrides.items():
-                k_label = f"{label}.text_kinds[{path}]"
-                if path not in cited_paths:
-                    issues.append(f"{k_label} names a path that is not one of this entry's texts.")
-                    continue
-                allowed = DOCUMENT_CLASS_KINDS.get(document_class(path))
-                if kind not in SOURCE_KINDS:
-                    issues.append(f"{k_label} must be one of {', '.join(SOURCE_KINDS)}.")
-                elif allowed is not None and kind not in allowed:
-                    issues.append(
-                        f"{k_label} is `{kind}`, but a `{document_class(path)}` path can only be "
-                        f"{', '.join(allowed)}."
-                    )
+        pending = check_pending_texts(pending, label=f"{label}.pending_texts", issues=issues)
+    check_text_kinds(entry, label=label, issues=issues)
 
     years = entry.get("years")
     if "years" in entry:
@@ -1054,48 +1198,12 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
         seen_tests: set[tuple[Any, Any, Any]] = set()
         for t_index, item in enumerate(tests):
             t_label = f"{label}.tests[{t_index}]"
-            if not _mapping(item, label=t_label, allowed={"repo", "commit", "path", "name", "pins"}, issues=issues):
+            located = check_test_location(
+                item, label=t_label, ctx=ctx, allowed={"repo", "commit", "path", "name", "pins"}, issues=issues
+            )
+            if located is None:
                 continue
-            external = _check_external_ref(item, label=t_label, ctx=ctx, issues=issues)
-            path = item.get("path")
-            name = item.get("name")
-            # Another repository's YAML test cases (PolicyEngine-US's
-            # policy tests) count, pinned like any external test; here, a
-            # companion test is always .test.yaml.
-            suffixes = (".py", ".yaml") if external else (".py", ".test.yaml")
-            if isinstance(path, str) and "::" in path:
-                issues.append(f"{t_label}.path {path} contains `::`, which separates a test file from its test name.")
-                path = None
-            elif not _relative_path(path) or not str(path).endswith(suffixes):
-                issues.append(
-                    f"{t_label}.path must be a relative "
-                    + (".py or .yaml path." if external else ".py or .test.yaml path.")
-                )
-                path = None
-            elif str(path).endswith(".py") and not python_test_file(path):
-                issues.append(
-                    f"{t_label}.path {path} is not a test file (test_*.py); only a test can pin a reading."
-                )
-                path = None
-            elif external and str(path).endswith(".yaml") and "tests" not in PurePosixPath(path).parts[:-1]:
-                issues.append(
-                    f"{t_label}.path {path} is not under a tests directory; another repository's YAML test "
-                    "file must be one of its tests."
-                )
-                path = None
-            if isinstance(path, str) and path.endswith(".yaml"):
-                if not (isinstance(name, str) and name.strip() and "\n" not in name and name == name.strip()):
-                    issues.append(f"{t_label}.name must be a YAML test case's name, on one line.")
-                    name = None
-            elif isinstance(name, str) and "[" in name:
-                issues.append(
-                    f"{t_label}.name {name} names a parametrized case; pin the whole test function "
-                    "(pytest builds case ids from more than the file shows)."
-                )
-                name = None
-            elif not (isinstance(name, str) and TEST_NAME_RE.fullmatch(name)):
-                issues.append(f"{t_label}.name must be a test function, optionally Class::function.")
-                name = None
+            external, path, name = located
             pins = item.get("pins")
             if not (isinstance(pins, list) and pins):
                 issues.append(f"{t_label}.pins must be a non-empty list of `reading` or alternative ids.")
@@ -1104,17 +1212,9 @@ def check_entry(entry: Any, *, index: int, ctx: RepoContext, jurisdictions: froz
                     _check_reading_ref(ref, label=f"{t_label}.pins[{p_index}]", alternatives=alternatives, issues=issues)
                 if len(set(map(str, pins))) != len(pins):
                     issues.append(f"{t_label}.pins repeats a reading.")
-            repo_key = item.get("repo") if isinstance(item.get("repo"), str) else repr(item.get("repo"))
-            key = (repo_key, path, name)
-            if key in seen_tests and None not in key[1:]:
-                issues.append(f"{t_label} repeats {path}::{name}.")
-            seen_tests.add(key)
-            if not external and path and name:
-                local = ctx.root / path
-                if not local.is_file():
-                    issues.append(f"{t_label}.path {path} does not exist in this repository.")
-                elif not test_exists(path, name, local.read_bytes()):
-                    issues.append(f"{t_label}.name {missing_test(name, path)}")
+            check_repeated_test(item, path, name, label=t_label, seen=seen_tests, issues=issues)
+            if not external:
+                check_local_test(path, name, label=t_label, ctx=ctx, issues=issues)
 
     pinned = {
         ref
@@ -1301,6 +1401,7 @@ def check_register(payload: Any, ctx: RepoContext, *, scan_modules: bool = True)
                 issues.append(f"entries[{index}] `{gid}` duplicates entries[{seen[gid]}].")
             seen.setdefault(gid, index)
     issues.extend(hygiene_issues(payload))
+    issues.extend(id_collision_issues(ctx.root, conflicts=payload))
     if scan_modules:
         issues.extend(unregistered_tensions(ctx.root, payload)[0])
     return issues
@@ -1498,6 +1599,125 @@ def github_on_default_branch(token: str | None = None) -> Callable[[str, str], b
     return reachable
 
 
+def cites_global_id(source: str, gid: str) -> bool:
+    """Does the file name this global id, as a whole id? A cite of us:a-b (or
+    of a household choice extending the id) is not a cite of us:a."""
+
+    return re.search(rf"(?<![A-Za-z0-9:-]){re.escape(gid)}(?![A-Za-z0-9:-])", source) is not None
+
+
+UNCHECKED_REACHABILITY = "unchecked: default-branch reachability of external commits (no checker given)"
+Shipped = Callable[[str, str, str], None]
+
+
+def shipped_checker(on_default_branch: Callable[[str, str], bool] | None, issues: list[str]) -> Shipped:
+    """shipped(label, repo, commit) records an issue unless the commit is
+    reachable from its repository's default branch; a no-op without a checker."""
+
+    def shipped(label: str, repo: str, commit: str) -> None:
+        if on_default_branch is None:
+            return
+        try:
+            ok = on_default_branch(repo, commit)
+        except (urllib.error.URLError, OSError, KeyError, ValueError) as exc:
+            issues.append(f"{label}: cannot tell whether {repo}@{commit[:12]} is on its default branch: {exc}")
+            return
+        if not ok:
+            issues.append(
+                f"{label}: {repo}@{commit[:12]} is not on {repo}'s default branch; pin a commit on it "
+                "(after a squash merge, the merge commit), or list an unmerged change under proposed."
+            )
+
+    return shipped
+
+
+def verify_texts(
+    entry: Mapping[str, Any], label: str, *, resolve: Callable[[str], str | None] | None,
+    matches: Callable[[str, str], bool], issues: list[str],
+) -> int:
+    """Each corpus text's excerpt is verbatim at its citation in the pinned
+    release; returns how many verified."""
+
+    verified = 0
+    for t_index, text in enumerate(entry.get("texts") or []):
+        t_label = f"{label}.texts[{t_index}]"
+        path = text["corpus_citation_path"]
+        if resolve is None:
+            issues.append(f"{t_label}: not verified; no pinned corpus release was given.")
+            continue
+        try:
+            body = resolve(path)
+        except Exception as exc:  # noqa: BLE001 - every resolver failure is a finding
+            issues.append(f"{t_label}: {path} could not be resolved in the pinned corpus release: {exc}")
+            continue
+        if body is None:
+            issues.append(f"{t_label}: {path} is not in the pinned corpus release.")
+        elif not matches(body, text["excerpt"]):
+            issues.append(f"{t_label}: the excerpt is not verbatim at {path} in the pinned corpus release.")
+        else:
+            verified += 1
+    return verified
+
+
+def verify_pending_texts(
+    entry: Mapping[str, Any], label: str, *, fetch: Fetch, matches: Callable[[str, str], bool],
+    shipped: Shipped, issues: list[str],
+) -> int:
+    """Each pending text's snapshot is shipped, has its sha256, and holds the
+    excerpt verbatim; returns how many verified."""
+
+    verified = 0
+    for p_index, item in enumerate(entry.get("pending_texts") or []):
+        p_label = f"{label}.pending_texts[{p_index}]"
+        snap = item["snapshot"]
+        shipped(p_label, snap["repo"], snap["commit"])
+        try:
+            data = fetch(snap["repo"], snap["commit"], snap["path"])
+        except (urllib.error.URLError, OSError) as exc:
+            issues.append(f"{p_label}: cannot read {snap['repo']}@{snap['commit'][:12]}:{snap['path']}: {exc}")
+            continue
+        actual = hashlib.sha256(data).hexdigest()
+        if actual != snap["sha256"]:
+            issues.append(f"{p_label}: snapshot sha256 is {actual}, not {snap['sha256']}.")
+            continue
+        try:
+            text = snapshot_text(data, snap["path"])
+        except (UnicodeDecodeError, ValueError) as exc:
+            issues.append(f"{p_label}: cannot read the snapshot as text: {exc}")
+            continue
+        if not matches(text, item["excerpt"]):
+            issues.append(f"{p_label}: the excerpt is not verbatim in {snap['path']}.")
+        else:
+            verified += 1
+    return verified
+
+
+def verify_external_tests(
+    entry: Mapping[str, Any], label: str, *, fetch: Fetch, shipped: Shipped, issues: list[str]
+) -> int:
+    """Each external test's commit is shipped and its file defines the pinned
+    test (the screen; tools/pin_runner.py runs it); returns how many passed
+    the screen. Tests in this repository are checked offline."""
+
+    verified = 0
+    for t_index, item in enumerate(entry.get("tests") or []):
+        if "repo" not in item:
+            continue  # checked offline
+        t_label = f"{label}.tests[{t_index}]"
+        shipped(t_label, item["repo"], item["commit"])
+        try:
+            source = fetch(item["repo"], item["commit"], item["path"])
+        except (urllib.error.URLError, OSError) as exc:
+            issues.append(f"{t_label}: cannot read {item['repo']}@{item['commit'][:12]}:{item['path']}: {exc}")
+            continue
+        where = f"{item['repo']}@{item['commit'][:12]}:{item['path']}"
+        if not test_exists(item["path"], item["name"], source):
+            issues.append(f"{t_label}: {missing_test(item['name'], where)}")
+        else:
+            verified += 1
+    return verified
+
+
 def verify_register(
     payload: Mapping[str, Any],
     *,
@@ -1516,65 +1736,16 @@ def verify_register(
 
     issues: list[str] = []
     report: list[str] = []
-
-    def shipped(label: str, repo: str, commit: str) -> None:
-        if on_default_branch is None:
-            return
-        try:
-            ok = on_default_branch(repo, commit)
-        except (urllib.error.URLError, OSError, KeyError, ValueError) as exc:
-            issues.append(f"{label}: cannot tell whether {repo}@{commit[:12]} is on its default branch: {exc}")
-            return
-        if not ok:
-            issues.append(
-                f"{label}: {repo}@{commit[:12]} is not on {repo}'s default branch; pin a commit on it "
-                "(after a squash merge, the merge commit), or list an unmerged change under proposed."
-            )
-
+    shipped = shipped_checker(on_default_branch, issues)
     if on_default_branch is None:
-        report.append("unchecked: default-branch reachability of external commits (no checker given)")
+        report.append(UNCHECKED_REACHABILITY)
     counts = {"texts": 0, "pending_texts": 0, "implementations": 0, "tests": 0}
     for index, entry in enumerate(payload.get("entries") or []):
         label = f"{global_id(entry)} (entries[{index}])"
-        for t_index, text in enumerate(entry.get("texts") or []):
-            t_label = f"{label}.texts[{t_index}]"
-            path = text["corpus_citation_path"]
-            if resolve is None:
-                issues.append(f"{t_label}: not verified; no pinned corpus release was given.")
-                continue
-            try:
-                body = resolve(path)
-            except Exception as exc:  # noqa: BLE001 - every resolver failure is a finding
-                issues.append(f"{t_label}: {path} could not be resolved in the pinned corpus release: {exc}")
-                continue
-            if body is None:
-                issues.append(f"{t_label}: {path} is not in the pinned corpus release.")
-            elif not matches(body, text["excerpt"]):
-                issues.append(f"{t_label}: the excerpt is not verbatim at {path} in the pinned corpus release.")
-            else:
-                counts["texts"] += 1
-        for p_index, item in enumerate(entry.get("pending_texts") or []):
-            p_label = f"{label}.pending_texts[{p_index}]"
-            snap = item["snapshot"]
-            shipped(p_label, snap["repo"], snap["commit"])
-            try:
-                data = fetch(snap["repo"], snap["commit"], snap["path"])
-            except (urllib.error.URLError, OSError) as exc:
-                issues.append(f"{p_label}: cannot read {snap['repo']}@{snap['commit'][:12]}:{snap['path']}: {exc}")
-                continue
-            actual = hashlib.sha256(data).hexdigest()
-            if actual != snap["sha256"]:
-                issues.append(f"{p_label}: snapshot sha256 is {actual}, not {snap['sha256']}.")
-                continue
-            try:
-                text = snapshot_text(data, snap["path"])
-            except (UnicodeDecodeError, ValueError) as exc:
-                issues.append(f"{p_label}: cannot read the snapshot as text: {exc}")
-                continue
-            if not matches(text, item["excerpt"]):
-                issues.append(f"{p_label}: the excerpt is not verbatim in {snap['path']}.")
-            else:
-                counts["pending_texts"] += 1
+        counts["texts"] += verify_texts(entry, label, resolve=resolve, matches=matches, issues=issues)
+        counts["pending_texts"] += verify_pending_texts(
+            entry, label, fetch=fetch, matches=matches, shipped=shipped, issues=issues
+        )
         for i_index, item in enumerate(entry.get("implementations") or []):
             i_label = f"{label}.implementations[{i_index}]"
             shipped(i_label, item["repo"], item["commit"])
@@ -1583,7 +1754,7 @@ def verify_register(
             except (urllib.error.URLError, OSError, UnicodeDecodeError) as exc:
                 issues.append(f"{i_label}: cannot read {item['repo']}@{item['commit'][:12]}:{item['path']}: {exc}")
                 continue
-            cites = global_id(entry) in source
+            cites = cites_global_id(source, global_id(entry))
             if cites != item["cites_entry"]:
                 issues.append(
                     f"{i_label}: cites_entry is {str(item['cites_entry']).lower()} but the file "
@@ -1608,21 +1779,7 @@ def verify_register(
                 f"unverifiable: {label}.unpublished_sources[{u_index}] is unpublished "
                 f"({item.get('kind')}: {item.get('description')}, {item.get('date')}); verify cannot check it"
             )
-        for t_index, item in enumerate(entry.get("tests") or []):
-            if "repo" not in item:
-                continue  # checked offline
-            t_label = f"{label}.tests[{t_index}]"
-            shipped(t_label, item["repo"], item["commit"])
-            try:
-                source = fetch(item["repo"], item["commit"], item["path"])
-            except (urllib.error.URLError, OSError) as exc:
-                issues.append(f"{t_label}: cannot read {item['repo']}@{item['commit'][:12]}:{item['path']}: {exc}")
-                continue
-            where = f"{item['repo']}@{item['commit'][:12]}:{item['path']}"
-            if not test_exists(item["path"], item["name"], source):
-                issues.append(f"{t_label}: {missing_test(item['name'], where)}")
-            else:
-                counts["tests"] += 1
+        counts["tests"] += verify_external_tests(entry, label, fetch=fetch, shipped=shipped, issues=issues)
     report.insert(
         0,
         "verified: "
@@ -1778,8 +1935,9 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def discover_registers(token: str | None) -> dict[str, Any]:
-    """Every active rulespec-<country> repository's register (absent = none)."""
+def discover_registers(token: str | None, *, filename: str = REGISTER_FILENAME) -> dict[str, Any]:
+    """Every active rulespec-<country> repository's register (absent = none),
+    or another root file of theirs (`filename`, such as CHOICES_FILENAME)."""
 
     registers: dict[str, Any] = {}
     page = 1
@@ -1800,7 +1958,7 @@ def discover_registers(token: str | None) -> dict[str, Any]:
         )
         page += 1
     for full_name, branch in sorted(names):
-        url = f"https://raw.githubusercontent.com/{full_name}/{branch}/{REGISTER_FILENAME}"
+        url = f"https://raw.githubusercontent.com/{full_name}/{branch}/{filename}"
         try:
             with urllib.request.urlopen(url, timeout=60) as response:
                 registers[full_name] = yaml.safe_load(response.read().decode("utf-8"))

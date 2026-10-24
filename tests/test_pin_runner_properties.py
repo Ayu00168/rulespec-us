@@ -29,10 +29,28 @@ Invariants, for every oracle record:
    never raises, and says a commit is shipped exactly when the canonical name
    is the pinned one, the repository says it is not a fork, and compare says
    `identical` or `behind`. Any exception from the API is a refusal.
+8. A household choice's optimum pin (differential): `optimum_shown` accepts an
+   oracle record exactly when a reference predicate, written independently,
+   holds:
+   - the chosen option is not the default (as the float32 numbers a model
+     computes with);
+   - the record holds a choice for the pin's own variable, which names that
+     variable, could be read, and is not among the simulation's inputs (other
+     variables' records, which other pins on the case read, never count);
+   - the case changes no parameter and applies no reform or extension;
+   - the value was read at one of the variable's own periods (any period for
+     an eternity variable): a period of the definition's unit and size 1;
+   - the model computed at least one value, and every value at the instances
+     the pin names (every value when it names none, and none at an instance the
+     record lacks) is the chosen option, compared at the stored dtype: enum
+     and string values by name, never as numbers; integers exactly; float64
+     as float64; and otherwise booleans by type, numbers as float32 and
+     options by name.
 """
 
 from __future__ import annotations
 
+import array
 import contextlib
 import importlib.util
 import io
@@ -40,12 +58,13 @@ import json
 import re
 import sys
 import urllib.error
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
 
 hypothesis = pytest.importorskip("hypothesis")
-from hypothesis import HealthCheck, given, settings, strategies as st  # noqa: E402
+from hypothesis import HealthCheck, assume, given, settings, strategies as st  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -324,3 +343,175 @@ def test_provenance_is_total_and_exact(meta, compare):
     )
     assert record["shipped"] is expected
     assert (record["reason"] is None) is expected
+
+
+# ---------------------------------------------------------------------------
+# 8. A household choice's optimum pin
+
+_REF_NUMBER = re.compile(r"-?(0|[1-9][0-9]*)(\.[0-9]+)?")
+
+
+def _ref_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return Fraction(repr(value)) if value == value and abs(value) != float("inf") else None
+    if isinstance(value, str) and _REF_NUMBER.fullmatch(value):
+        return Fraction(value)
+    return None
+
+
+def _ref_float32(number):
+    """A float32, through the array module rather than struct."""
+
+    try:
+        return array.array("f", [float(number)])[0]
+    except OverflowError:
+        return None
+
+
+def _ref_same(a, b):
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    x, y = _ref_number(a), _ref_number(b)
+    if x is not None or y is not None:
+        return x is not None and y is not None and (x == y or (_ref_float32(x) is not None and _ref_float32(x) == _ref_float32(y)))
+    return isinstance(a, str) and isinstance(b, str) and a.upper().replace("-", "_") == b.upper().replace("-", "_")
+
+
+def _ref_same_stored(value, option, dtype):
+    if dtype in ("enum", "object", "<U5"):
+        return isinstance(value, str) and isinstance(option, str) and value.upper().replace("-", "_") == option.upper().replace("-", "_")
+    if isinstance(dtype, str) and not isinstance(value, bool) and not isinstance(option, bool):
+        x, y = _ref_number(value), _ref_number(option)
+        if dtype in ("int16", "int32", "int64", "uint8"):
+            return x is not None and y is not None and x == y
+        if dtype == "float64":
+            return x is not None and y is not None and float(x) == float(y)
+    return _ref_same(value, option)
+
+
+OPTION = st.sampled_from([True, False, "a", "b", "A", "0.5", "0.50", "1", 1, 0.5, "16777216", "16777217", "0.1000000001", "16777219"])
+COMPUTED = st.lists(
+    st.sampled_from([True, False, 0, 1, 3, 0.5, 0.1, 0.30000001192092896, "a", "A", "B", "16777220", 16777216.0, 16777217]), max_size=3
+)
+IDS = st.lists(st.sampled_from(["u0", "u1", "u2"]), max_size=3, unique=True)
+RECORD = st.one_of(
+    st.fixed_dictionaries({"variable": st.sampled_from(["v", "w"]), "error": st.just("KeyError: 'v'")}),
+    st.fixed_dictionaries({
+        "variable": st.sampled_from(["v", "w"]),
+        "computed": COMPUTED,
+        "ids": IDS,
+        "dtype": st.sampled_from([None, "bool", "float32", "float64", "int64", "uint8", "enum", "object", "<U5"]),
+        "definition_period": st.sampled_from(["year", "month", "eternity", None]),
+        "period_unit": st.sampled_from(["year", "month"]),
+        "period_size": st.sampled_from([1, 1, 2]),
+        "input_variables": st.lists(st.sampled_from(["v", "w", "age"]), max_size=2),
+    }),
+)
+ITEMS = st.one_of(
+    st.none(),
+    st.fixed_dictionaries(
+        {
+            "case": st.fixed_dictionaries({
+                "parameters": st.lists(st.sampled_from(["gov.x.y", "gov.z"]), max_size=1),
+                "reforms": st.booleans(),
+                "extensions": st.booleans(),
+            }),
+        },
+        optional={"choices": st.dictionaries(st.sampled_from(["v", "w"]), RECORD, max_size=2)},
+    ),
+)
+INSTANCES = st.one_of(st.none(), st.lists(st.sampled_from(["u0", "u1", "u9"]), min_size=1, max_size=2, unique=True).map(tuple))
+
+
+@SETTINGS
+@given(ITEMS, OPTION, OPTION, INSTANCES)
+def test_optimum_shown_matches_a_reference(item, chooses, default, instances):
+    case = (item or {}).get("case") or {}
+    choices = (item or {}).get("choices")
+    choice = choices.get("v") if isinstance(choices, dict) else None
+    computed = (choice or {}).get("computed") or []
+    ids = (choice or {}).get("ids")
+    if instances is None:
+        selected = computed
+    elif isinstance(ids, list) and len(ids) == len(computed) and all(each in ids for each in instances):
+        selected = [computed[ids.index(each)] for each in instances]
+    else:
+        selected = None
+    expected = (
+        item is not None
+        and isinstance(choices, dict)
+        and not _ref_same(chooses, default)
+        and isinstance(choice, dict)
+        and choice.get("variable") == "v"
+        and "error" not in choice
+        and "v" not in choice.get("input_variables", [])
+        and isinstance(choice.get("definition_period"), str)
+        and (choice["definition_period"] == "eternity"
+             or (choice.get("period_unit") == choice["definition_period"] and choice.get("period_size") == 1))
+        and not case.get("parameters")
+        and not case.get("reforms")
+        and not case.get("extensions")
+        and bool(computed)
+        and selected is not None
+        and all(_ref_same_stored(value, chooses, choice.get("dtype")) for value in selected)
+    )
+    assert (runner.optimum_shown(item, ("v", chooses, default, instances)) is None) is expected
+
+
+# Round 5 (P3): random records are almost never accepted, so this property
+# builds one that is, checks it is, then changes one field and checks the
+# runner and the reference agree on the result.
+ACCEPTABLE_OPTIONS = st.sampled_from([True, False, "a", "b", "0.5", "1", "16777219", "16777220"])
+FIELD_CHANGES = st.sampled_from([
+    None, "input", "override", "reform", "extension", "other value", "no value", "other variable", "missing record",
+    "month at year", "two years", "no period", "error", "missing instance", "is the default",
+])
+
+
+@SETTINGS
+@given(ACCEPTABLE_OPTIONS, ACCEPTABLE_OPTIONS, st.integers(1, 3), st.sampled_from([None, "bool", "float32", "int64", "enum", "object"]),
+       st.booleans(), FIELD_CHANGES)
+def test_optimum_shown_accepts_a_built_record_and_one_change_matters(chooses, default, count, dtype, named, change):
+    assume(not _ref_same(chooses, default))
+    dtype = {bool: "bool"}.get(type(chooses), dtype) if dtype is not None else None
+    assume(_ref_same_stored(chooses, chooses, dtype))  # a dtype that holds the option
+    ids = [f"u{index}" for index in range(count)]
+    choice = {"variable": "v", "computed": [chooses] * count, "ids": ids, "dtype": dtype, "definition_period": "year",
+              "period": "2026", "period_unit": "year", "period_size": 1, "input_variables": ["age"]}
+    item = {"case": {"parameters": [], "reforms": False, "extensions": False}, "choices": {"v": choice}}
+    instances = (ids[0],) if named else None
+    assert runner.optimum_shown(item, ("v", chooses, default, instances)) is None
+    if change is None:
+        return
+    if change == "input":
+        choice["input_variables"].append("v")
+    elif change == "override":
+        item["case"]["parameters"] = ["gov.x"]
+    elif change == "reform":
+        item["case"]["reforms"] = True
+    elif change == "extension":
+        item["case"]["extensions"] = True
+    elif change == "other value":
+        other = next(option for option in (False, True, "zz", "0.25", "7") if not _ref_same_stored(option, chooses, dtype))
+        choice["computed"][0] = other
+    elif change == "no value":
+        choice["computed"], choice["ids"] = [], []
+    elif change == "other variable":
+        choice["variable"] = "w"
+    elif change == "missing record":
+        item["choices"] = {"w": {**choice, "variable": "w"}}
+    elif change == "month at year":
+        choice["definition_period"] = "month"
+    elif change == "two years":
+        choice["period_size"] = 2
+    elif change == "no period":
+        del choice["period_unit"]
+    elif change == "error":
+        choice["error"] = "ValueError: x"
+    elif change == "missing instance":
+        instances = ("nobody",)
+    elif change == "is the default":
+        default = chooses
+    assert runner.optimum_shown(item, ("v", chooses, default, instances)) is not None, change

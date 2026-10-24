@@ -1,10 +1,12 @@
 name: Source conflicts
 
-# Network verification of known-source-conflicts.yaml. The offline checks
-# (tools/source_conflicts.py check: schema, status rules, hygiene, in-repo
-# references, the syntactic screen of test pins and the scan for unregistered
-# module interpretations) run inside the required Repository Checks pytest
-# leg. This workflow checks what needs the network, in two checks:
+# Network verification of known-source-conflicts.yaml and household-choices.yaml
+# (tools/household_choices.py, the same checks for the household's own
+# choices). The offline checks (tools/source_conflicts.py check: schema,
+# status rules, hygiene, in-repo references, the syntactic screen of test
+# pins and the scan for unregistered module interpretations; and
+# tools/household_choices.py check) run inside the required Repository Checks
+# pytest leg. This workflow checks what needs the network, in two checks:
 #
 # - `verify` (check name source-conflicts): every `texts` excerpt verbatim at
 #   its citation in the PINNED corpus release (.axiom/toolchain.toml) and every
@@ -34,13 +36,18 @@ on:
     branches: [main]
     paths:
       - known-source-conflicts.yaml
+      - household-choices.yaml
       - tools/source_conflicts.py
+      - tools/household_choices.py
       - tools/pin_runner.py
       - tools/pin_oracle/**
       - tests/test_source_conflicts.py
       - tests/test_source_conflicts_properties.py
+      - tests/test_household_choices.py
+      - tests/test_household_choices_properties.py
       - tests/test_pin_runner.py
       - tests/test_pin_runner_properties.py
+      - tests/test_pin_oracle_core.py
       - .github/workflows/source-conflicts.yml
       - .axiom/toolchain.toml
       - .axiom/workflow-toolchain.toml
@@ -48,7 +55,9 @@ on:
     branches: [main]
     paths:
       - known-source-conflicts.yaml
+      - household-choices.yaml
       - tools/source_conflicts.py
+      - tools/household_choices.py
       - tools/pin_runner.py
       - tools/pin_oracle/**
       - .github/workflows/source-conflicts.yml
@@ -181,6 +190,7 @@ jobs:
         run: |
           python rulespec-us/tools/source_conflicts.py check --root rulespec-us \
             --warnings-file "$RUNNER_TEMP/open-interpretations.txt"
+          python rulespec-us/tools/household_choices.py check --root rulespec-us
 
       - name: Keep the unregistered open interpretations
         if: always()
@@ -198,12 +208,15 @@ jobs:
           set -o pipefail
           python rulespec-us/tools/source_conflicts.py verify \
             --root rulespec-us --corpus-path axiom-corpus 2>&1 | tee "$RUNNER_TEMP/source-conflicts.txt"
+          python rulespec-us/tools/household_choices.py verify \
+            --root rulespec-us --corpus-path axiom-corpus 2>&1 | tee "$RUNNER_TEMP/household-choices.txt"
 
       - name: Test the tool, with property-based and differential tests
         working-directory: rulespec-us
         run: |
           python -m pytest -q -p no:cacheprovider \
-            tests/test_source_conflicts.py tests/test_source_conflicts_properties.py
+            tests/test_source_conflicts.py tests/test_source_conflicts_properties.py \
+            tests/test_household_choices.py tests/test_household_choices_properties.py
 
       - name: Summarize
         if: always()
@@ -214,6 +227,14 @@ jobs:
               echo '### Source conflicts'
               echo '```'
               head -c 60000 "$RUNNER_TEMP/source-conflicts.txt"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "$RUNNER_TEMP/household-choices.txt" ]; then
+            {
+              echo '### Household choices'
+              echo '```'
+              head -c 60000 "$RUNNER_TEMP/household-choices.txt"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -302,9 +323,9 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/pin-runs-cache
-          key: pinned-tests-${{ hashFiles('rulespec-us/known-source-conflicts.yaml', 'rulespec-us/tools/pin_runner.py', 'rulespec-us/tools/pin_oracle/axiom_pin_oracle.py') }}-${{ github.run_id }}
+          key: pinned-tests-${{ hashFiles('rulespec-us/known-source-conflicts.yaml', 'rulespec-us/household-choices.yaml', 'rulespec-us/tools/pin_runner.py', 'rulespec-us/tools/pin_oracle/axiom_pin_oracle.py') }}-${{ github.run_id }}
           restore-keys: |
-            pinned-tests-${{ hashFiles('rulespec-us/known-source-conflicts.yaml', 'rulespec-us/tools/pin_runner.py', 'rulespec-us/tools/pin_oracle/axiom_pin_oracle.py') }}-
+            pinned-tests-${{ hashFiles('rulespec-us/known-source-conflicts.yaml', 'rulespec-us/household-choices.yaml', 'rulespec-us/tools/pin_runner.py', 'rulespec-us/tools/pin_oracle/axiom_pin_oracle.py') }}-
             pinned-tests-
 
       - name: Test the runner on fixture repositories
@@ -312,6 +333,18 @@ jobs:
         env:
           AXIOM_PIN_RUNNER_TESTS_REQUIRED: "1"
         run: python -m pytest -q -p no:cacheprovider tests/test_pin_runner.py tests/test_pin_runner_properties.py
+
+      - name: Test the oracle against policyengine-core
+        # The oracle reads choices through core's own YAML runner; this runs
+        # tests/test_pin_oracle_core.py's cases through it, in an environment
+        # of its own, so the runner's environment stays as it is.
+        working-directory: rulespec-us
+        env:
+          AXIOM_PIN_ORACLE_CORE_REQUIRED: "1"
+        run: >-
+          uv run -q --no-project --python 3.14 --with pytest==9.1.1 --with pyyaml==6.0.3
+          --with policyengine-core==3.33.12
+          python -m pytest -q -p no:cacheprovider tests/test_pin_oracle_core.py
 
       - name: Fetch the provenance record
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -330,7 +363,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/pin-runs-cache
-          key: pinned-tests-${{ hashFiles('rulespec-us/known-source-conflicts.yaml', 'rulespec-us/tools/pin_runner.py', 'rulespec-us/tools/pin_oracle/axiom_pin_oracle.py') }}-${{ github.run_id }}
+          key: pinned-tests-${{ hashFiles('rulespec-us/known-source-conflicts.yaml', 'rulespec-us/household-choices.yaml', 'rulespec-us/tools/pin_runner.py', 'rulespec-us/tools/pin_oracle/axiom_pin_oracle.py') }}-${{ github.run_id }}
 
       - name: Keep the report
         if: always()
@@ -440,8 +473,8 @@ jobs:
             echo "an excerpt no longer matches the pinned corpus release or its snapshot, a"
             echo "pinned snapshot or commit is unreadable, or an implementation's cites_entry"
             echo "claim no longer matches its file. If it is \`pinned-tests\`, a pinned test"
-            echo "did not pass at its pinned commit (below). Fix known-source-conflicts.yaml"
-            echo "(or the pin that moved). Any other step (setup, the offline check, the"
+            echo "did not pass at its pinned commit (below). Fix known-source-conflicts.yaml or"
+            echo "household-choices.yaml (or the pin that moved). Any other step (setup, the offline check, the"
             echo "tools' tests) needs its own fix. Close this issue once the workflow is green."
             echo
             cat "$RUNNER_TEMP/pins.md"

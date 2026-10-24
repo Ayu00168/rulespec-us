@@ -17,6 +17,8 @@ Property-based tests of the classifier live in test_pin_runner_properties.py.
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import email.message
 import http.server
 import importlib.util
@@ -363,6 +365,327 @@ def test_cache_key():
         runner.cache_key("PolicyEngine/a", COMMIT, [a], "v1"),
         runner.cache_key("PolicyEngine/a", COMMIT, [a, b], "v2"),
     }) == 5
+
+
+# ---------------------------------------------------------------------------
+# Household choices: an optimum pin must show the model choosing
+
+PE_US = "PolicyEngine/policyengine-us"
+EXPECT = ("tax_unit_itemizes", True, False, None)
+OPTIMUM = {"repo": PE_US, "commit": COMMIT, "path": "policyengine_us/tests/a.yaml", "name": "Itemizes",
+           "pins": ["optimum"], "variable": "tax_unit_itemizes", "chooses": True}
+
+
+def choice_entry(*tests, default=False):
+    return {"jurisdiction": "us", "id": "choice", "default": {"value": default, "basis": "statute"}, "tests": list(tests)}
+
+
+def choices(*tests, default=False):
+    return {"version": 1, "entries": [choice_entry(*tests, default=default)]}
+
+
+def test_collect_pins_reads_household_choices():
+    default_pin = {**OPTIMUM, "name": "Takes the default", "pins": ["default"]}
+    no_option = {key: value for key, value in OPTIMUM.items() if key != "chooses"}
+    groups, unrun = runner.collect_pins(register(), choices(
+        OPTIMUM,
+        default_pin,
+        {**OPTIMUM, "path": "tests/test_a.py", "name": "test_a"},
+        {**OPTIMUM, "name": "No variable", "variable": "not a name"},
+        {**OPTIMUM, "name": "The default", "chooses": False},
+        {**no_option, "name": "No option"},
+        {**OPTIMUM, "name": "One unit", "instances": ["unit_0"]},
+        {**OPTIMUM, "name": "Bad instances", "instances": ["unit_0", "unit_0"]},
+        {**OPTIMUM, "name": "Empty instances", "instances": []},
+    ))
+    assert [(p.label, p.name, p.expect) for p in groups[(PE_US, COMMIT)]] == [
+        ("choices.entries[0].tests[0]", "Itemizes", EXPECT),
+        ("choices.entries[0].tests[1]", "Takes the default", None),
+        ("choices.entries[0].tests[6]", "One unit", ("tax_unit_itemizes", True, False, ("unit_0",))),
+    ]
+    assert [item["label"] for item in unrun] == [f"choices.entries[0].tests[{index}]" for index in (2, 3, 4, 5, 7, 8)]
+    reasons = [item["reason"] for item in unrun]
+    assert "optimum pin on a Python test" in reasons[0]
+    assert "without a decision variable" in reasons[1]
+    assert "chosen option is the default" in reasons[2]
+    assert "without a chosen option and a default" in reasons[3]
+    assert all("malformed instances" in reason for reason in reasons[4:])
+    # A register pin is never read as an optimum, whatever its pins say.
+    groups, unrun = runner.collect_pins(register({**OPTIMUM, "pins": ["optimum"], "chooses": False}))
+    assert [p.expect for p in groups[(PE_US, COMMIT)]] == [None] and unrun == []
+
+
+AS_SHIPPED = {"parameters": [], "reforms": False, "extensions": False}
+
+
+def record(*computed, variable="tax_unit_itemizes", inputs=("age", "employment_income"), ids=None, dtype="bool", **extra):
+    """One decision variable's record, as the oracle writes it."""
+
+    ids = list(ids) if ids is not None else [f"unit_{index}" for index in range(len(computed))]
+    return {"variable": variable, "computed": list(computed), "ids": ids, "dtype": dtype, "definition_period": "year",
+            "period": "2026", "period_unit": "year", "period_size": 1, "input_variables": list(inputs), **extra}
+
+
+def chose(*computed, inputs=("age", "employment_income"), **case):
+    """An oracle record of a case whose simulation computed these values."""
+
+    return {"case": {**AS_SHIPPED, **case}, "choices": {"tax_unit_itemizes": record(*computed, inputs=inputs)}}
+
+
+@pytest.mark.parametrize(
+    ("item", "reason"),
+    [
+        (chose(True), None),
+        (chose(True, True), None),  # every tax unit chose it
+        (chose(True, inputs=["tax_unit_itemizes", "age"]), "sets tax_unit_itemizes as an input (directly or through axes)"),
+        (chose(True, False), "computed tax_unit_itemizes = False"),
+        (chose(1), "computed tax_unit_itemizes = 1"),  # 1 is not true
+        (chose(), "computed no value of tax_unit_itemizes"),
+        # #1844 reviews: a case that changes the model doesn't show it choosing as shipped.
+        (chose(True, parameters=["gov.simulation.branch_to_determine_itemization"]),
+         "changes the model (gov.simulation.branch_to_determine_itemization)"),
+        (chose(True, reforms=True), "changes the model (a reform or extension)"),
+        (chose(True, extensions=True), "changes the model (a reform or extension)"),
+        ({"case": AS_SHIPPED, "choices": {"tax_unit_itemizes": {"variable": "tax_unit_itemizes", "error": "KeyError: 'x'"}}},
+         "could not be read: KeyError"),
+        # An error means the record can't be trusted, whatever else it holds.
+        ({"case": AS_SHIPPED, "choices": {"tax_unit_itemizes": record(True, error="ValueError: partly read")}},
+         "could not be read: ValueError"),
+        ({"case": AS_SHIPPED}, "did not expose the case or the model's choices"),
+        ({"choices": chose(True)["choices"]}, "did not expose the case or the model's choices"),
+        (None, "did not expose the case or the model's choices"),
+        # #1844 review round 3 (P1): a pin is judged only on its own variable's
+        # record. Another entry's pin on the same case reads another variable.
+        ({"case": AS_SHIPPED, "choices": {"zz_always_true": record(True, variable="zz_always_true")}},
+         "did not read tax_unit_itemizes from the case"),
+        ({"case": AS_SHIPPED, "choices": {"tax_unit_itemizes": record(True, variable="zz_always_true")}},
+         "did not read tax_unit_itemizes from the case"),
+        ({"case": AS_SHIPPED, "choices": {"tax_unit_itemizes": record(False),
+                                          "zz_always_true": record(True, variable="zz_always_true")}},
+         "computed tax_unit_itemizes = False"),
+    ],
+)
+def test_optimum_shown(item, reason):
+    found = runner.optimum_shown(item, EXPECT)
+    assert (found is None) if reason is None else (found is not None and reason in found), found
+
+
+@pytest.mark.parametrize(
+    ("periods", "reason"),
+    [
+        ({}, None),
+        ({"definition_period": "eternity", "period": "2026", "period_unit": "year", "period_size": 1}, None),
+        ({"definition_period": "eternity", "period": "2026-01", "period_unit": "month", "period_size": 1}, None),
+        ({"definition_period": "month", "period": "2026-01", "period_unit": "month", "period_size": 1}, None),
+        # #1844 review round 4 (P1): core sums a monthly variable over a year (or
+        # picks its last month), and divides a yearly one into months, so the
+        # value isn't one choice: a sum of defaults can look like an optimum.
+        ({"definition_period": "month"}, "defined by month, over 2026"),
+        ({"definition_period": "year", "period": "2026-01", "period_unit": "month"}, "defined by year, over 2026-01"),
+        ({"period": "year:2026:2", "period_size": 2}, "defined by year, over year:2026:2"),
+        ({"definition_period": None}, "did not record the period"),
+        ({"period_unit": 3}, "did not record the period"),
+        ({"period_size": "1"}, "did not record the period"),
+    ],
+)
+def test_an_optimum_pin_reads_one_of_the_variables_own_periods(periods, reason):
+    choice = {**record(True), **periods}
+    found = runner.optimum_shown({"case": AS_SHIPPED, "choices": {"tax_unit_itemizes": choice}}, EXPECT)
+    assert (found is None) if reason is None else (found is not None and reason in found), found
+
+
+@pytest.mark.parametrize(
+    ("instances", "ids", "reason"),
+    [
+        (None, None, "computed tax_unit_itemizes = False, not"),  # every instance must choose
+        (("unit_0",), None, None),
+        (("unit_0", "unit_1"), None, "computed tax_unit_itemizes = False for unit_1"),
+        (("unit_9",), None, "has no instance 'unit_9'"),
+        (("unit_0",), [], "did not record which instance"),
+        (("unit_0",), ["unit_0"], "did not record which instance"),  # fewer ids than values
+    ],
+)
+def test_an_optimum_pin_may_name_the_instances_that_choose(instances, ids, reason):
+    # #1844 review round 3 (P2): in a case with several tax units or people,
+    # a pin can name the instances whose choice it shows.
+    choice = record(True, False)
+    if ids is not None:
+        choice["ids"] = ids
+    found = runner.optimum_shown({"case": AS_SHIPPED, "choices": {"tax_unit_itemizes": choice}},
+                                 ("tax_unit_itemizes", True, False, instances))
+    assert (found is None) if reason is None else (found is not None and reason in found), found
+
+
+@pytest.mark.parametrize(
+    ("computed", "chooses", "default", "dtype", "vacuous"),
+    [
+        # #1844 review round 2 (P1): a float32 model is read as the float32
+        # number it stores.
+        ([0.30000001192092896], "0.3", "0.5", "float32", False),
+        ([0.5], "0.5005", "0.5", "float32", True),  # the model computed the default
+        ([0.5], "0.500000001", "0.5", "float32", True),  # the same float32 number as the default
+        ([16777216.0], "16777217", "16777216", "float32", True),
+        (["SEPARATE"], "separate", "joint", "enum", False),  # an enum by its name
+        # Round 3 (P3): an integer compares exactly, and a float64 as a float64.
+        ([16777220], "16777219", "0", "int64", True),
+        ([16777219], "16777219", "0", "int32", False),
+        ([0.1], "0.1", "0.5", "float64", False),
+        ([0.1], "0.1000000001", "0.5", "float64", True),
+        # A record without a dtype compares as float32, as same_option does.
+        ([16777220], "16777219", "0", None, False),
+    ],
+)
+def test_numbers_and_enums_compare_as_the_model_stores_them(computed, chooses, default, dtype, vacuous):
+    item = {"case": AS_SHIPPED, "choices": {"v": record(*computed, variable="v", inputs=(), dtype=dtype)}}
+    assert (runner.optimum_shown(item, ("v", chooses, default, None)) is not None) is vacuous
+
+
+@pytest.mark.parametrize(
+    ("value", "option", "dtype", "same"),
+    [
+        (True, True, "bool", True), (1, True, "bool", False), (True, 1, "int64", False),
+        (3, "3", "int64", True), (3, "3.0", "int64", True), (3, "3.5", "int64", False), (3, "x", "int64", False),
+        (0.1, "0.1", "float64", True), (0.1, "0.1000000001", "float64", False),
+        (0.1, "0.1000000001", "float32", True), ("SEPARATE", "separate", "enum", True),
+        # Round 4 (P1): an enum or string value is a name, however numeric.
+        ("16777220", "16777219", "enum", False), ("16777220", "16777220", "enum", True), ("0", 0, "enum", False),
+        ("16777220", "16777219", "object", False), ("a", "A", "object", True), ("12", "12.0", "<U2", False),
+        # An unsigned integer compares exactly too.
+        (3, "3", "uint8", True), (3, "3.5", "uint8", False), (16777220, "16777219", "uint32", False),
+    ],
+)
+def test_same_stored(value, option, dtype, same):
+    assert runner.same_stored(value, option, dtype) is same
+
+
+def test_an_optimum_that_is_the_default_shows_nothing():
+    item = {"case": AS_SHIPPED, "choices": {"share": record(0.5, variable="share", inputs=(), dtype="float32")}}
+    assert "is the default" in runner.optimum_shown(item, ("share", "0.5", "0.50", None))
+    assert runner.optimum_shown(item, ("share", "0.5", "1", None)) is None
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "same"),
+    [
+        (True, True, True), (True, 1, False), (False, 0, False), ("a", "a", True), ("a", "b", False),
+        ("0.5", 0.5, True), ("0.5", "0.50", True), (1, 1.0, True), ("1", "1.5", False), ("inf", float("inf"), False),
+        ("true", True, False), (None, None, False),
+        # #1844 review (P2): an enum option matches the model's name for it.
+        ("separate", "SEPARATE", True), ("head-of-household", "HEAD_OF_HOUSEHOLD", True), ("separate", "JOINT", False),
+        # The float32 numbers a model computes with.
+        ("0.3", 0.30000001192092896, True), ("16777217", "16777216", True), ("0.5005", "0.5", False),
+    ],
+)
+def test_same_option(a, b, same):
+    assert runner.same_option(a, b) is same
+
+
+def test_classify_marks_a_vacuous_optimum():
+    item = ("policyengine_us/tests/a.yaml::", "policyengine_us/tests/a.yaml", "Itemizes")
+    good = oracle([item], reports={item[0]: phases()})
+    good["collected"][0].update(chose(True))
+    optimum = runner.Pin("us:choice", "choices.entries[0].tests[0]", PE_US, COMMIT, item[1], item[2], EXPECT)
+    results, issues = runner.classify(good, [optimum], process_exit=0)
+    assert results[0]["outcome"] == "passed" and issues == []
+    forced = copy.deepcopy(good)
+    forced["collected"][0]["choices"]["tax_unit_itemizes"]["input_variables"].append("tax_unit_itemizes")
+    results, _ = runner.classify(forced, [optimum], process_exit=0)
+    assert results[0]["outcome"] == "vacuous" and "as an input" in results[0]["detail"]
+    assert not runner.commit_passed({"pins": results, "issues": [], "pytest_exit": 0})
+    # A failing case fails, whatever it computed.
+    failing = oracle([item], reports={item[0]: phases(call="failed")})
+    failing["collected"][0].update(chose(True))
+    assert runner.classify(failing, [optimum], process_exit=0)[0][0]["outcome"] == "failed"
+    # Only an optimum pin is checked: without the expectation the record passes.
+    plain = dataclasses.replace(optimum, expect=None)
+    assert runner.classify(forced, [plain], process_exit=0)[0][0]["outcome"] == "passed"
+    # Two pins on one case, on two variables, are judged on their own records.
+    both = copy.deepcopy(good)
+    both["collected"][0]["choices"]["other"] = record(False, variable="other")
+    other = dataclasses.replace(optimum, label="choices.entries[1].tests[0]", expect=("other", True, False, None))
+    results, _ = runner.classify(both, [optimum, other], process_exit=0)
+    assert [result["outcome"] for result in results] == ["passed", "vacuous"]
+
+
+oracle_module = _load("axiom_pin_oracle", REPO_ROOT / "tools" / "pin_oracle" / "axiom_pin_oracle.py")
+
+
+def test_the_oracle_records_values_as_bounded_json():
+    # #1844 review round 3 (P3): what the oracle records is JSON, and too
+    # large or too deep a value is None, which the runner reads as no value.
+    jsonable = oracle_module._jsonable
+    assert jsonable([True, 0.5, "a", None]) == [True, 0.5, "a", None]
+    assert jsonable({1: [b"x"]}) == {"1": ["b'x'"]}
+    assert jsonable(list(range(oracle_module._CASE_LIMIT))) is None
+    assert jsonable("x" * (oracle_module._CASE_LIMIT - 2)) == "x" * (oracle_module._CASE_LIMIT - 2)
+    assert jsonable("x" * (oracle_module._CASE_LIMIT - 1)) is None
+    deep: list = []
+    for _ in range(5000):
+        deep = [deep]
+    assert jsonable(deep) is None
+    assert jsonable(float("nan")) is not None  # JSON-encodable as NaN; the runner's comparisons refuse it
+    item = {"case": AS_SHIPPED, "choices": {"v": {**record(True, variable="v"), "computed": None}}}
+    assert "computed no value of v" in runner.optimum_shown(item, ("v", True, False, None))
+
+
+def test_the_oracle_decodes_fixed_length_strings():
+    # #1844 review round 5 (P2): core returns a str variable with max_length
+    # as bytes; the oracle records the text, so `|S20` values compare by name.
+    class Array(list):
+        def tolist(self):
+            return list(self)
+
+    assert oracle_module._listed(Array([b"16777220", b"SEPARATE"])) == ["16777220", "SEPARATE"]
+    assert oracle_module._listed([True, 0.5, "a"]) == [True, 0.5, "a"]
+    with pytest.raises(UnicodeDecodeError):
+        oracle_module._listed(Array([b"\xff"]))
+    item = {"case": AS_SHIPPED, "choices": {"v": record("16777220", variable="v", inputs=(), dtype="|S20")}}
+    assert runner.optimum_shown(item, ("v", "16777220", "0", None)) is None
+    assert "computed v = '16777220'" in runner.optimum_shown(item, ("v", "16777219", "0", None))
+
+
+def test_cache_key_covers_an_optimum_pins_expectation():
+    plain = pin("Itemizes", path="tests/a.yaml")
+    keys = {
+        runner.cache_key(PE_US, COMMIT, [plain], "v1"),
+        runner.cache_key(PE_US, COMMIT, [dataclasses.replace(plain, expect=EXPECT)], "v1"),
+        runner.cache_key(PE_US, COMMIT, [dataclasses.replace(plain, expect=("tax_unit_itemizes", False, True, None))], "v1"),
+        runner.cache_key(PE_US, COMMIT, [dataclasses.replace(plain, expect=("tax_unit_itemizes", True, False, ("u",)))], "v1"),
+    }
+    assert len(keys) == 4
+
+
+def test_summarize_prints_household_choice_pins(tmp_path):
+    report = {
+        "commits": [{"repo": PE_US, "commit": COMMIT, "issues": [], "pins": [
+            {"entry": "us:choice", "label": "choices.entries[0].tests[0]", "id": "policyengine_us/tests/a.yaml::Itemizes",
+             "outcome": "vacuous"}]}],
+        "unrun": [{"entry": "us:choice", "label": "choices.entries[0].tests[1]", "reason": "x"}],
+        "issues": ["x"],
+    }
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report))
+    assert runner.summarize(path) == [
+        f"- `us:choice` choices.entries[0].tests[0]: `{PE_US}@cccccccccccc:policyengine_us/tests/a.yaml::Itemizes` vacuous",
+        "- `us:choice` choices.entries[0].tests[1]: the runner can't execute this pin.",
+    ]
+
+
+def test_cli_reads_the_household_choices_file(tmp_path):
+    tools = ["--uv", sys.executable, "--git", sys.executable]
+    report_path = tmp_path / "report.json"
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "known-source-conflicts.yaml").write_text(yaml.safe_dump(register()))
+    # No household-choices file beside the register: nothing more to run.
+    assert runner.main(["--root", str(root), "--report", str(report_path), *tools]) == 0
+    # The file beside the register is read; its unrunnable pins are issues.
+    (root / "household-choices.yaml").write_text(yaml.safe_dump(choices({**OPTIMUM, "path": "tests/test_a.py", "name": "test_a"})))
+    assert runner.main(["--root", str(root), "--report", str(report_path), *tools]) == 1
+    assert json.loads(report_path.read_text())["unrun"][0]["label"] == "choices.entries[0].tests[0]"
+    # A file named explicitly must exist.
+    assert runner.main(["--root", str(root), "--choices", str(tmp_path / "absent.yaml"), "--report", str(report_path), *tools]) == 1
+    assert json.loads(report_path.read_text())["issues"][0].startswith("runner error:")
 
 
 def test_the_cache_holds_and_returns_only_passing_commits(tmp_path):
@@ -819,11 +1142,17 @@ def test_pinned_tests_runs_on_every_change_it_depends_on():
     on = workflow()[True]  # PyYAML reads the `on:` key as True
     for event in ("pull_request", "push"):
         paths = on[event]["paths"]
-        for needed in ("known-source-conflicts.yaml", "tools/source_conflicts.py", "tools/pin_runner.py",
-                       "tools/pin_oracle/**", ".github/workflows/source-conflicts.yml"):
+        for needed in ("known-source-conflicts.yaml", "household-choices.yaml", "tools/source_conflicts.py",
+                       "tools/household_choices.py", "tools/pin_runner.py", "tools/pin_oracle/**",
+                       ".github/workflows/source-conflicts.yml"):
             assert needed in paths, (event, needed)
-    for needed in ("tests/test_pin_runner.py", "tests/test_pin_runner_properties.py"):
+    for needed in ("tests/test_pin_runner.py", "tests/test_pin_runner_properties.py", "tests/test_household_choices.py",
+                   "tests/test_household_choices_properties.py"):
         assert needed in on["pull_request"]["paths"]
+    # A pass is cached against both files the pins come from.
+    key = next(step for step in workflow()["jobs"]["pinned-tests"]["steps"]
+               if str(step.get("uses", "")).startswith("actions/cache/save@"))["with"]["key"]
+    assert "rulespec-us/household-choices.yaml" in key
     assert "schedule" in on
 
 
@@ -964,6 +1293,89 @@ FIXTURE_CORE = textwrap.dedent(
     import yaml
 
 
+    class Values(list):
+        # A numpy array, as core returns one: values and their dtype.
+        def __init__(self, values, dtype=None):
+            super().__init__(values)
+            self.dtype = dtype
+
+        def tolist(self):
+            return list(self)
+
+
+    class EnumValues(Values):
+        # An enum's values, as core's EnumArray holds them: indices, read by
+        # name through decode_to_str().
+        def __init__(self, names):
+            super().__init__(range(len(names)), "int16")
+            self.names = names
+
+        def decode_to_str(self):
+            return Values(self.names)
+
+
+    class Population:
+        def __init__(self, ids):
+            self.ids = ids
+
+
+    class Period(str):
+        # core's Period, as far as the oracle reads it: a year or a month.
+        @property
+        def unit(self):
+            return "month" if len(self.split("-")) == 2 else "year"
+
+        @property
+        def size(self):
+            return 1
+
+
+    class periods:
+        # The simulation's own package's periods module, as core has one.
+        @staticmethod
+        def period(raw):
+            return Period(str(raw))
+
+
+    class Definition:
+        def __init__(self, definition_period):
+            self.definition_period = definition_period
+
+
+    class TaxBenefitSystem:
+        def __init__(self, definitions):
+            self.definitions = definitions
+
+        def get_variable(self, name, check_existence=False):
+            return Definition(self.definitions.get(name, "year"))
+
+
+    class Simulation:
+        # policyengine-core's simulation, as the oracle reads it: inputs
+        # (direct, or named by axes) and calculate(). Values come from the
+        # case's `computed`.
+
+        def __init__(self, test):
+            case_input = test.get("input") or {}
+            axes = [axis["name"] for group in case_input.get("axes") or [] for axis in group]
+            self.input_variables = [key for key in case_input if "." not in key and key != "axes"] + axes
+            self.computed = test.get("computed") or {}
+            self.ids = test.get("ids") or {}
+            self.default_calculation_period = "2024"
+            self.tax_benefit_system = TaxBenefitSystem(test.get("definition_periods") or {})
+
+        def calculate(self, variable, period):
+            values = self.computed[variable]
+            if values and all(isinstance(value, str) for value in values):
+                return EnumValues(values)
+            if all(isinstance(value, bool) for value in values):
+                return Values(values, "bool")
+            return Values(values, "float32" if any(isinstance(value, float) for value in values) else "int64")
+
+        def get_variable_population(self, variable):
+            return Population(self.ids.get(variable) or [f"u{index}" for index in range(len(self.computed[variable]))])
+
+
     class YamlFile(pytest.File):
         def collect(self):
             for test in yaml.safe_load(self.path.read_text()):
@@ -977,9 +1389,12 @@ FIXTURE_CORE = textwrap.dedent(
 
         def runtest(self):
             self.name = self.test.get("name", "")
+            self.simulation = Simulation(self.test)
             output = self.test.get("output")
             if output == "skip":
                 pytest.skip("planted")
+            if isinstance(output, dict):  # a case that states variables, as a policy test does
+                output = output.get("status")
             assert output == "ok", f"expected ok, got {output!r}"
 
         def reportinfo(self):
@@ -1037,6 +1452,70 @@ YAML_CASES = textwrap.dedent(
       output: ok
     - name: Both pass
       output: ok
+    """
+)
+
+
+CHOICE_CASES = textwrap.dedent(
+    """\
+    - name: Chooses to itemize
+      input: {income: 1}
+      computed: {itemizes: [true]}
+      output: {status: ok}
+    - name: Told to itemize
+      input: {income: 1, itemizes: true}
+      computed: {itemizes: [true]}
+      output: {status: ok}
+    - name: Forced through axes
+      input: {income: 1, axes: [[{name: itemizes, count: 1, min: 1, max: 1}]]}
+      computed: {itemizes: [true]}
+      output: {status: ok}
+    - name: Does not itemize
+      input: {income: 1}
+      computed: {itemizes: [false]}
+      output: {status: ok}
+    - name: Computes nothing for the choice
+      input: {income: 1}
+      output: {status: ok}
+    - name: Chooses under a parameter override
+      input: {gov.itemizing.compare_tax: false, income: 1}
+      computed: {itemizes: [true]}
+      output: {status: ok}
+    - name: Chooses under a reform
+      reforms: [some.reform]
+      input: {income: 1}
+      computed: {itemizes: [true]}
+      output: {status: ok}
+    - name: Chooses under an extension
+      extensions: [some.extension]
+      input: {income: 1}
+      computed: {itemizes: [true]}
+      output: {status: ok}
+    - name: Files separately
+      input: {income: 1}
+      computed: {filing_status: [SEPARATE]}
+      output: {status: ok}
+    - name: Two entries pin this case
+      input: {income: 1}
+      computed: {itemizes: [false], always_true: [true]}
+      output: {status: ok}
+    - name: Only the first unit itemizes
+      input: {income: 1}
+      computed: {itemizes: [true, false]}
+      ids: {itemizes: [first, second]}
+      output: {status: ok}
+    - name: A monthly choice read over a year
+      period: 2024
+      input: {income: 1}
+      computed: {itemizes: [true]}
+      definition_periods: {itemizes: month}
+      output: {status: ok}
+    - name: A monthly choice read over a month
+      period: 2024-01
+      input: {income: 1}
+      computed: {itemizes: [true]}
+      definition_periods: {itemizes: month}
+      output: {status: ok}
     """
 )
 
@@ -1179,6 +1658,7 @@ def fixtures(tmp_path_factory):
             "fixture_core/cli.py": FIXTURE_CORE,
             "tests/policy/cases.yaml": YAML_CASES,
             "tests/policy/passing.yaml": "- name: Only passing\n  output: ok\n",
+            "tests/policy/choices.yaml": CHOICE_CASES,
             "tests/test_py.py": "def test_ok():\n    pass\n",
         }),
         "slow": fixture_repo(base, "PolicyEngine/fixture-slow", {
@@ -1482,6 +1962,39 @@ def test_record_provenance_asks_with_the_token_and_runs_nothing(tmp_path, monkey
     assert not (tmp_path / "none.json").exists()
 
 
+def test_record_provenance_covers_the_household_choices(tmp_path, monkeypatch):
+    # The pinned-tests job holds no token, so a household choice's pin that
+    # the record missed would be asked of GitHub unauthenticated.
+    base = tmp_path / "repos"
+    head = fixture_repo(base, "PolicyEngine/fixture-meta", {"tests/test_a.py": "def test_a():\n    pass\n"})
+    other = fixture_repo(base, "PolicyEngine/fixture-choice", {"tests/test_b.py": "def test_b():\n    pass\n"})
+    monkeypatch.setattr(sc, "github_api", lambda token=None, base_url=None: FakeGitHub(base))
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-choice", ("fixture_core.cli", ()))
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-meta", ("fixture_core.cli", ()))
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "known-source-conflicts.yaml").write_text(yaml.safe_dump(register(*pinned("PolicyEngine/fixture-meta", head, ["tests/test_a.py::test_a"]))))
+    choice = {**OPTIMUM, "repo": "PolicyEngine/fixture-choice", "commit": other, "path": "tests/b.yaml", "name": "Itemizes"}
+    out = tmp_path / "provenance.json"
+
+    def recorded():
+        return sorted((item["repo"], item["commit"]) for item in json.loads(out.read_text())["records"])
+
+    assert runner.main(["--root", str(root), "--record-provenance", str(out)]) == 0
+    assert recorded() == [("PolicyEngine/fixture-meta", head)]
+    # The file beside the register is read, as a run reads it.
+    (root / "household-choices.yaml").write_text(yaml.safe_dump(choices(choice)))
+    assert runner.main(["--root", str(root), "--record-provenance", str(out)]) == 0
+    assert recorded() == [("PolicyEngine/fixture-choice", other), ("PolicyEngine/fixture-meta", head)]
+    # So is one named explicitly, which must exist.
+    named = tmp_path / "named.yaml"
+    named.write_text(yaml.safe_dump(choices({**choice, "commit": head, "repo": "PolicyEngine/fixture-meta"})))
+    assert runner.main(["--root", str(root), "--choices", str(named), "--record-provenance", str(out)]) == 0
+    assert recorded() == [("PolicyEngine/fixture-meta", head)]
+    assert runner.main(["--root", str(root), "--choices", str(tmp_path / "absent.yaml"), "--record-provenance", str(tmp_path / "none.json")]) == 1
+    assert not (tmp_path / "none.json").exists()
+
+
 @pytest.mark.parametrize(
     "content",
     [
@@ -1660,3 +2173,69 @@ def test_cli_fails_closed_without_a_register(tmp_path):
     assert runner.main(["--register", str(tmp_path / "absent.yaml"), "--report", str(report_path)]) == 1
     report = json.loads(report_path.read_text())
     assert report["issues"][0].startswith("runner error:")
+
+
+@needs_tools
+def test_an_optimum_pin_passes_only_when_its_case_shows_the_model_choosing(tmp_path, fixtures, monkeypatch):
+    # The oracle records whether each pinned case changes the model, and what
+    # its simulation computed for the decision variable and took as inputs;
+    # the runner then requires the model's own choice, of an option other
+    # than the default.
+    base, commits = fixtures
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-yaml", ("fixture_core.cli", ()))
+    names = ("Chooses to itemize", "Told to itemize", "Forced through axes", "Does not itemize",
+             "Computes nothing for the choice", "Chooses under a parameter override", "Chooses under a reform",
+             "Chooses under an extension")
+    tests = [
+        {"repo": "PolicyEngine/fixture-yaml", "commit": commits["yaml"], "path": "tests/policy/choices.yaml", "name": name,
+         "pins": ["optimum"], "variable": "itemizes", "chooses": True}
+        for name in names
+    ]
+    report = runner.run_register(register(), settings(tmp_path, base), choices(*tests))
+    assert outcomes(report) == {f"tests/policy/choices.yaml::{name}": "vacuous" for name in names[1:]} | {
+        "tests/policy/choices.yaml::Chooses to itemize": "passed",
+    }
+    details = {pin["id"].split("::")[1]: pin.get("detail", "") for pin in report["commits"][0]["pins"]}
+    assert "sets itemizes as an input" in details["Told to itemize"]
+    assert "sets itemizes as an input" in details["Forced through axes"]
+    assert "computed itemizes = False" in details["Does not itemize"]
+    assert "could not be read: KeyError" in details["Computes nothing for the choice"]
+    assert "changes the model (gov.itemizing.compare_tax)" in details["Chooses under a parameter override"]
+    assert "changes the model (a reform or extension)" in details["Chooses under a reform"]
+    assert "changes the model (a reform or extension)" in details["Chooses under an extension"]
+    # The YAML run itself passed: vacuity is the runner's finding, not pytest's.
+    assert report["commits"][0]["pytest_exit"] == 0
+    # A pass is cached for its expectation only.
+    cache = tmp_path / "cache"
+    first = runner.run_register(register(), settings(tmp_path, base, cache_dir=cache), choices(tests[0]))
+    second = runner.run_register(register(), settings(tmp_path, base, cache_dir=cache), choices(tests[0]))
+    other = runner.run_register(register(), settings(tmp_path, base, cache_dir=cache), choices(tests[0], default="no"))
+    assert [r["commits"][0]["cached"] for r in (first, second, other)] == [False, True, False]
+    assert outcomes(other) == {"tests/policy/choices.yaml::Chooses to itemize": "passed"}
+    # An enum is read by name, not by the index it is stored as.
+    separately = {**tests[0], "name": "Files separately", "variable": "filing_status", "chooses": "separate"}
+    enum = runner.run_register(register(), settings(tmp_path, base), choices(separately, default="joint"))
+    assert outcomes(enum) == {"tests/policy/choices.yaml::Files separately": "passed"}
+    # #1844 review round 3: two entries pin one case on two variables, and each
+    # is judged on its own; a pin may name the instances that choose.
+    shared = {**tests[0], "name": "Two entries pin this case"}
+    always = {**shared, "variable": "always_true"}
+    first = {**tests[0], "name": "Only the first unit itemizes", "instances": ["first"]}
+    every = {**tests[0], "name": "Only the first unit itemizes"}
+    payload = {"version": 1, "entries": [choice_entry(shared, first), {**choice_entry(always, every), "id": "other"}]}
+    report = runner.run_register(register(), settings(tmp_path, base), payload)
+    by_label = {pin["label"]: (pin["outcome"], pin.get("detail", "")) for pin in report["commits"][0]["pins"]}
+    assert by_label["choices.entries[0].tests[0]"][0] == "vacuous"
+    assert "computed itemizes = False" in by_label["choices.entries[0].tests[0]"][1]
+    assert by_label["choices.entries[1].tests[0]"] == ("passed", "")
+    assert by_label["choices.entries[0].tests[1]"] == ("passed", "")
+    assert by_label["choices.entries[1].tests[1]"][0] == "vacuous"
+    assert "computed itemizes = False for" not in by_label["choices.entries[1].tests[1]"][1]
+    # Round 4 (P1): a monthly variable read over a year isn't one choice.
+    yearly = {**tests[0], "name": "A monthly choice read over a year"}
+    monthly = {**tests[0], "name": "A monthly choice read over a month"}
+    report = runner.run_register(register(), settings(tmp_path, base), choices(yearly, monthly))
+    by_label = {pin["label"]: (pin["outcome"], pin.get("detail", "")) for pin in report["commits"][0]["pins"]}
+    assert by_label["choices.entries[0].tests[0]"][0] == "vacuous"
+    assert "defined by month, over 2024" in by_label["choices.entries[0].tests[0]"][1]
+    assert by_label["choices.entries[0].tests[1]"] == ("passed", "")
