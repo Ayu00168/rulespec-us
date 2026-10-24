@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import bisect
 import contextlib
 import datetime as dt
 import hashlib
@@ -59,10 +60,11 @@ import json
 import os
 import re
 import sys
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
@@ -159,73 +161,521 @@ RESOLVERS = ("legislation", "agency")
 # a description may hold at most this many words inside quotation marks, in
 # all its quoted spans together (quoted_spans says what a span is).
 MAX_QUOTED_WORDS = 4
-_DOUBLE_CLOSERS = {'"': '"', "\u201c": "\u201d"}
-_SINGLE_OPENERS = ("'", "\u2018")
-_SINGLE_CLOSERS = ("'", "\u2019")
-_BEFORE_OPENER = frozenset(" \t\n\r([{\u2014\u2013-/")
+# The marks the scanner reads: every character Unicode gives the
+# Quotation_Mark property (PropList.txt), plus primes and the quotation-mark
+# ornaments, which are typed as quotation marks too.
+#
+# Pass-1 delimiters: each opening mark and the marks that may close it. The
+# reversed and same-direction forms (»…«, ›…‹, ”…”, »…») are the usual ones
+# in German, Danish, Swedish and Finnish, and „ and ‚ close with either curly
+# mark (German „…“, Polish „…”).
+_DELIMITERS: dict[str, str] = {
+    '"': '"',
+    "\u201c": "\u201d",
+    "\u201e": "\u201c\u201d",
+    "\u201a": "\u2018\u2019",
+    "\u201f": "\u201d",
+    "\u2e42": "\u201c\u201d",
+    "\u00ab": "\u00bb",
+    "\u2039": "\u203a",
+    "\u201d": "\u201d",
+    "\u00bb": "\u00ab\u00bb",
+    "\u203a": "\u2039\u203a",
+    "\u300c": "\u300d",
+    "\u300e": "\u300f",
+    "\ufe41": "\ufe42",
+    "\ufe43": "\ufe44",
+    "\uff62": "\uff63",
+    "\u301d": "\u301e\u301f",
+    "\uff02": "\uff02",
+    "\u2033": "\u2033",
+    "\u2036": "\u2033",
+    "\u275d": "\u275e",
+    "\u2760": "\u275e",
+    "\u276e": "\u276f",
+    "\U0001f676": "\U0001f677",
+    "\U0001f678": "\U0001f676\U0001f677",
+}
+# These marks also close another pair, so they open only where an opener
+# would and before a non-space (_opens_delimited): the inch marks in 6” and
+# 6″ open nothing.
+_CONTEXT_OPENERS = frozenset("\u201d\u00bb\u203a\u2033")
+# Openers that also close another pair (“ closes „, « closes », …).
+_ALSO_CLOSES = frozenset(mark for mark in _DELIMITERS if any(mark in closers for opener, closers in _DELIMITERS.items() if opener != mark))
+_DELIMITER_CLOSE = {mark: re.compile("[" + re.escape(closers) + "]") for mark, closers in _DELIMITERS.items()}
+# Every delimiter mark, opening or closing: the nested reading steps through them.
+_DELIMITER_MARKS = frozenset("".join(_DELIMITERS) + "".join(_DELIMITERS.values()))
+_DELIMITER_MARK = re.compile("[" + re.escape("".join(sorted(_DELIMITER_MARKS))) + "]")
+_DELIMITED_READINGS = ("standard", "strict", "nested")
+# Single marks that may open a quotation. Any quotation mark may close the
+# single span (_closes_single), so a single quotation closed by a double mark
+# (‘…”) still counts.
+_SINGLE_OPENERS = frozenset("'\u2018\u2019\uff07\u201b\u2032\u2035\u275b\u275f")
+_SINGLE_MARKS = _SINGLE_OPENERS | frozenset("\u275c")
+_QUOTATION_MARKS = _DELIMITER_MARKS | _SINGLE_MARKS
+# Unicode categories an opening mark may directly follow, besides whitespace
+# and a slash: opening brackets (Ps), dashes (Pd) and opening quotation marks
+# (Pi).
+_BEFORE_OPENER_CATEGORIES = frozenset({"Ps", "Pd", "Pi"})
+_PREFIX_MARKS = frozenset("/:\uff1a")  # a slash, a colon, a fullwidth colon
+# The prefixes a single opener could follow on main, for the main floor.
+_ASCII_BEFORE_OPENER = frozenset(" \t\n\r([{\u2014\u2013-/")
 
 
-def _opens_single(text: str, index: int) -> bool:
-    """A single quotation mark opens a quotation when it starts the text or
-    follows a space or an opening bracket or dash, and a letter follows it.
-    So the apostrophe in "agency's" opens nothing, and neither does the elision
-    in "the '90s"."""
+def _opener_prefix(text: str, index: int) -> bool:
+    """The mark starts the text or follows whitespace (any Unicode space,
+    such as a no-break space), a slash, a colon, an opening bracket, a dash
+    or a quotation mark (so ""one" two" nests, and so does said:"…" inside
+    a quotation a stray mark left open)."""
 
-    before_ok = index == 0 or text[index - 1] in _BEFORE_OPENER
-    return before_ok and index + 1 < len(text) and text[index + 1].isalpha()
-
-
-def _closes_single(text: str, index: int) -> bool:
-    """A single quotation mark closes a quotation when it follows a non-space
-    and no letter or digit follows it, so the apostrophe in "county's" or
-    "we\u2019ll" closes nothing."""
-
+    if index == 0:
+        return True
+    before = text[index - 1]
     return (
-        index > 0
-        and not text[index - 1].isspace()
-        and (index + 1 == len(text) or not text[index + 1].isalnum())
+        before.isspace() or before in _PREFIX_MARKS or before in _QUOTATION_MARKS
+        or unicodedata.category(before) in _BEFORE_OPENER_CATEGORIES
     )
 
 
-def quoted_spans(text: str) -> list[str]:
-    """The quoted spans of a text, each opening mark paired with its closing
-    mark. Double quotes (straight or curly) pair with their own closer; an
-    unclosed one quotes the rest of the text, failing closed. Single quotes
-    (straight or curly) open and close only at word edges (_opens_single,
-    _closes_single), so apostrophes and elisions inside a span or a word are
-    neither; an unclosed single quote is read as an apostrophe."""
+def _word_char(char: str) -> bool:
+    """A letter or a decimal digit."""
+
+    return char.isalpha() or unicodedata.category(char) == "Nd"
+
+
+def _opens_single(text: str, index: int) -> bool:
+    """A single mark may open a quotation unless it ends the text or is an
+    ambiguous opener (_ambiguous_opener: it directly follows a letter or
+    digit). So the apostrophes in "agency's", "the workers'" and 6'7 open
+    nothing, while 'one, wrote:'one, ('one, '30 days, ' one and the elided
+    year in "the '90s" all may."""
+
+    return index + 1 < len(text) and not _ambiguous_opener(text, index)
+
+
+def _closes_single(text: str, index: int) -> bool:
+    """A mark closes when no letter or decimal digit follows it. The
+    apostrophe in "county's", "we’ll" or 6'7 closes nothing, whereas a mark
+    after whitespace may close, and so may one before a footnote mark (’¹)."""
+
+    return index + 1 == len(text) or not _word_char(text[index + 1])
+
+
+def _next_after(positions: Sequence[int], index: int) -> int | None:
+    """The first position strictly after index, or None, with O(log n)
+    lookups: the one-pass reading and the main floor find each opener's
+    closer here."""
+
+    following = bisect.bisect_right(positions, index)
+    return positions[following] if following < len(positions) else None
+
+
+def _starts_a_quotation(text: str, index: int) -> bool:
+    """A mark that can both close and open reads as an opener: after an
+    opener prefix and before a letter or a digit; or, after the text's start
+    or whitespace, before a quotation mark. So the inner marks in "one "two"
+    three", ""one" two" and " ""one" two" open, while the closers in
+    "wait—"., "workers'",, "four—"[1], «wait—»", «workers'»" and »a "b—"«
+    close (« and “ open quotations but close others too). The second known
+    limit follows (tools/README.md): a quotation nested inside another, whose
+    opening mark could also close the outer one and which doesn't start with
+    a letter or digit ("one "[sic] two" three", „one “[sic] two” three”),
+    reads as two quotations."""
+
+    if index + 1 >= len(text) or not _opener_prefix(text, index):
+        return False
+    after = text[index + 1]
+    if _word_char(after):
+        return True
+    return after in _QUOTATION_MARKS and (index == 0 or text[index - 1].isspace())
+
+
+def _glued(text: str, index: int) -> bool:
+    """The mark directly follows a letter or digit (past any combining marks
+    on it)."""
+
+    before = index - 1
+    while before >= 0 and index - before <= 4 and unicodedata.category(text[before]).startswith("M"):
+        before -= 1
+    return before >= 0 and text[before].isalnum()
+
+
+def _ambiguous_opener(text: str, index: int, *, inside: bool = False) -> bool:
+    """Whether a mark that could open a quotation is read as not opening
+    one, because it could as well close one. This one predicate is both
+    known limits (tools/README.md, Quotation examples), and every reading
+    asks it:
+
+    - inside a quotation the mark could close (`inside`), it is ambiguous
+      unless it starts a quotation (_starts_a_quotation): a letter or digit
+      follows it after an opener prefix, or a quotation mark follows it at
+      the start or after whitespace. That is the second limit: such a nested
+      quotation that doesn't start with a letter or digit ("one "[sic] two"
+      three") reads as two quotations;
+    - elsewhere, a single mark or a mark that also closes another pair (”
+      » › ″ “ « ‹ 🙶) is ambiguous when it directly follows a letter or digit
+      (_glued), and ” » › ″, which close the commonest pairs, also when a
+      space or the end follows; unless it starts a quotation. That is the
+      first limit: x'one …' and x«one …» aren't counted (main's floor still
+      reads a glued “).
+
+    Any other mark ("  „  「 …) only opens, so it is never ambiguous."""
+
+    if _starts_a_quotation(text, index):
+        return False
+    if inside:
+        return True
+    mark = text[index]
+    if mark not in _ALSO_CLOSES and mark not in _SINGLE_OPENERS:
+        return False
+    if _glued(text, index):
+        return True
+    return mark in _CONTEXT_OPENERS and (index + 1 == len(text) or text[index + 1].isspace())
+
+
+def _opens_delimited(text: str, index: int) -> bool:
+    """A delimited opener opens unless it is an ambiguous opener
+    (_ambiguous_opener). So the inch mark in 6” and the inner closers in
+    „a „b“ c“ and »a »b« c« open nothing, while « oui », :«one» and —«one»
+    open."""
+
+    return not _ambiguous_opener(text, index)
+
+
+def _opens_strict(text: str, index: int) -> bool:
+    """The strict reading's opener: a delimiter mark that isn't glued to a
+    letter or digit (_glued), so the inch mark in 6" opens nothing while
+    " one", :"one" and —"one" open."""
+
+    return index + 1 < len(text) and not _glued(text, index)
+
+
+def _delimited_close(text: str, index: int, reading: str) -> int:
+    """Where the delimited quotation opened at index closes, or the end of the
+    text when it doesn't: at its first closing mark (standard); at its first
+    closing mark that doesn't start a quotation itself (strict,
+    _starts_a_quotation, so a stray ‚ before ’one …’ closes at five’, not at
+    the opener); or where the marks inside it, nesting like brackets, close
+    it (nested). Each search resumes after the mark it passes, so it is
+    linear in the region."""
+
+    if reading == "nested":
+        return _nested_close(text, index)
+    pattern = _DELIMITER_CLOSE[text[index]]
+    found = pattern.search(text, index + 1)
+    while reading == "strict" and found and not _ambiguous_opener(text, found.start(), inside=True):
+        found = pattern.search(text, found.start() + 1)
+    return found.start() if found else len(text)
+
+
+def _nested_close(text: str, index: int) -> int:
+    """The nested reading's close: delimited marks nest like brackets, across
+    pairs (“…‘…’…”, „…“…”…“, "…"…"…"). A mark that can close the innermost
+    open quotation closes it, unless it can open one and reads as an opener
+    (_starts_a_quotation), when it opens a quotation inside; any other opener
+    inside opens one too."""
+
+    stack = [text[index]]
+    position = index + 1
+    while (found := _DELIMITER_MARK.search(text, position)) is not None:
+        position = found.start()
+        mark = found.group()
+        opens = mark in _DELIMITERS and _opens_delimited(text, position)
+        if mark in _DELIMITERS[stack[-1]] and (not opens or _ambiguous_opener(text, position, inside=True)):
+            stack.pop()
+            if not stack:
+                return position
+        elif opens:
+            stack.append(mark)
+        position += 1
+    return len(text)
+
+
+def _delimited(text: str, reading: str = "standard") -> tuple[list[tuple[int, str]], list[tuple[int, int]]]:
+    """Pass 1: delimited quotations, each closed only by its own closers; an
+    unclosed one quotes the rest of the text. Returns (spans, regions).
+
+    Three readings (_delimited_close): standard; strict, for marks that aren't
+    quotation marks where they stand (an inch mark, 6"; a low mark used as a
+    comma), where a mark opens unless it directly follows a letter or digit
+    and closes at the first closing mark that doesn't start a quotation
+    itself, so 6" and "one two three four five" quotes five words; and
+    nested, for a quotation inside a quotation (_nested_close)."""
+
+    spans: list[tuple[int, str]] = []
+    regions: list[tuple[int, int]] = []
+    index = 0
+    while index < len(text):
+        mark = text[index]
+        if mark in _DELIMITERS and (
+            _opens_delimited(text, index) if reading != "strict" else _opens_strict(text, index)
+        ):
+            close = _delimited_close(text, index, reading)
+            spans.append((index, text[index + 1 : close]))
+            regions.append((index, min(close + 1, len(text))))
+            index = close + 1
+        else:
+            index += 1
+    return spans, regions
+
+
+def _outside(text: str, regions: list[tuple[int, int]]) -> Iterator[int]:
+    """The positions of a text outside its pass-1 regions, in order."""
+
+    index = 0
+    for start, end in regions:
+        yield from range(index, start)
+        index = end
+    yield from range(index, len(text))
+
+
+def _single_span(text: str, regions: list[tuple[int, int]]) -> tuple[int, int] | None:
+    """Pass 2, the conservative reading of single marks outside pass-1
+    regions: from the first single mark that may open (_opens_single) to the
+    last quotation mark after it that may close (_closes_single), or None
+    when there is no such pair. A single mark can't be told from an
+    apostrophe ('cause, goin', the workers'), so every word between counts."""
+
+    first = last = None
+    for index in _outside(text, regions):
+        mark = text[index]
+        if first is None:
+            if mark in _SINGLE_OPENERS and _opens_single(text, index):
+                first = index
+        elif mark in _QUOTATION_MARKS and _closes_single(text, index):
+            last = index
+    return (first, last) if first is not None and last is not None else None
+
+
+def _whole_text_span(text: str, regions: list[tuple[int, int]]) -> tuple[int, int] | None:
+    """The single span over the whole text: from the first single mark that
+    may open, anywhere, to the last mark after it that may close, where a
+    closer is a single mark anywhere or another quotation mark outside
+    `regions` (the standard reading's quotations, so the closer of a double
+    quotation after it, as in 'approves it' and "the waiver", ends nothing).
+    A stray delimiter can't swallow a single quotation's opener (‚x 'one …')."""
+
+    first = last = None
+    region_index = 0
+    for index, mark in enumerate(text):
+        if mark not in _QUOTATION_MARKS:
+            continue
+        while region_index < len(regions) and regions[region_index][1] <= index:
+            region_index += 1
+        inside = region_index < len(regions) and regions[region_index][0] <= index
+        if first is None:
+            if mark in _SINGLE_OPENERS and _opens_single(text, index):
+                first = index
+        elif (mark in _SINGLE_MARKS or not inside) and _closes_single(text, index):
+            last = index
+    return (first, last) if first is not None and last is not None else None
+
+
+def _span_text(text: str, start: int, close: int, regions: list[tuple[int, int]]) -> str:
+    """A single span's text, with each pass-1 region inside it one space."""
+
+    pieces: list[str] = []
+    cursor = start + 1
+    for region_start, region_end in regions:
+        if start < region_start < close:
+            pieces.extend((text[cursor:region_start], " "))
+            cursor = region_end
+    pieces.append(text[cursor:close])
+    return "".join(pieces)
+
+
+def _text_outside(text: str, start: int, end: int, regions: list[tuple[int, int]]) -> str:
+    """text[start:end], with each part of a pass-1 region in it one space."""
+
+    pieces: list[str] = []
+    cursor = start
+    for region_start, region_end in regions:
+        if region_end <= cursor or region_start >= end:
+            continue
+        pieces.extend((text[cursor:max(region_start, cursor)], " "))
+        cursor = min(region_end, end)
+    pieces.append(text[cursor:end])
+    return "".join(pieces)
+
+
+def _opens_single_main(text: str, index: int) -> bool:
+    """main's single opener: after an ASCII prefix, before a letter."""
+
+    return index + 1 < len(text) and text[index + 1].isalpha() and (index == 0 or text[index - 1] in _ASCII_BEFORE_OPENER)
+
+
+def _one_pass_reading(
+    text: str, closers: Sequence[int], opens: Callable[[str, int], bool] | None = None
+) -> tuple[int, list[str]]:
+    """Delimited and single marks read together in one pass, the way the
+    scanner read them before the two-pass scan, with this scan's marks: a
+    single span runs to the first closing mark after it (`closers`, every one
+    in the text), over any delimited mark in between. `opens` is the single
+    opener rule (_opens_single by default). Linear apart from the bisection:
+    each delimited search ends where the scan resumes."""
+
+    opens = _opens_single if opens is None else opens
 
     spans: list[str] = []
     index = 0
     while index < len(text):
         mark = text[index]
-        if mark in _DOUBLE_CLOSERS:
-            close = text.find(_DOUBLE_CLOSERS[mark], index + 1)
-            close = len(text) if close == -1 else close
+        if mark in _DELIMITERS and _opens_delimited(text, index):
+            close = _delimited_close(text, index, "standard")
             spans.append(text[index + 1 : close])
             index = close + 1
             continue
-        if mark in _SINGLE_OPENERS and _opens_single(text, index):
-            close = next(
-                (
-                    position
-                    for position in range(index + 1, len(text))
-                    if text[position] in _SINGLE_CLOSERS and _closes_single(text, position)
-                ),
-                None,
-            )
+        if mark in _SINGLE_OPENERS and opens(text, index):
+            close = _next_after(closers, index)
             if close is not None:
                 spans.append(text[index + 1 : close])
                 index = close + 1
                 continue
         index += 1
-    return spans
+    return sum(_words(span) for span in spans), spans
+
+
+def _one_pass_words(text: str, closers: Sequence[int]) -> int:
+    return _one_pass_reading(text, closers)[0]
+
+
+_MAIN_DOUBLES = {'"': '"', "\u201c": "\u201d"}
+
+
+def _main_reading(text: str) -> tuple[int, list[str]]:
+    """The spans and count main's scanner gave, frozen as a floor: straight
+    and curly doubles and singles pairing in one pass, a single opening after
+    an ASCII prefix and closing at the first ' or ’ after it that follows a
+    non-space and precedes no letter or digit, and words counted by
+    whitespace. The same spans as main; only its linear search for each
+    closer is a bisection over the same closers."""
+
+    closers = [
+        index for index, mark in enumerate(text)
+        if mark in ("'", "\u2019") and index > 0 and not text[index - 1].isspace()
+        and (index + 1 == len(text) or not text[index + 1].isalnum())
+    ]
+    spans: list[str] = []
+    index = 0
+    while index < len(text):
+        mark = text[index]
+        if mark in _MAIN_DOUBLES:
+            close = text.find(_MAIN_DOUBLES[mark], index + 1)
+            close = len(text) if close == -1 else close
+            spans.append(text[index + 1 : close])
+            index = close + 1
+            continue
+        if (
+            mark in ("'", "\u2018")
+            and index + 1 < len(text)
+            and text[index + 1].isalpha()
+            and (index == 0 or text[index - 1] in _ASCII_BEFORE_OPENER)
+        ):
+            close = _next_after(closers, index)
+            if close is not None:
+                spans.append(text[index + 1 : close])
+                index = close + 1
+                continue
+        index += 1
+    return sum(len(span.split()) for span in spans), spans
+
+
+def _main_words(text: str) -> int:
+    return _main_reading(text)[0]
+
+
+def quoted_spans(text: str) -> list[str]:
+    """The quoted spans of a text, as the standard reading finds them.
+
+    Pass 1 consumes delimited quotations over the whole text (_DELIMITERS).
+    An unclosed delimiter quotes the rest of the text, failing closed.
+
+    Pass 2 reads single marks outside pass-1 regions as one span, from the
+    first mark that may open to the last that may close (_single_span). A
+    pass-1 region inside it becomes one space, since pass 1 counted its
+    words."""
+
+    spans, regions = _delimited(text)
+    single = _single_span(text, regions)
+    if single is not None:
+        spans.append((single[0], _span_text(text, single[0], single[1], regions)))
+    return [span for _, span in sorted(spans)]
+
+
+def _words(span: str) -> int:
+    """The words of a span: its tokens holding a letter or digit, so a stray
+    mark is no word (the main floor counts by whitespace, as main did)."""
+
+    return sum(1 for token in span.split() if any(char.isalnum() for char in token))
+
+
+def _readings(text: str) -> Iterator[tuple[int, list[str]]]:
+    """Each reading's count and spans: the three delimited readings, each with
+    its single span; the single span over the whole text; the one-pass
+    reading, under this scan's single openers and main's; and main's."""
+
+    for reading in _DELIMITED_READINGS:
+        located, regions = _delimited(text, reading)
+        spans = [span for _, span in located]
+        single = _single_span(text, regions)
+        if single is not None:
+            spans.append(_span_text(text, single[0], single[1], regions))
+        yield sum(_words(span) for span in spans), spans
+    # The single span over the whole text (_whole_text_span): every standard
+    # quotation counted on its own, and the span's own text outside them
+    # (each quotation inside it a space). A wider span only adds text at its
+    # edge, so widening the openers can't lower this count.
+    located, regions = _delimited(text)
+    single = _whole_text_span(text, regions)
+    if single is not None:
+        start, close = single
+        spans = [span for _, span in located] + [_text_outside(text, start + 1, close, regions)]
+        yield sum(_words(span) for span in spans), spans
+    every_closer = [index for index, mark in enumerate(text) if mark in _QUOTATION_MARKS and _closes_single(text, index)]
+    # The one-pass reading under main's single openers too: a wider opener can
+    # take a closer that would have opened a quotation, so this keeps widening
+    # from lowering the count.
+    yield _one_pass_reading(text, every_closer)
+    yield _one_pass_reading(text, every_closer, _opens_single_main)
+    yield _main_reading(text)
+
+
+def quoted_reading(text: str) -> tuple[int, list[str]]:
+    """How many words a text holds inside quotation marks, failing closed,
+    and the spans of the reading that counts them.
+
+    Delimited quotations count once, in each of three readings (_delimited).
+    Single marks can't be told from apostrophes, so they are read
+    conservatively: every word from the first single mark that may open to
+    the last quotation mark that may close counts (_single_span), outside
+    each reading's delimited quotations and over the whole text
+    (_whole_text_span, with the parts of the delimited quotations outside
+    it). So a quotation of N words opened and closed by single marks at word
+    boundaries always counts at least N: in the whole-text reading the first
+    opener is at or before it, and the last closer at or after it. A double
+    mark may close a single quotation too (‘…”); that case is counted but not
+    part of the guarantee, since the same mark may be closing a quotation
+    inside it.
+
+    The count is the largest over the delimited readings of their delimited
+    words plus that single span, over the whole-text reading, over a
+    one-pass reading (under this scan's single openers and main's), and over
+    main's count, so this scan refuses whatever main's did. A description
+    that quotes with single marks and also has a later apostrophe at a
+    word's end (the workers' case) or a second single quotation is read as
+    one quotation from the first mark to the last. tools/README.md says to
+    quote with one style, "…" or “…”, nesting with «…» if needed and never in
+    the same marks: in plain prose with no single mark that may open, each
+    delimited reading counts such a quotation exactly (within the scope the
+    README states), and main reads those two pairs exactly too.
+    """
+
+    return max(_readings(text), key=lambda reading: reading[0])
 
 
 def quoted_words(text: str) -> int:
-    """How many words a text holds inside quotation marks, across all spans."""
+    return quoted_reading(text)[0]
 
-    return sum(len(span.split()) for span in quoted_spans(text))
 
 # The interpretation core: compared field by field with a module's
 # `module.interpretations` entry, and the only fields a module may carry
@@ -310,17 +760,32 @@ class _NoAliasLoader(yaml.SafeLoader):
         return super().compose_node(parent, index)
 
 
+def parse_register(text: str, *, label: str) -> Any:
+    """A register or household-choices file's text, parsed without anchors
+    or aliases. Anything YAML cannot read is a RegisterError, including a
+    value it cannot construct (a date such as 2026-02-30, an integer too long
+    to convert) and nesting too deep to parse."""
+
+    try:
+        return yaml.load(text, Loader=_NoAliasLoader)  # a SafeLoader subclass
+    except yaml.YAMLError as exc:
+        raise RegisterError(f"{label} is not valid UTF-8 YAML without anchors: {exc}") from exc
+    except ValueError as exc:
+        raise RegisterError(f"{label} holds a value YAML cannot construct: {exc}") from exc
+    except RecursionError:
+        raise RegisterError(f"{label} nests too deeply to read") from None
+
+
 def load_register(path: Path) -> Any:
     if not path.is_file() or path.is_symlink():
         raise RegisterError(f"{path} must be a regular file")
     try:
-        return yaml.load(path.read_text(encoding="utf-8"), Loader=_NoAliasLoader)  # a SafeLoader subclass
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise RegisterError(f"{path} cannot be read: {exc}") from exc
-    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+    except UnicodeDecodeError as exc:
         raise RegisterError(f"{path} is not valid UTF-8 YAML without anchors: {exc}") from exc
-    except RecursionError:
-        raise RegisterError(f"{path} nests too deeply to read") from None
+    return parse_register(text, label=str(path))
 
 
 def _recursive(value: Any) -> bool:
@@ -714,9 +1179,12 @@ def interpretation_core(entry: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def yaml_test_case_names(text: str) -> set[str]:
+    """The case names of a YAML test file; none when YAML cannot read it
+    (including a value it cannot construct, or nesting too deep)."""
+
     try:
         payload = yaml.safe_load(text)
-    except yaml.YAMLError:
+    except (yaml.YAMLError, ValueError, RecursionError):
         return set()
     cases = payload.get("cases") if isinstance(payload, dict) else payload
     if not isinstance(cases, list):
@@ -925,10 +1393,16 @@ def _check_unpublished_source(item: Any, *, label: str, issues: list[str]) -> No
     if "description" in item and _string(description, label=f"{label}.description", issues=issues):
         if "@" in description:
             issues.append(f"{label}.description contains `@`; describe the source, never give an address.")
-        if quoted_words(description) > MAX_QUOTED_WORDS:
+        count, spans = quoted_reading(description)
+        if count > MAX_QUOTED_WORDS:
+            shown = ", ".join(json.dumps(span if len(span) <= 80 else span[:80] + "\u2026", ensure_ascii=False) for span in spans)
             issues.append(
-                f"{label}.description quotes more than {MAX_QUOTED_WORDS} words in all; an unpublished "
-                "source is described, never quoted."
+                f"{label}.description quotes more than {MAX_QUOTED_WORDS} words in all ({count}, counted in "
+                f"{shown}); an unpublished source is described, never quoted. Describe it instead, or put a "
+                f"quotation of at most {MAX_QUOTED_WORDS} words in one style of double quotation marks (\"\u2026\" or "
+                "\u201c\u2026\u201d), nesting with \u00ab\u2026\u00bb if needed and never in the same marks; those are counted "
+                "exactly in plain prose. Single marks (\u2018\u2026\u2019 too) can't be told from apostrophes, so every word "
+                "from the first single mark to the last quotation mark counts."
             )
 
 
@@ -1036,7 +1510,13 @@ def check_local_test(path: str | None, name: str | None, *, label: str, ctx: Rep
     local = ctx.root / path
     if not local.is_file():
         issues.append(f"{label}.path {path} does not exist in this repository.")
-    elif not test_exists(path, name, local.read_bytes()):
+        return
+    try:
+        data = local.read_bytes()
+    except OSError as exc:
+        issues.append(f"{label}.path {path} cannot be read: {exc.strerror or exc}.")
+        return
+    if not test_exists(path, name, data):
         issues.append(f"{label}.name {missing_test(name, path)}")
 
 
@@ -1935,11 +2415,14 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def discover_registers(token: str | None, *, filename: str = REGISTER_FILENAME) -> dict[str, Any]:
+def discover_registers(token: str | None, *, filename: str = REGISTER_FILENAME) -> tuple[dict[str, Any], list[str]]:
     """Every active rulespec-<country> repository's register (absent = none),
-    or another root file of theirs (`filename`, such as CHOICES_FILENAME)."""
+    or another root file of theirs (`filename`, such as CHOICES_FILENAME),
+    read as load_register reads one. A file that can't be read is left out
+    and named in the issues, so one repository can't stop the whole view."""
 
     registers: dict[str, Any] = {}
+    issues: list[str] = []
     page = 1
     names: list[tuple[str, str]] = []
     while True:
@@ -1961,11 +2444,33 @@ def discover_registers(token: str | None, *, filename: str = REGISTER_FILENAME) 
         url = f"https://raw.githubusercontent.com/{full_name}/{branch}/{filename}"
         try:
             with urllib.request.urlopen(url, timeout=60) as response:
-                registers[full_name] = yaml.safe_load(response.read().decode("utf-8"))
+                data = response.read()
         except urllib.error.HTTPError as exc:
             if exc.code != 404:
                 raise
-    return registers
+            continue
+        try:
+            registers[full_name] = parse_register(data.decode("utf-8"), label=f"{full_name}: {filename}")
+        except UnicodeDecodeError as exc:
+            issues.append(f"{full_name}: {filename} is not valid UTF-8 YAML without anchors: {exc}")
+        except RegisterError as exc:
+            issues.append(str(exc))
+    return registers, issues
+
+
+def local_registers(specs: Iterable[str]) -> tuple[dict[str, Any], list[str]]:
+    """The aggregate's local files (OWNER/REPO=PATH), read as discovery reads
+    them: one that can't be read is left out and named in the issues."""
+
+    registers: dict[str, Any] = {}
+    issues: list[str] = []
+    for spec in specs:
+        repo, _, path = spec.partition("=")
+        try:
+            registers[repo] = load_register(Path(path))
+        except RegisterError as exc:
+            issues.append(f"{repo}: {exc}")
+    return registers, issues
 
 
 # ---------------------------------------------------------------------------
@@ -2025,7 +2530,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if issues else 0
 
     if args.command == "verify":
-        payload = load_register(args.root / REGISTER_FILENAME)
+        try:
+            payload = load_register(args.root / REGISTER_FILENAME)
+        except RegisterError as exc:
+            print(f"source-conflicts: {exc}", file=sys.stderr)
+            return 1
         try:
             matches = encoder_matcher()
         except ImportError as exc:
@@ -2054,14 +2563,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if issues else 0
 
     token = os.environ.get("GITHUB_TOKEN")
-    if args.register:
-        registers = {}
-        for spec in args.register:
-            repo, _, path = spec.partition("=")
-            registers[repo] = load_register(Path(path))
-    else:
-        registers = discover_registers(token)
+    registers, read_issues = local_registers(args.register) if args.register else discover_registers(token)
     rows, issues = aggregate(registers)
+    issues = read_issues + issues
     if args.json:
         args.json.write_text(json.dumps(rows, indent=2, default=_json_default) + "\n")
     if args.markdown:

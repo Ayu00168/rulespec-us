@@ -133,10 +133,14 @@ def test_aggregate_round_trips_and_carries_every_entry_once(files):
     rebuilt = hc.files_from_view(view)
     assert rebuilt == {repo: files[repo] for repo in sorted(files)}
     assert hc.aggregate(rebuilt)[0] == view
-    # The view holds copies: changing it never changes the files.
+    # The view holds copies: changing any row never changes the files.
     before = copy.deepcopy(files)
     for row in view["entries"]:
         row["entry"]["id"] = "changed"
+    for row in view["statutory_not_choice"]:
+        row["item"]["note"] = "changed"
+    for row in view["repositories"]:
+        row["version"] = "changed"
     assert files == before
 
 

@@ -90,7 +90,9 @@ Disagreements include a statute against a regulation, a regulation against an
 agency manual, and one manual section against another. Every rulespec
 repository keeps its own register at its root. The Axiom-wide view is
 generated from them with `tools/source_conflicts.py aggregate`; nothing keeps
-a second copy.
+a second copy. It reads each repository's file as `check` reads one (no
+anchors or aliases), and a file it can't read is left out of the view and
+reported, so one repository can't stop the view; the command then exits 1.
 
 ## Entry shape
 
@@ -120,7 +122,7 @@ Register-only fields:
 | `jurisdiction`, `program` | A jurisdiction directory of this repository, and a kebab-case program slug. |
 | `pending_texts` | Provisions the pinned corpus release lacks. Each gives `citation`, its `kind` (see below), `url`, an `excerpt`, and a `snapshot`: repo, commit, path and sha256 of a captured copy (`.txt`, `.md`, `.html`, `.htm` or `.xml`). An entry that a module adopts cannot have any; ingest them first. |
 | `text_kinds` | Optional. Narrows the kind of a corpus text, as `{corpus citation path: kind}`. A text's kind is otherwise the first kind its document class allows (below). The kind must be one its path's class allows, so a `/statute/` path is always `statute`. |
-| `unpublished_sources` | Sources with no public text, such as an agency's correspondence: `kind`, `description` and `date`. They are described, never quoted: a description holds no `@` and at most four words in quotation marks, counted across all its quoted spans. A span runs from an opening mark to its closing mark. A double quote, straight or curly, that is never closed quotes the rest of the description. A single quote, straight or curly, opens only at the start of a word and closes only at its end, so an apostrophe ("county's", "we’ll") or an elision ("the '90s") is neither. Verify cannot check them and lists them as unverifiable. |
+| `unpublished_sources` | Sources with no public text, such as an agency's correspondence: `kind`, `description` and `date`. They are described, never quoted: a description holds no `@` and at most four words in quotation marks, counted across all its quoted spans. **Quote with one style of double quotation marks** (`"…"` or `“…”`), nesting with `«…»` if needed and never in the same marks; those are counted exactly in plain prose with no single mark that may open (see the invariant below). Single marks, `‘…’` included, are read conservatively. Or describe the source instead; a refusal says so and shows the span it counted. The scanner reads every character Unicode gives the Quotation_Mark property, plus primes (`′ ″ ‵ ‶`) and the quotation-mark ornaments (`❛ ❜ ❝ ❞ ❟ ❠ ❮ ❯ 🙶 🙷 🙸`). **Delimited quotations** are read first, over the whole description: `"…"`, `“…”`, `„…“`, `„…”`, `‚…‘`, `‚…’`, `‟…”`, `⹂…“`, `«…»`, `‹…›`, `»…«`, `›…‹`, `»…»`, `›…›`, `”…”`, `「…」`, `『…』`, `﹁…﹂`, `﹃…﹄`, `｢…｣`, `〝…〞`, `〝…〟`, `＂…＂`, `″…″`, `‶…″`, `❝…❞`, `❠…❞`, `❮…❯` and `🙶…🙷`. An unclosed opener quotes the rest of the description. A mark that also closes another pair (`”`, `»`, `›`, `″`, `“`, `«`, `‹`, `🙶`) opens where it starts a quotation, and otherwise unless it directly follows a letter or digit; `”`, `»`, `›` and `″`, which close the commonest pairs, also need a non-space after them. So the inch marks in 6” and 6″ open nothing, and nor do inner closers glued to a word (`„a „b“ c“`), while `:«one»` and `—« one »` open. They are read three ways. Standard: each opener closes at its first closing mark. Strict: a mark opens unless it directly follows a letter or digit, and closes at the first closing mark that doesn't itself start a quotation, so a stray mark before a quotation (an inch mark, `6" tall and "…"`, or a low mark used as a comma) can't hide it. A mark that can both close and open starts a quotation when it comes before a letter or digit after an opener prefix (the start of the description, whitespace, a slash, a colon, an opening bracket, a dash or a quotation mark), or before a quotation mark at the start or after whitespace; so `"wait—".`, `"workers'",` and `"four—"[1]` close where they should. Nested: the marks nest like brackets across pairs, with a mark that could close or open read as an opener only where it starts a quotation, so `“one “two” three”` and `"one "two" three"` count three words. **Single quotation marks** can't be told from apostrophes (`'cause`, `goin'`, `the workers'`), so they are read conservatively. A single mark (`'`, `‘`, `’`, `＇`, `‛`, `′`, `‵`, `❛` or `❟`) may open unless it follows a letter or digit; any quotation mark may close if no letter or decimal digit follows it, so a footnote mark may follow, and `‘…”` closes. Every word from the first single mark that may open to the last mark that may close counts. That is read outside each delimited reading's quotations, and over the whole text (closing at a single mark anywhere or another mark outside the quotations, and counting each delimited quotation on its own plus the span's text outside them), so a stray delimiter can't swallow a single quotation's opener. The count is the largest of these readings, a one-pass reading of delimited and single marks together (under these single openers and the previous scanner's, so widening the openers never lowers the count), and the count the previous scanner gave. That last is kept exactly, with its words counted by whitespace, so `"one two three four …"` counts five, and this scan refuses whatever that one did. Otherwise a word is a token with a letter or digit, and a delimited quotation inside the single span counts once. **Invariant** (tested with possessives, elisions, elided years, dropped letters and nested quotations): a quotation of N words opened and closed by single marks at word boundaries counts at least N, whatever it holds and whatever surrounds it; double quotations in plain prose are counted exactly in each delimited reading, whatever their words end in (punctuation, a dash, a possessive) and whatever follows the closer (punctuation, a bracketed citation), so long as they hold none of the quotation's own closing marks, and with a space inside either mark (except after `”`, `»`, `›` or `″`, which a space after reads as a closer); this covers every listed pair but `‚…‘` and `‚…’`, whose closers are single marks and so read conservatively, in a description with no single mark that may open; a quotation nested in a pair that shares no mark with the outer one counts exactly too, while nesting in the same marks, or in a pair that shares one (`“…”` inside `„…“`), counts at least in full and may count more; overall, `"…"` and `“…”` are counted exactly, and the other pairs unless the previous scanner's count is higher (it read `“` as an opener, so after `„…“` it quoted the rest); and the count is never below the previous scanner's. **Known limits**, the only fail-opens the scanner accepts, come from one rule, the ambiguous opener (`_ambiguous_opener`): a mark that could open a quotation but could as well close one isn't read as opening it. Inside a quotation it could close, a mark is ambiguous unless it starts a quotation (a letter or digit follows it after an opener prefix, or a quotation mark follows it at the start or after whitespace), so a nested quotation that doesn't start with a letter or digit reads as two quotations, and the words between them aren't counted. Elsewhere, a single mark, or a mark that also closes another pair (`”`, `»`, `›`, `″`, `“`, `«`, `‹`, `🙶`), is ambiguous when it directly follows a letter or digit, so a quotation it opens isn't counted (the previous scanner's count still reads a glued `“…”`; marks that only open, such as `"`, `„` and `「`, are never ambiguous). `”`, `»`, `›` and `″` are ambiguous before a space too, though the strict reading still counts that quotation. Nesting in the same marks, or in a pair that shares one, may count more, failing closed. **Intended refusals.** A description that quotes with single marks, `‘…’` nested in a double quotation included, and also has a later apostrophe at a word's end, a second single quotation, or an elided year with a later apostrophe, is read as one quotation from the first mark to the last, and is refused when that holds more than four words. Write the quotation in double marks, nest with `«…»`, or write the year in full. Apostrophes in prose with no single mark that may open quote nothing. [Quotation examples](#quotation-examples) shows each case with its count, and a test checks every one. The publication rules reviewed by hand (below) still apply, including that nothing private is quoted. Verify cannot check them and lists them as unverifiable. |
 | `years` | Optional. The years the sources disagree: `from`, and optionally `to` (both inclusive; no `to` means still running). `type` says which year: `calendar`, `tax`, `federal-fiscal`, `state-fiscal` or `program`. `program` also needs `note`, saying what the program year is. |
 | `conflict`, `resolution` | `conflict` is `live` (the default) or `resolved`. `resolved` means a legislature or agency has closed the disagreement. It needs a `resolution` (`by`: `legislation` or `agency`; `effective`, a date; `record`, a public https URL) and `years.to`, the last year the sources disagree. A `live` entry has no `resolution`. |
 | `outcome` | `computed` or `refused`: whether the adopted reading computes the contested cases or refuses them. For a refusal, `reading` says what is refused and the substantive readings go in `alternatives`. |
@@ -159,6 +161,46 @@ token patterns (decision-queue ids such as `d1234`, session ids, local paths
 and email addresses). It cannot tell a person's name from an organisation's,
 or a private page from a public one. The file may not use YAML anchors or
 aliases; `load_register` refuses them, so no entry can contain itself.
+
+
+### Quotation examples
+
+How `check` counts the quoted words of an `unpublished_sources` description.
+`tests/test_source_conflicts.py` reads this table and checks each row, so it
+can't drift from the code. A description is refused when the count is more
+than four.
+
+| Description | Counted | Refused | Why |
+|---|---|---|---|
+| `The letter calls the fee "reasonable" and "customary".` | 2 | no | Double marks are counted exactly. |
+| `The letter calls the fee “reasonable” and the rate “standard”.` | 2 | no | Double marks are counted exactly. |
+| `It wrote “one «two three» four”.` | 4 | no | Nesting in a pair that shares no mark counts exactly. |
+| `It wrote "one two three four five".` | 5 | yes | More than four quoted words. |
+| `A stray " mark, then it said:"one two three four five".` | 8 | yes | A mark after a colon starts a quotation, even inside one a stray mark left open; the stray mark's span counts too. |
+| `It wrote "one two three four …".` | 5 | yes | The previous scanner counted the ellipsis as a word, and its count is the floor. |
+| `It wrote "one two three four—"[1] today.` | 4 | no | A closer before a citation closes. |
+| `It wrote:«one two three four five».` | 5 | yes | A mark that can also close opens after punctuation. |
+| `It wrote « one two three four five ».` | 5 | yes | French spacing. |
+| `It wrote —» one two three four five «.` | 5 | yes | Ambiguous before a space in the standard reading, counted by the strict one. |
+| `It wrote x'one two three four five'.` | 0 | no | Known limit: an ambiguous opener glued to a word. |
+| `It wrote x«one two three four five».` | 0 | no | Known limit: an ambiguous opener glued to a word. |
+| `It wrote x”one two three four five”.` | 0 | no | Known limit: an ambiguous opener glued to a word. |
+| `It wrote x“one two three four five”.` | 5 | yes | Glued, but the previous scanner read “ and its count is the floor. |
+| `It wrote x"one two three four five".` | 5 | yes | " only opens or closes itself, so it is never ambiguous. |
+| `It wrote "one "[sic] two three" four".` | 2 | no | Known limit: a nested quotation that doesn't start with a letter or digit. |
+| `It wrote „one “[sic] two” three”.` | 2 | no | Known limit: the same, in a pair sharing a mark. |
+| `It wrote "one —"«two» three".` | 3 | no | Known limit: the same, starting with a quotation mark after punctuation. |
+| `A stray „ mark, then (““one” two three four five”).` | 3 | no | Known limit: the same, inside the quotation a stray mark left open. |
+| `It wrote “one «[sic] two three» four”.` | 5 | yes | Nesting in a pair that shares no mark counts in full. |
+| `It wrote "one "two"" today.` | 3 | no | Nesting in the same marks may count more (two words here), failing closed. |
+| `The agency called it 'routine' and won't reopen the workers' case.` | 6 | yes | Intended: single marks are read from the first opener to the last closer. |
+| `The agency called it "routine" and won't reopen the workers' case.` | 1 | no | The same in double marks. |
+| `It wrote 'one' and then 'two three four'.` | 6 | yes | Intended: two single quotations read as one. |
+| `Since the '90s the clerks in each county office have handled the clerks' files.` | 11 | yes | Intended: an elided year may open, and a later apostrophe may close. |
+| `Since the 1990s the clerks in each county office have handled the clerks' files.` | 0 | no | The year in full. |
+| `It wrote “one ‘two’ three” then denied workers’ claims.` | 6 | yes | Intended: ‘…’ is a single mark, read conservatively. |
+| `It wrote “one «two» three” then denied workers’ claims.` | 3 | no | Nested in «…», as the refusal recommends. |
+| `The agency's reply was brief; it's 6'7 wide and the workers' union agrees.` | 0 | no | Apostrophes in prose quote nothing. |
 
 ## Checks
 
@@ -250,7 +292,7 @@ collects or runs the test: import-time code, conftest files, plugins and ini
 settings decide that, and no static check can.
 
 `tools/pin_runner.py` asks pytest. For each repository and commit the register
-pins, it:
+or the household choices pin, it:
 
 0. asks GitHub's API, before fetching anything, whether the commit is shipped
    code of that repository. GitHub's canonical name must be exactly the pinned
@@ -372,7 +414,24 @@ holds nothing worth taking:
 
 Its result leaves only as the JSON artifact. The alarm job reads that artifact
 with main's `pin_runner.py --summarize`, which checks every field's type and
-prints only fields that match fixed patterns. A missing or malformed artifact,
+prints only fields that match fixed patterns. The one free text it prints is a
+YAML case's name, inside its pin id in a code span, and only when the name has
+no backtick, `@` or angle bracket. The rule refuses every Unicode category C
+character (control, format, private-use, surrogate and unassigned), every
+separator except a space, and every Default_Ignorable_Code_Point character,
+including those outside category C: U+034F, U+115F–U+1160, U+17B4–U+17B5,
+U+180B–U+180D, U+180F, U+3164, U+FE00–U+FE0F, U+FFA0 and
+U+E0100–U+E01EF. "Café" and "A case!" print; a line break, a bidirectional
+override or a default-ignorable character makes the pin malformed. Tests check
+that names stay inside one code span, contain none of those forbidden
+characters, and cannot insert lines, mentions or angle brackets. They do not
+establish that every accepted Unicode character is visibly distinguishable.
+At most 200 characters of a YAML case name are displayed; longer names use
+the first 200 characters, right-stripped, followed by `…`. The summary holds
+at most 100 detail lines and 60,000 UTF-16 code units, the measure GitHub
+limits an issue body by (65,536), including an overflow line pointing to the
+report artifact; the workflow's own text fits in the rest.
+A missing or malformed artifact,
 including one without the `commits`, `unrun` and `issues` lists or a commit
 without its `pins` and `issues` lists (the runner always writes them),
 becomes its own alarm line ("pinned-tests artifact malformed"); the summary
@@ -631,7 +690,9 @@ Markdown view: each entry once, as it is in its file, with its repository,
 global id and worklist, and every `statutory_not_choice` item. It reads
 repositories in sorted order and entries in file order, and writes JSON with
 sorted keys. So the same files give byte-identical output in any order, and
-`files_from_view` rebuilds the files it read, empty files included.
+`files_from_view` rebuilds the files it read, empty files included. As for
+the register, a file it can't read is left out and reported, and the command
+exits 1.
 `tests/test_household_choices_properties.py` states these properties and the
 tool's other invariants: one namespace from either side, vacuity, scope, the
 worklist, and totality. It also includes a differential test of the check's
