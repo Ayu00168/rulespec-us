@@ -70,6 +70,8 @@ def allowed_yaml_roots() -> set[str]:
         ".github",
         "bulk",
         "programs",
+        # Household choices beside the register; validated by tools/household_choices.py.
+        "household-choices.yaml",
         "known-dangling.yaml",
         "known-missing-money-atoms.yaml",
         # Source-conflict register; validated by tools/source_conflicts.py.
