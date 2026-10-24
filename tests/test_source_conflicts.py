@@ -1353,6 +1353,12 @@ def test_quoted_words(text, words):
         ("It wrote \u201cone \u2018two\u2019 three\u201d then denied workers\u2019 claims.", 6, True),
         ("It wrote \u201cone \u00abtwo\u00bb three\u201d then denied workers\u2019 claims.", 3, False),
         ("'a\"b\u00ab\"\u00bb", 2, False),
+        # Only the standard reading reaches these counts (#1867 round 7's
+        # mutation run): strict doesn't open the glued \u201e or ", nested runs the
+        # first quotation to the end, and the one-pass reading's single span
+        # takes the opener after it. Without the standard reading each fails open.
+        ("'a\u201eone \u201e two three\u201d\"four five", 5, True),
+        ("'a\"one two \u00bb(three\"\u2033four five", 5, True),
         # Known limit (#1867 round 4, accepted by ruling): a quotation whose
         # opening mark directly follows a letter or digit, where that mark can
         # also close (a single mark, or ” » › ″ “ « ‹), isn't
@@ -1380,9 +1386,11 @@ def test_quoted_words(text, words):
         ("The agency called it \"routine\" and won't reopen the workers' case.", 1, False),
         ("'one' and 'two three four'", 5, True),
         ('"one" and "two three four"', 4, False),
-        # A stray mark leaves a quotation open; a mark after a colon still
-        # starts one (round 7, from the recognisable-quotation property).
+        # A stray mark leaves a quotation open; a mark after a colon or a slash
+        # still starts one (round 7, from the recognisable-quotation property).
         ('" :"one two three four five" ', 5, True),
+        ('" /"one two three four five" ', 5, True),
+        ('»a /«the the» ', 3, False),
         ('\u00bba :\u00abthe the\u00bb ', 3, False),
         ('\u203aa :\u2039the the\u203a ', 3, False),
         ('\u201e :\u201dthe\u201d ', 1, False),
