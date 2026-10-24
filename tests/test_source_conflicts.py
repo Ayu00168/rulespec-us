@@ -15,7 +15,14 @@ import ast
 import copy
 import hashlib
 import importlib.util
+import io
+import json
+import math
+import os
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -1067,10 +1074,14 @@ UNPUBLISHED = {"kind": "agency-practice", "description": "MN DHS correspondence 
         # apostrophes inside it; an elision or a plural possessive opens nothing.
         ({"description": "It wrote 'the county's policy is to deny every such claim'"}, "quotes more than 4 words in all"),
         ({"description": "It wrote \u2018we\u2019ll deny every claim of this kind\u2019"}, "quotes more than 4 words in all"),
-        ({"description": "Since the '90s the clerks in each county office have handled the clerks' files"}, None),
+        # Intended (#1867 round 4): an elided year may open a quotation and a
+        # later word-end apostrophe may close it, so this is refused; "1990s"
+        # passes.
+        ({"description": "Since the '90s the clerks in each county office have handled the clerks' files"}, "quotes more than 4 words in all"),
+        ({"description": "Since the 1990s the clerks in each county office have handled the clerks' files"}, None),
         ({"description": "The agency's reply was brief, said the clerks' office"}, None),
         ({"description": 'An unclosed "quotation runs to the end of the text'}, "quotes more than 4 words in all"),
-        # A mark after a space closes nothing: the span runs on to the real closer.
+        # A trailing-space mark is now eligible; the last closer still wins.
         ({"description": "It wrote 'one two ' three four five six seven'"}, "quotes more than 4 words in all"),
         ({"description": "Reply from someone@example.gov"}, "contains `@`"),
         ({"kind": "phone"}, "kind must be one of"),
@@ -1092,6 +1103,607 @@ def test_unpublished_sources_shape(tmp_path):
     assert any("unpublished_sources must be a non-empty list" in issue for issue in check(ctx, entry(unpublished_sources=[])))
     missing = {key: value for key, value in UNPUBLISHED.items() if key != "date"}
     assert any("unpublished_sources[0].date is required" in issue for issue in check(ctx, entry(unpublished_sources=[missing])))
+
+
+@pytest.mark.parametrize(
+    ("text", "spans"),
+    [
+        # #1825 round-3 review (P3): a single mark opens at a word's start,
+        # after any Unicode whitespace, not only an ASCII space.
+        *[(f"It wrote:{space}'one two three'", ["one two three"]) for space in ("\u00a0", "\u202f", "\u2009", "\u3000", "\u2003", "\t", "\n")],
+        # After an opening bracket, a dash, a slash, an opening quotation mark
+        # that pass 1 does not consume (U+201B), or other punctuation.
+        *[(f"x{before}'one two'", ["one two"]) for before in ("(", "[", "{", "\u2014", "\u2013", "-", "/", "\u201b", ":", ".", "!")],
+        # This starts an unclosed pass-1 region; its inner single marks are
+        # literal text, consumed in pass 1.
+        ("x\u300c'one two'", ["'one two'"]),
+        # \u00ab also closes \u00bb, so glued to a word it opens nothing (the first
+        # known limit), and the single quotation after it is read.
+        ("x\u00ab'one two'", ["one two"]),
+        # The text's first character, and a combining mark after the opener.
+        ("'one two three' said the agency.", ["one two three"]),
+        ("\u2018one two\u2019 it said", ["one two"]),
+        ("It wrote '\u0301one two'", ["\u0301one two"]),
+        # Known limit (#1867 round 4): a mark after a letter or digit is an
+        # apostrophe, so a quotation opened mid-word isn't counted.
+        ("x'one two'", []),
+        ("6'one two'", []),
+        # Any other single mark may open: before a digit, a space or a mark.
+        ("the '90s and 'old' days", ["90s and 'old"]),
+        ("a '30 day limit' it set", ["30 day limit"]),
+        ("x ' one two'", [" one two"]),
+        # A mark at either end of the text.
+        ("ends with '", []),
+        ("'", []),
+        ("x '", []),
+        ("'a b'", ["a b"]),
+        # Single marks are read as one span, from the first opener to the
+        # last closer: they can't be told from apostrophes (#1867 round 3).
+        ("'one' and 'two'", ["one' and 'two"]),
+        ("'one two' and the workers' case", ["one two' and the workers"]),
+        # A closer precedes no letter or digit, including after whitespace.
+        ("the 'one two 6'7 tall", []),
+        ("the 'one two's end", []),
+        ("the 'one two'.", ["one two"]),
+        ("the 'one two', then", ["one two"]),
+        # An opener no closer follows is an apostrophe; an unclosed double
+        # quote runs to the end.
+        ("the 'one two three four five", []),
+        ('the "one two', ["one two"]),
+        # Each double opener pairs with its own closer only.
+        ('\u201ca\u201d x "b c d e f"', ["a", "b c d e f"]),
+        ('"a\u201d b c"', ["a\u201d b c"]),
+        ('\u201ca" b\u201d', ['a" b']),
+        ("\u201ca\u201d", ["a"]),
+        ('""', [""]),
+    ],
+)
+def test_quoted_spans(text, spans):
+    assert sc.quoted_spans(text) == spans
+
+
+def test_single_mark_rules():
+    # A closer depends only on what follows it: no letter or decimal digit.
+    assert sc._closes_single("' x", 0) is True
+    assert sc._closes_single("x' y", 1) is True
+    assert sc._closes_single("x '", 2) is True
+    assert sc._closes_single("x'\u00b9", 1) is True
+    assert sc._closes_single("'x", 0) is False
+    assert sc._closes_single("'7", 0) is False
+    assert sc._closes_single("'\u0663", 0) is False  # an Arabic-Indic digit
+    # A single mark may open unless it follows a letter or digit (past any
+    # combining marks on it) or ends the text.
+    assert sc._opens_single("'x", 0) is True
+    assert sc._opens_single("a:'x", 2) is True
+    assert sc._opens_single("'9", 0) is True
+    assert sc._opens_single("' x", 0) is True
+    assert sc._opens_single("''", 1) is False
+    assert sc._opens_single("a'x", 1) is False
+    assert sc._opens_single("1'x", 1) is False
+    assert sc._opens_single("e\u0301'x", 2) is False
+    assert sc._opens_single("x '", 2) is False
+
+
+@pytest.mark.parametrize(
+    ("text", "words"),
+    [
+        # A quotation inside a quotation, and a possessive inside one.
+        ("It wrote 'one two three 'inner' four'", 5),
+        ("It wrote 'the workers' policy is to deny every such claim'", 9),
+        ("It wrote 'one two three 'four five'", 5),
+        ("'one 'two three'", 3),
+        # Round 1's P1: a delimited quotation inside a single one counts in
+        # full, and its words count once.
+        ("It wrote:\u00a0'about \"the workers' policy is to deny every such claim\"'", 10),
+        ("The agency's reply 'approves it' and \"the waiver\"", 4),
+    ],
+)
+def test_quoted_words(text, words):
+    assert sc.quoted_words(text) == words
+
+
+@pytest.mark.parametrize(
+    ("description", "count", "refused"),
+    [
+        # #1867 round 3 (P2): an elided year, an elision or a dropped g
+        # inside a quotation no longer ends it.
+        ("It wrote 'the workers' '90s policy is to deny every claim'", 9, True),
+        ("It wrote 'the '90s rules' policy is to deny every claim'", 9, True),
+        ("It wrote 'the workers' claims denied 'cause ineligible'", 6, True),
+        ("It wrote 'the workers' claims denied 'bout ineligible'", 6, True),
+        ("It wrote 'we are goin' to deny every claim'", 7, True),
+        ("It wrote \u2018we are goin\u2019 to deny every claim\u2019", 7, True),
+        # Round 2 (P2): a possessive with an elision or a nested quotation.
+        ("It wrote 'the workers' plan won't cover 'em all'", 7, True),
+        ("It wrote 'the workers' policy is to deny every 'special' claim'", 9, True),
+        ("It wrote 'the 'Benefits' section ends here'", 5, True),
+        # Round 3 (P2): a quotation nested in the same delimited marks.
+        ("It wrote \u201cone two \u201cthree\u201d four five\u201d", 5, True),
+        ("It wrote \u00abone two \u00abthree\u00bb four five\u00bb", 5, True),
+        ("It wrote \u300cone two \u300cthree\u300d four five\u300d", 5, True),
+        ('It wrote "one two "three" four five"', 5, True),
+        ("It wrote \u201ex \u201ca \u201cb\u201d c d e\u201d", 6, True),
+        # Round 2 (P1): the floor is main's own count, so a standalone
+        # ellipsis still counts as main counted it.
+        ('It wrote "one two three four \u2026"', 5, True),
+        # Round 2 (P2): an inch mark inside a single quotation, after a
+        # no-break space; and before a double quotation (the strict reading).
+        ("It wrote:\u00a0'the adult must be at least 6\" tall'", 8, True),
+        # (The nested reading reads the inch mark as an unclosed quotation
+        # around the real one, so it counts more; it fails closed.)
+        ('He is 6" tall and wrote "one two three four five"', 8, True),
+        ('He is 6\u201d tall and wrote \u201cone two three four five\u201d', 5, True),
+        # A stray low mark can't take a single opener as its closer.
+        ("It wrote \u201ax \u2019one two three four five\u2019", 6, True),
+        # Round 2 (P2): reversed guillemets, same-direction marks, ’…’, and a
+        # closer before a footnote mark.
+        ("It wrote \u00bbone two three four five\u00ab", 5, True),
+        ("It wrote \u203aone two three four five\u2039", 5, True),
+        ("It wrote \u201done two three four five\u201d", 5, True),
+        ("It wrote \u00bbone two three four five\u00bb", 5, True),
+        ("It wrote \u2019one two three four five\u2019", 5, True),
+        ("It wrote \u2018one two three four five\u2019\u00b9", 5, True),
+        # A single quotation after other punctuation now counts.
+        ("It wrote:'one two three four five'", 5, True),
+        # Round 4 closes round 2's documented limits: every Unicode quotation
+        # mark, primes and ornaments, a single quotation closed by a double
+        # mark, one starting with a digit, and one with a space inside its marks.
+        ("It wrote \u2018one two three four five\u201d", 5, True),
+        ("It wrote \u2032one two three four five\u2032", 5, True),
+        ("It wrote \u2033one two three four five\u2033", 5, True),
+        ("It wrote \u2036one two three four five\u2033", 5, True),
+        ("It wrote \u201bone two three four five\u2019", 5, True),
+        ("It wrote \u201fone two three four five\u201d", 5, True),
+        ("It wrote \u2e42one two three four five\u201c", 5, True),
+        ("It wrote \ufe41one two three four five\ufe42", 5, True),
+        ("It wrote \uff62one two three four five\uff63", 5, True),
+        ("It wrote \u275bone two three four five\u275c", 5, True),
+        ("It wrote \u275done two three four five\u275e", 5, True),
+        ("It wrote \u276eone two three four five\u276f", 5, True),
+        ("It wrote \U0001f676one two three four five\U0001f677", 5, True),
+        ("It wrote '30 days or more for every claim'", 7, True),
+        ("It wrote ' one two three four five '", 5, True),
+        # A stray low mark that a possessive closes takes a single quotation's
+        # opener in every delimited reading; only the whole-text single span
+        # counts it, with the double quotation outside it (mutation round 5).
+        ("\u201a\u201d 'claimants\u2019 the' and \"six seven eight\"", 5, True),
+        # A double mark closes a single quotation too, even behind a stray low
+        # mark (found by Hypothesis), and when it also closes a quotation
+        # inside it (the one-pass reading).
+        ("\u201aa 'claimants\u2019 the the\u201d ", 4, False),
+        ("It wrote 'one two \u201cthree four\u201d", 4, False),
+        # #1867 round 4 (P1): a closing double mark after a dash or an
+        # apostrophe, before punctuation, closes; a space inside either mark
+        # is fine. Each reading counts these exactly.
+        ('"a\u2014". b', 1, False),
+        ('He said "wait\u2014". Then he went away.', 1, False),
+        ('He said "workers\'", then denied every claim.', 1, False),
+        ('It wrote " one" today.', 1, False),
+        ('It wrote "one two three four " today.', 4, False),
+        # A mark before another quotation mark starts a quotation, so straight
+        # marks nest at the start too (mutation round 6).
+        ('It wrote ""one" two three four five"', 5, True),
+        ('It wrote " ""one two" three four five"', 5, True),
+        # Intended (#1867 round 5): \u2018 is a single mark that may open, so the
+        # whole-text span reads \u2018 the the the workers' as a quotation; \u201a\u2026\u2018
+        # is outside the double-quotation exactness scope.
+        ("\u201athe \u2018 the the the workers' today.", 5, True),
+        # Round 5 (P1): a single quotation that a stray low mark's region
+        # swallows still counts in full, whatever its opener follows or its
+        # body starts with.
+        ("\u201ax \u2019 one two three four five\u2019", 6, True),
+        ("\u201ax \u2019\u2014one two three four five\u2019", 6, True),
+        ("\u201ax :\u2019one two three four five\u2019", 6, True),
+        ("\u201ax:'one workers\u2019 two three four five'", 6, True),
+        # Round 5 (P1): a closer before a bracketed citation closes.
+        ('It wrote "one two three four\u2014"[1] today.', 4, False),
+        ('It wrote "one two three workers\'"[1] today.', 4, False),
+        ('It wrote "one two three four "[1] today.', 4, False),
+        ('It wrote "one two three four "[1] today, and later "five six".', 6, True),
+        # Known limit (#1867 round 5, accepted by ruling): a quotation nested in
+        # the same marks whose inner quotation starts with a bracket reads as
+        # two quotations, so the words between aren't counted. It is the
+        # second fail-open the scanner accepts; changing it is a deliberate
+        # decision. Nested in another pair, it counts in full.
+        ('It wrote "one two "[sic] three four" five"', 3, False),
+        ("It wrote \u201cone two \u00ab[sic] three four\u00bb five\u201d", 6, True),
+        # Outside the exactness scope, as the README states: a space after a
+        # mark that also closes (read as a closer), a word holding its own
+        # quotation's closing mark, and main's floor after \u201e\u2026\u201c.
+        ("It wrote \u201d one\u201d today.", 1, False),
+        ("It wrote \u201aclaimants\u2019 policy\u2019 today.", 1, False),
+        ("It wrote \u201eone\u201c then denied every remaining claim.", 5, True),
+        # The boundary rules (mutation round 8): a closer before an opening
+        # quotation character or after an apostrophe closes. Nesting in the
+        # same marks may overcount, failing closed: the strict reading opens
+        # an outer closer that isn't glued to a word (3 words counted 4; 2
+        # counted 3).
+        ('It wrote "one "two" wait\u2014"[1] today.', 4, False),
+        ('It wrote "one "two"" today.', 3, False),
+        ('It wrote \u00bbone "two\u2014"\u00ab today.', 2, False),
+        ("It wrote \"one \u00abtwo workers'\u00bb\" today.", 3, False),
+        # Found by fuzzing: only the standard delimited reading counts both words.
+        ("'\u00abb\u2014\u00bbb\u2019", 2, False),
+        # #1867 round 6 (P1): an opening mark that can also close opens after
+        # punctuation, a dash or a colon; only a letter or digit before it
+        # (or, for \u201d \u00bb \u203a \u2033, a space after it) keeps it shut.
+        ("It wrote:\u00abone two three four five\u00bb.", 5, True),
+        ("It wrote:\u2039one two three four five\u203a.", 5, True),
+        ("It wrote:\U0001f676one two three four five\U0001f677.", 5, True),
+        ("It wrote\u2014\u00ab one two three four five \u00bb.", 5, True),
+        ("It wrote:\u00bbone two three four five\u00ab.", 5, True),
+        # Known limit 2, as worded after round 6: a quotation nested inside
+        # another, whose opening mark could also close the outer one and
+        # that doesn't start with a letter or digit, reads as two quotations.
+        ('It wrote "one """two" three" four" five" today.', 4, False),
+        ('It wrote "one \u2014"\u00abtwo\u00bb three four" five" today.', 3, False),
+        ("It wrote \u201eone \u201c[sic] two three\u201d four five\u201d today.", 3, False),
+        # The same after a stray mark (#1867 round 7): its quotation is open, so
+        # a quotation after punctuation whose first mark opens a nested one
+        # reads as two. After whitespace instead, it counts in full.
+        ("A stray \u201e mark, then (\u201c\u201cone\u201d two three four five\u201d).", 3, False),
+        ('\u201e :\u201c\u201cthe\u201d the\u201d ', 1, False),
+        ('\u201e \u2014\u201c\u201cthe\u201d the\u201d ', 1, False),
+        ('\u201e /\u201c\u201cthe\u201d the\u201d ', 1, False),
+        ('\u201e \u201c\u201cthe\u201d the\u201d ', 2, False),
+        ("A stray \u201e mark, then \u201c\u201cone\u201d two three four five\u201d.", 7, True),
+        # Intended (#1867 round 6): \u2018\u2026\u2019 nested in a double quotation is read
+        # conservatively, so a later word-end apostrophe stretches it; nested
+        # in \u00ab\u2026\u00bb, which the refusal recommends, it counts exactly.
+        ("It wrote \u201cone \u2018two\u2019 three\u201d then denied workers\u2019 claims.", 6, True),
+        ("It wrote \u201cone \u00abtwo\u00bb three\u201d then denied workers\u2019 claims.", 3, False),
+        ("'a\"b\u00ab\"\u00bb", 2, False),
+        # Only the standard reading reaches these counts (#1867 round 7's
+        # mutation run): strict doesn't open the glued \u201e or ", nested runs the
+        # first quotation to the end, and the one-pass reading's single span
+        # takes the opener after it. Without the standard reading each fails open.
+        ("'a\u201eone \u201e two three\u201d\"four five", 5, True),
+        ("'a\"one two \u00bb(three\"\u2033four five", 5, True),
+        # Known limit (#1867 round 4, accepted by ruling): a quotation whose
+        # opening mark directly follows a letter or digit, where that mark can
+        # also close (a single mark, or ” » › ″ “ « ‹), isn't
+        # counted. It is one of the two fail-opens the scanner accepts;
+        # changing it is a deliberate decision. Main's floor still reads a
+        # glued “, and marks that only open (" „ 「 …) open anywhere.
+        ("It wrote x'one two three four five'", 0, False),
+        ("It wrote x\u00abone two three four five\u00bb", 0, False),
+        ("It wrote x\u201cone two three four five\u201d", 5, True),
+        ('It wrote x"one two three four five"', 5, True),
+        # Plain prose: apostrophes inside or at the end of a word, inch marks
+        # and footnote marks open nothing.
+        ("Since the 1990s the clerks in each county office have handled the clerks' files", 0, False),
+        ("The agency's reply was brief; it's 6'7 wide, 6\u2033 deep, and the workers' union\u2019s 2026 note\u00b9 agrees.", 0, False),
+        ("A 6\u201d gap and four more words here", 0, False),
+        ("The department's letter calls the fee 'reasonable'.", 1, False),
+        # Intended (#1867 round 4): single marks are read conservatively, from
+        # the first that may open to the last that may close, so a description
+        # that quotes with single marks and has a later word-end apostrophe, a
+        # second single quotation, or an elided year with a later apostrophe
+        # is read as one quotation. tools/README.md and the refusal say to use
+        # double quotation marks then, which are counted exactly.
+        ("Since the '90s the clerks in each county office have handled the clerks' files", 11, True),
+        ("The agency called it 'routine' and won't reopen the workers' case.", 6, True),
+        ("The agency called it \"routine\" and won't reopen the workers' case.", 1, False),
+        ("'one' and 'two three four'", 5, True),
+        ('"one" and "two three four"', 4, False),
+        # A stray mark leaves a quotation open; a mark after a colon or a slash
+        # still starts one (round 7, from the recognisable-quotation property).
+        ('" :"one two three four five" ', 5, True),
+        ('" /"one two three four five" ', 5, True),
+        ('»a /«the the» ', 3, False),
+        ('\u00bba :\u00abthe the\u00bb ', 3, False),
+        ('\u203aa :\u2039the the\u203a ', 3, False),
+        ('\u201e :\u201dthe\u201d ', 1, False),
+        ('\u00ab :\u00bbthe\u00ab ', 1, False),
+        ('\uff02 :\uff02the\uff02 ', 1, False),
+        ('\u2039 :\u203athe\u2039 ', 1, False),
+        ('A 12" form said\uff1a"one two three four five"', 6, True),
+        # The colon can lower a count too (#1867 round 7's review): the " after
+        # it now starts a nested quotation, so strict doesn't close there, and
+        # by the word rule (a whitespace token holding a letter or digit)
+        # two:"three is one word. Before the colon fix this counted 5.
+        ("'\"one two:\"three four five\"", 4, False),
+    ],
+)
+def test_publication_regressions(tmp_path, description, count, refused):
+    assert sc.quoted_words(description) == count
+    issues = check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))
+    assert any("quotes more than 4 words in all" in issue for issue in issues) is refused
+
+
+def _readme_quotation_examples():
+    text = (REPO_ROOT / "tools" / "README.md").read_text()
+    section = text.split("### Quotation examples", 1)[1].split("\n## ", 1)[0]
+    rows = []
+    for line in section.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) == 4 and cells[0].startswith("`") and cells[0].endswith("`"):
+            rows.append((cells[0][1:-1], int(cells[1]), cells[2] == "yes"))
+    return rows
+
+
+def test_the_readme_quotation_examples_hold():
+    # The eng hub's ruling 3: the README states the ambiguous-opener rule with
+    # examples, and each example's documented count and refusal is checked
+    # here, so the docs can't drift from the code.
+    rows = _readme_quotation_examples()
+    assert len(rows) >= 25
+    for description, counted, refused in rows:
+        assert sc.quoted_words(description) == counted, description
+        issues: list[str] = []
+        sc._check_unpublished_source({**UNPUBLISHED, "description": description}, label="u", issues=issues)
+        assert any("quotes more than 4 words in all" in issue for issue in issues) is refused, description
+
+
+def test_the_refusal_shows_the_span_and_the_remedy(tmp_path):
+    description = "The agency called it 'routine' and won't reopen the workers' case."
+    issues = check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))
+    (issue,) = [issue for issue in issues if "quotes more than 4 words in all" in issue]
+    assert "(6, counted in \"routine' and won't reopen the workers\")" in issue
+    assert 'one style of double quotation marks ("\u2026" or \u201c\u2026\u201d), nesting with \u00ab\u2026\u00bb if needed and never in the same marks; those are counted exactly in plain prose' in issue
+    assert "Describe it instead" in issue
+    long = "It wrote '" + " ".join(["word"] * 40) + "'"
+    (issue,) = [issue for issue in check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": long}]))
+                if "quotes more than" in issue]
+    assert "(40, counted in \"" + "word " * 16 + "\u2026\")" in issue  # shortened to 80 characters
+
+
+def test_delimited_readings():
+    assert sc._opens_delimited("x \u201done", 2) is True
+    assert sc._opens_delimited("6\u201d tall", 1) is False
+    assert sc._opens_delimited("x \u201d y", 2) is False
+    assert sc._opens_delimited("\u00bbone", 0) is True
+    assert sc._opens_delimited("x\u00bbone", 1) is False
+    # “ also closes „, so glued to a word it opens nothing (main's floor still
+    # reads it there); after a space it opens.
+    assert sc._opens_delimited("x\u201cone", 1) is False
+    assert sc._opens_delimited("x \u201cone", 2) is True
+    assert sc._opens_delimited("x\u201eone", 1) is True  # „ only opens
+    # « with a space after it opens (French spacing), in each reading.
+    assert sc._delimited("\u00ab oui \u00bb") == ([(0, " oui ")], [(0, 7)])
+    # The strict reading skips a closer that starts a quotation (the “
+    # after a stray „) and closes at the next.
+    assert sc._delimited("\u201ex \u201cone two\u201d", "strict") == ([(0, "x \u201cone two")], [(0, 12)])
+    # The strict reading opens after an opener prefix and closes at a word's end.
+    assert sc._delimited('6" and "a b"', "strict") == ([(7, "a b")], [(7, 12)])
+    assert sc._delimited('6" and "a b"') == ([(1, " and "), (11, "")], [(1, 8), (11, 12)])
+    # The nested reading counts an asymmetric pair's own marks as brackets.
+    nested = "\u201ca \u201cb\u201d c\u201d d"
+    assert sc._delimited(nested, "nested") == ([(0, "a \u201cb\u201d c")], [(0, 9)])
+    assert sc._delimited(nested) == ([(0, "a \u201cb")], [(0, 6)])
+    assert sc._delimited("\u201ca \u201cb", "nested") == ([(0, "a \u201cb")], [(0, 5)])
+
+
+def test_quoted_spans_finds_each_closer_once(monkeypatch):
+    # #1825 round-3 review (P3): unclosed openers made the scan quadratic
+    # (24,000 characters took 6 s). Each mark is now tested as a closer at
+    # most once a reading.
+    calls = []
+    real = sc._closes_single
+    monkeypatch.setattr(sc, "_closes_single", lambda text, index: calls.append(index) or real(text, index))
+    text = "'a " * 20_000 + "end'"
+    assert sc.quoted_spans(text) == [text[1:-1]]
+    assert len(calls) <= text.count("'")
+    calls.clear()
+    assert sc.quoted_spans("'a " * 20_000) == []
+    assert len(calls) <= 20_000
+
+
+@pytest.mark.parametrize(
+    ("opening", "closing"),
+    [
+        ('"', '"'), ("\u201c", "\u201d"), ("\u201e", "\u201c"), ("\u201e", "\u201d"), ("\u201a", "\u2018"), ("\u201a", "\u2019"), ("\u201f", "\u201d"), ("\u2e42", "\u201c"), ("\u2e42", "\u201d"),
+        ("\u00ab", "\u00bb"), ("\u2039", "\u203a"), ("\u00bb", "\u00ab"), ("\u00bb", "\u00bb"), ("\u203a", "\u2039"), ("\u203a", "\u203a"), ("\u201d", "\u201d"),
+        ("\u300c", "\u300d"), ("\u300e", "\u300f"), ("\ufe41", "\ufe42"), ("\ufe43", "\ufe44"), ("\uff62", "\uff63"), ("\u301d", "\u301e"), ("\u301d", "\u301f"), ("\uff02", "\uff02"),
+        ("\u2033", "\u2033"), ("\u2036", "\u2033"), ("\u275d", "\u275e"), ("\u2760", "\u275e"), ("\u276e", "\u276f"), ("\U0001f676", "\U0001f677"), ("\U0001f678", "\U0001f676"), ("\U0001f678", "\U0001f677"),
+    ],
+)
+@pytest.mark.parametrize("closed", [True, False])
+@pytest.mark.parametrize("include_other_closer", [True, False])
+def test_delimited_quotations(tmp_path, opening, closing, closed, include_other_closer):
+    # Another pair's closer remains literal inside this delimited region,
+    # including when this pair's own closer is missing entirely.
+    other_closer = "\u201d" if closing == '"' else '"'
+    words = "one two three four five" + (f" {other_closer} six" if include_other_closer else "")
+    description = "It wrote " + opening + words + (closing if closed else "")
+    assert sc.quoted_spans(description) == [words]
+    # main's scanner reads " and “ too, counting a stray mark inside as a
+    # word, and its count is the floor.
+    expected = len(words.split()) if opening in ('"', "\u201c") else len([word for word in words.split() if any(char.isalnum() for char in word)])
+    assert sc.quoted_words(description) == expected
+    issues = check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))
+    assert any("quotes more than 4 words in all" in issue for issue in issues)
+
+
+@pytest.mark.parametrize("opening", ["'", "\u2018", "\uff07", "\u2019", "\u201b", "\u2032", "\u2035", "\u275b", "\u275f"])
+@pytest.mark.parametrize("closing", ["'", "\u2019", "\uff07", "\u2018", "\u2032", "\u275c"])
+def test_single_quote_combinations(tmp_path, opening, closing):
+    words = "one two three four five"
+    description = f"It wrote {opening}{words}{closing}"
+    assert sc.quoted_spans(description) == [words]
+    assert any(
+        "quotes more than 4 words in all" in issue
+        for issue in check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))
+    )
+
+
+@pytest.mark.parametrize(
+    ("description", "spans", "count", "refused"),
+    [
+        # P1: pass 1 preserves the nine-word double quotation even when an
+        # outer opener follows a newly recognised no-break-space prefix.
+        ("It wrote:\u00a0'about \"the workers' policy is to deny every such claim\"'",
+         ["about  ", "the workers' policy is to deny every such claim"], 10, True),
+        # P2: trailing whitespace no longer disables a closing single mark.
+        ("It wrote 'one two three four five '", ["one two three four five "], 5, True),
+        # P2: a plural possessive inside a quotation stays in it.
+        ("It wrote 'the workers' policy is to deny every such claim'",
+         ["the workers' policy is to deny every such claim"], 9, True),
+        ("It wrote \u2018the workers\u2019 policy is to deny every such claim\u2019",
+         ["the workers\u2019 policy is to deny every such claim"], 9, True),
+        # Round 2's documented limits, counted since round 4.
+        ("It wrote \u2018one two three four five\u201d", ["one two three four five"], 5, True),
+        ("It wrote \u2032one two three four five\u2032", ["one two three four five"], 5, True),
+        ("It wrote \u2033one two three four five\u2033", ["one two three four five"], 5, True),
+        ("It wrote '30 days or more for every claim'", ["30 days or more for every claim"], 7, True),
+    ],
+)
+def test_publication_quote_review_regressions(tmp_path, description, spans, count, refused):
+    assert sc.quoted_spans(description) == spans
+    assert sc.quoted_words(description) == count
+    issues = check(make_repo(tmp_path), entry(unpublished_sources=[{**UNPUBLISHED, "description": description}]))
+    assert any("quotes more than 4 words in all" in issue for issue in issues) is refused
+
+
+@pytest.mark.parametrize(
+    ("description", "spans"),
+    [
+        # A pass-1 single mark cannot split the outer span as an opener.
+        ("'outside \"word 'inside\" tail'", ["outside   tail", "word 'inside"]),
+        # A pass-1 single mark cannot truncate the outer span as a closer.
+        ("'outside \"word'\" tail'", ["outside   tail", "word'"]),
+        # Multiple delimited regions are removed separately; their contents
+        # are still returned once, in opening-mark order.
+        ("'one \"two\" three \u00abfour\u00bb five'", ["one   three   five", "two", "four"]),
+        # Eligible-looking single marks within pass 1 are never scanned.
+        ("\"one 'two' three\"", ["one 'two' three"]),
+        # An unclosed delimited region consumes the putative outer closer.
+        ("'one \"two' three", ["two' three"]),
+    ],
+)
+def test_single_quotations_do_not_count_delimited_regions_twice(description, spans):
+    assert sc.quoted_spans(description) == spans
+
+
+@pytest.mark.parametrize(
+    ("values", "index", "expected"),
+    [([], 0, None), ([0, 2, 4], -1, 0), ([0, 2, 4], 0, 2), ([0, 2, 4], 1, 2), ([0, 2, 4], 2, 4), ([0, 2, 4], 4, None)],
+)
+def test_next_after_is_exact(values, index, expected):
+    assert sc._next_after(values, index) == expected
+
+
+class _CountedPositions:
+    def __init__(self, size):
+        self.size = size
+        self.accesses = 0
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, index):
+        self.accesses += 1
+        if not 0 <= index < self.size:
+            raise IndexError(index)
+        return index * 2
+
+
+@pytest.mark.parametrize("index", [-1, 0, 100_000, 199_998, 200_000])
+def test_next_after_uses_logarithmic_accesses(index):
+    # Count sequence accesses so a linear lookup mutant fails deterministically.
+    size = 100_000
+    positions = _CountedPositions(size)
+    expected = min(size, max(0, index // 2 + 1))
+    assert sc._next_after(positions, index) == (2 * expected if expected < size else None)
+    assert positions.accesses <= 2 * math.ceil(math.log2(size)) + 4
+
+
+def test_every_successor_lookup_is_bounded(monkeypatch):
+    # #1867 review round 2 (P2): a linear search for the closer kept every
+    # result, so only its running time showed it. The one-pass readings (under
+    # this scan's openers and main's) and the main floor find each opener's
+    # closer through _next_after (bounded above), once per opener: three
+    # lookups per opener on this family. A mutant that searches the closers
+    # itself makes fewer calls and fails.
+    size = 20_000
+    text = "a' " * size + "'a " * size
+    calls = []
+    real = sc._next_after
+    monkeypatch.setattr(sc, "_next_after", lambda positions, index: calls.append(index) or real(positions, index))
+    assert sc.quoted_words(text) == 0
+    assert len(calls) == 3 * size
+    calls.clear()
+    closers = [index for index, mark in enumerate(text) if mark == "'" and sc._closes_single(text, index)]
+    assert sc._one_pass_words(text, closers) == 0 and len(calls) == size
+    calls.clear()
+    assert sc._main_words(text) == 0 and len(calls) == size
+
+
+class _CountedSearch:
+    """A compiled pattern whose searches are counted."""
+
+    def __init__(self, pattern, counter):
+        self.pattern, self.counter = pattern, counter
+
+    def search(self, *args):
+        self.counter["search"] += 1
+        return self.pattern.search(*args)
+
+
+_PATHOLOGICAL = {
+    "unclosed-singles": lambda n: "'a " * n,
+    "closers-then-openers": lambda n: "a' " * n + "'a " * n,
+    "unclosed-doubles": lambda n: '"a ' * n,
+    "unclosed-nested": lambda n: "\u201ca " * n,
+    "deep-guillemets": lambda n: "\u00aba \u00abb " * n,
+    "strict-skips": lambda n: "\u201ea \u201db " * n,
+    "inch-marks": lambda n: '6" "a ' * n,
+    "alternating-regions": lambda n: "'a' \"b\" " * n,
+    "spaced-singles": lambda n: "' a " * n,
+}
+
+
+@pytest.mark.parametrize("family", sorted(_PATHOLOGICAL))
+def test_quote_scan_work_is_linear(monkeypatch, family):
+    # #1867 review round 3 (P2) and the round-4 ruling: a deterministic bound
+    # on the scan's work, so a quadratic regression fails here whatever the
+    # machine's speed. Work is every call to the mark predicates and every
+    # pattern search; doubling the text must not much more than double it,
+    # and it stays under a fixed multiple of the length.
+    counter = {"search": 0}
+    for name in ("_opens_single", "_closes_single", "_opens_delimited", "_glued", "_starts_a_quotation", "_opens_strict"):
+        real = getattr(sc, name)
+        monkeypatch.setattr(sc, name, lambda *args, _real=real, _name=name: counter.__setitem__(_name, counter.get(_name, 0) + 1) or _real(*args))
+    monkeypatch.setattr(sc, "_DELIMITER_MARK", _CountedSearch(sc._DELIMITER_MARK, counter))
+    monkeypatch.setattr(sc, "_DELIMITER_CLOSE", {mark: _CountedSearch(pattern, counter) for mark, pattern in sc._DELIMITER_CLOSE.items()})
+
+    def work(n):
+        counter.clear()
+        counter["search"] = 0
+        text = _PATHOLOGICAL[family](n)
+        sc.quoted_reading(text)
+        return sum(counter.values()), len(text)
+
+    small, length = work(2_000)
+    large, _ = work(4_000)
+    assert large <= 2.2 * small + 100, (family, small, large)
+    assert small <= 40 * length, (family, small, length)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a' " * 40_000 + "'a " * 40_000,
+        "'a " * 80_000,
+        '"a ' * 80_000,
+        "\u201ea " * 80_000,
+        "\u201ca " * 80_000,
+        "\u201ca\u201d " * 60_000,
+        "'a' \"b\" " * 30_000,
+        '6" "a ' * 40_000,
+    ],
+    ids=["closers-then-openers", "unclosed-singles", "unclosed-doubles", "unclosed-low-doubles", "unclosed-nested",
+         "closed-doubles", "alternating-regions", "inch-marks"],
+)
+def test_quote_scans_stay_fast(text):
+    # Coarse wall-clock guard on families that are quadratic under a linear
+    # lookup or a rescanned region: each scan of about 240,000 characters
+    # takes well under a second.
+    import time
+
+    started = time.perf_counter()
+    sc.quoted_words(text)
+    assert time.perf_counter() - started < 10
 
 
 # ---------------------------------------------------------------------------
@@ -1548,3 +2160,112 @@ def test_verify_lists_proposed_implementations():
     assert len(proposed) == 1 and "pull/10200" in proposed[0]
     # Review of #1825 (P3): a proposal is listed, never counted as an implementation.
     assert report[0] == "verified: 1 texts, 1 pending texts, 1 implementations, 2 tests"
+
+
+# ---------------------------------------------------------------------------
+# #1844 round 7 review (P3): files read beside the payload
+
+
+@pytest.mark.parametrize("value", ["2026-02-30", "1" * 5000])
+def test_a_value_yaml_cannot_construct_is_a_register_error(tmp_path, capsys, value):
+    # PyYAML raises ValueError for an impossible date or an integer too long
+    # to convert; the register's readers report it instead of raising.
+    path = tmp_path / sc.REGISTER_FILENAME
+    path.write_text(f"version: 1\nentries: []\nextra: {value}\n")
+    with pytest.raises(sc.RegisterError, match="holds a value YAML cannot construct"):
+        sc.load_register(path)
+    assert sc.main(["check", "--root", str(tmp_path)]) == 1
+    assert sc.main(["verify", "--root", str(tmp_path)]) == 1
+    assert "holds a value YAML cannot construct" in capsys.readouterr().err
+
+
+def test_yaml_test_case_names_is_total():
+    assert sc.yaml_test_case_names("- name: a\n  period: 2026-02-30\n") == set()
+    assert sc.yaml_test_case_names("[" * 600 + "]" * 600) == set()
+
+
+def test_a_local_test_that_cannot_be_read_is_an_issue(tmp_path):
+    ctx = sc.RepoContext(root=tmp_path, repo=REPO)
+    (tmp_path / "tests").mkdir()
+    test_file = tmp_path / "tests" / "default.test.yaml"
+
+    def screen():
+        issues: list[str] = []
+        sc.check_local_test("tests/default.test.yaml", "Local default", label="tests[0]", ctx=ctx, issues=issues)
+        return issues
+
+    test_file.write_text("- name: Local default\n  period: 2026\n")
+    assert screen() == []
+    for text in ("- name: Local default\n  period: 2026-02-30\n", "[" * 600 + "]" * 600):
+        test_file.write_text(text)
+        assert screen() == ["tests[0].name Local default is not a test case in tests/default.test.yaml."]
+    if os.geteuid() != 0:  # root reads a chmod-0 file
+        test_file.write_text("- name: Local default\n")
+        test_file.chmod(0)
+        try:
+            assert screen() == ["tests[0].path tests/default.test.yaml cannot be read: Permission denied."]
+        finally:
+            test_file.chmod(0o644)
+
+
+class _Response(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def _fake_github(files):
+    """urlopen for discover_registers: an organisation listing with one
+    repository per name in `files`, and each repository's raw file (None
+    for a repository without one)."""
+
+    def urlopen(target, timeout=None):
+        url = target if isinstance(target, str) else target.full_url
+        if "/orgs/" in url:
+            page = int(urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["page"][0])
+            listing = [{"full_name": f"TheAxiomFoundation/{name}", "name": name, "default_branch": "main"} for name in files]
+            return _Response(json.dumps(listing if page == 1 else []).encode())
+        name = url.split("/")[4]
+        if files[name] is None:
+            raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+        return _Response(files[name])
+
+    return urlopen
+
+
+@pytest.mark.parametrize("filename", [sc.REGISTER_FILENAME, sc.CHOICES_FILENAME])
+def test_discovery_reads_each_repository_on_its_own(monkeypatch, filename):
+    # One repository's unreadable file no longer aborts the Axiom-wide view,
+    # and an alias cycle can't reach the JSON renderer.
+    good = yaml.safe_dump({"version": 1, "entries": []}).encode()
+    files = {
+        "rulespec-us": good,
+        "rulespec-us-co": b"entries: [\n",
+        "rulespec-us-mt": b"version: 1\nentries: []\nextra: &a\n  self: *a\n",
+        "rulespec-us-ca": b"version: 1\nentries: []\nextra: 2026-02-30\n",
+        "rulespec-us-tx": b"\xff\xfe",
+        "rulespec-us-ny": None,
+    }
+    monkeypatch.setattr(sc.urllib.request, "urlopen", _fake_github(files))
+    registers, issues = sc.discover_registers(None, filename=filename)
+    assert registers == {"TheAxiomFoundation/rulespec-us": {"version": 1, "entries": []}}
+    assert len(issues) == 4
+    for name in ("rulespec-us-co", "rulespec-us-mt", "rulespec-us-ca", "rulespec-us-tx"):
+        assert any(issue.startswith(f"TheAxiomFoundation/{name}: {filename}") for issue in issues), (name, issues)
+    rows, _ = sc.aggregate(registers)
+    json.dumps(rows, default=sc._json_default)
+
+
+def test_aggregate_cli_reports_an_unreadable_local_file(tmp_path, capsys):
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("version: 1\nentries: []\nextra: 2026-02-30\n")
+    good = tmp_path / "good.yaml"
+    good.write_text(yaml.safe_dump({"version": 1, "entries": [entry()]}))
+    out = tmp_path / "rows.json"
+    argv = ["aggregate", "--register", f"TheAxiomFoundation/rulespec-us={good}",
+            "--register", f"TheAxiomFoundation/rulespec-uk={bad}", "--json", str(out)]
+    assert sc.main(argv) == 1
+    assert "TheAxiomFoundation/rulespec-uk: " in capsys.readouterr().err
+    assert [row["repository"] for row in json.loads(out.read_text())] == ["TheAxiomFoundation/rulespec-us"]
