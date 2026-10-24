@@ -25,6 +25,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -864,21 +865,161 @@ def test_summarize_never_raises(tmp_path, monkeypatch, capsys):
 
 
 def test_summarize_prints_yaml_case_ids_but_nothing_that_formats(tmp_path):
-    # A YAML case name is free text, so only names without a backtick, @,
-    # angle bracket or line break are printed; anything else is malformed.
+    # A YAML case name is free text. It is printed inside a code span when it
+    # holds no backtick, @, angle bracket, category C, default-ignorable, or
+    # separator character but a space; anything else is malformed. #1843 round-2 review
+    # (P3): "Café" and "A case!" were malformed though the rule allows them.
+    printable = ("A farm loss (2024), $3,000", "Café", "A case!", "Ein Fall für 2024 [ü]", "(2024) a case", "a :: b")
+    unsafe = ("x `@team`", "<img src=x>", "@everyone", "two\nlines", "tab\there", "\u202ereversed", "zero\u200dwidth",
+              "line\u2028separator", "no\u00a0break", "private\ue000use", "surrogate\ud800", "unassigned\u0378",
+              " leading", "trailing ", "")
     pins = [
-        {"entry": "us-md:x", "label": "entries[0].tests[0]", "id": "policyengine_us/tests/a.yaml::A farm loss (2024), $3,000", "outcome": "failed"},
-        {"entry": "us-md:x", "label": "entries[0].tests[1]", "id": "policyengine_us/tests/a.yaml::x `@team`", "outcome": "failed"},
-        {"entry": "us-md:x", "label": "entries[0].tests[2]", "id": "policyengine_us/tests/a.yaml::<img src=x>", "outcome": "failed"},
-        {"entry": "us-md:x", "label": "entries[0].tests[3]", "id": "policyengine_us/tests/a.yaml::@everyone", "outcome": "failed"},
+        {"entry": "us-md:x", "label": f"entries[0].tests[{index}]", "id": f"policyengine_us/tests/a.yaml::{name}", "outcome": "failed"}
+        for index, name in enumerate(printable + unsafe)
     ]
+    pins.append({"entry": "us-md:x", "label": "entries[0].tests[99]", "id": "policyengine_us/tests/a.py::Café", "outcome": "failed"})
     path = tmp_path / "report.json"
     path.write_text(json.dumps({"commits": [{"repo": "PolicyEngine/policyengine-us", "commit": COMMIT, "issues": [], "pins": pins}],
                                 "unrun": [], "issues": []}))
     assert runner.summarize(path) == [
-        "- `us-md:x` entries[0].tests[0]: `PolicyEngine/policyengine-us@cccccccccccc:policyengine_us/tests/a.yaml::A farm loss (2024), $3,000` failed",
-        "- pinned-tests artifact malformed (3 item(s)); the `pinned-tests` job's log has the details.",
+        f"- `us-md:x` entries[0].tests[{index}]: `PolicyEngine/policyengine-us@cccccccccccc:policyengine_us/tests/a.yaml::{name}` failed"
+        for index, name in enumerate(printable)
+    ] + [f"- pinned-tests artifact malformed ({len(unsafe) + 1} item(s)); the `pinned-tests` job's log has the details."]
+
+
+def _yaml_summary_report(names, *, path="tests/a.yaml", repo="PolicyEngine/a"):
+    return {
+        "commits": [{"repo": repo, "commit": COMMIT, "issues": [], "pins": [
+            {"entry": "us:x", "label": f"entries[0].tests[{index}]", "id": f"{path}::{name}", "outcome": "failed"}
+            for index, name in enumerate(names)
+        ]}],
+        "unrun": [], "issues": [],
+    }
+
+
+@pytest.mark.parametrize("forbidden", ["`", "<", ">", "@"])
+def test_summarize_refuses_each_unsafe_case_name(tmp_path, forbidden):
+    # A second unsafe character must not mask removal of this one's guard.
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(_yaml_summary_report(["ab", f"a{forbidden}b"])))
+    assert runner.summarize(path) == [
+        "- `us:x` entries[0].tests[0]: `PolicyEngine/a@cccccccccccc:tests/a.yaml::ab` failed",
+        "- pinned-tests artifact malformed (1 item(s)); the `pinned-tests` job's log has the details.",
     ]
+
+
+@pytest.mark.parametrize("name", [
+    "\u034f", "\u115f", "\u1160", "\u115f\u1160", "\u17b4", "\u17b5", "\u180b", "\u180d", "\u180f",
+    "\u3164", "\ufe00", "\ufe0f", "\uffa0", "\U000e0100", "\U000e01ef",
+])
+def test_summarize_refuses_default_ignorable_case_names(tmp_path, name):
+    # Every hard-coded range is tested at both boundaries, independently of
+    # category C: all these characters are letters or combining marks.
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(_yaml_summary_report([name])))
+    assert runner.summarize(path) == [
+        "- pinned-tests artifact malformed (1 item(s)); the `pinned-tests` job's log has the details."
+    ]
+
+
+@pytest.mark.parametrize(("name", "displayed"), [
+    ("a" * 200, "a" * 200),
+    ("a" * 201, "a" * 200 + "…"),
+    ("a" * 199 + " z", "a" * 199 + "…"),
+    ("a" * 300_000, "a" * 200 + "…"),
+])
+def test_summarize_shortens_long_yaml_case_names(tmp_path, name, displayed):
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(_yaml_summary_report([name])))
+    assert runner.summarize(path) == [
+        f"- `us:x` entries[0].tests[0]: `PolicyEngine/a@cccccccccccc:tests/a.yaml::{displayed}` failed"
+    ]
+
+
+def test_summarize_validates_the_whole_name_before_shortening(tmp_path):
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(_yaml_summary_report(["a" * 300_000 + "`"])))
+    assert runner.summarize(path) == [
+        "- pinned-tests artifact malformed (1 item(s)); the `pinned-tests` job's log has the details."
+    ]
+
+
+def test_summarize_bounds_the_whole_output(tmp_path, capsys):
+    path = tmp_path / "report.json"
+    # Long names are shortened individually; large, valid paths still make
+    # the character budget bind before the existing 100-line limit.
+    report = _yaml_summary_report(["a" * 10_000] * 99, path="tests/" + "b" * 1000 + ".yaml")
+    path.write_text(json.dumps(report))
+    lines = runner.summarize(path)
+    assert 1 < len(lines) < 100
+    assert lines[-1] == f"- ... and {99 - len(lines) + 1} more; see the report artifact."
+    assert all("::" + "a" * 200 + "…` failed" in line for line in lines[:-1])
+    assert sum(len(line) + 1 for line in lines) <= 60_000
+    assert runner.main(["--summarize", str(path)]) == 0
+    assert len(capsys.readouterr().out) <= 60_000
+    # The full prefix can consume the budget: even a repository name alone
+    # must not force an oversized line into the result.
+    path.write_text(json.dumps(_yaml_summary_report(["ab"], repo="PolicyEngine/" + "a" * 60_000)))
+    assert runner.summarize(path) == ["- ... and 1 more; see the report artifact."]
+
+
+def test_summarize_counts_utf16_units(tmp_path):
+    # #1867 build report: a character outside the basic plane is two UTF-16
+    # units, which GitHub counts; 99 names of 200 such characters made 57,608
+    # characters but 77,408 units.
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(_yaml_summary_report(["\U0001F600" * 200] * 99, path="tests/" + "b" * 300 + ".yaml")))
+    lines = runner.summarize(path)
+    rendered = "\n".join(lines) + "\n"
+    assert lines[-1].startswith("- ... and ")
+    assert len(rendered.encode("utf-16-le")) // 2 <= 60_000
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+def test_summarize_character_budget_boundary(tmp_path, extra):
+    path = tmp_path / "report.json"
+    # Exactly 60,000 rendered characters, including the CLI's final newline,
+    # fit. One more is replaced by the bounded artifact pointer.
+    prefix = "- `us:x` entries[0].tests[0]: `PolicyEngine/"
+    suffix = "@cccccccccccc:tests/a.yaml::ab` failed\n"
+    repo_name = "a" * (60_000 - len(prefix) - len(suffix) + extra)
+    path.write_text(json.dumps(_yaml_summary_report(["ab"], repo="PolicyEngine/" + repo_name)))
+    lines = runner.summarize(path)
+    if extra:
+        assert lines == ["- ... and 1 more; see the report artifact."]
+    else:
+        assert "\n".join(lines) + "\n" == prefix + repo_name + suffix
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+def test_summarize_character_budget_counts_every_line_break(tmp_path, extra):
+    path = tmp_path / "report.json"
+    # Each detail line is 30,000 characters including its newline. A second
+    # line one character longer must overflow; omitting accumulated newlines
+    # from the budget would admit 60,001 rendered characters here.
+    prefix = "- `us:x` entries[0].tests[0]: `PolicyEngine/"
+    suffix = "@cccccccccccc:tests/a.yaml::ab` failed\n"
+    repo_name = "a" * (30_000 - len(prefix) - len(suffix))
+    report = _yaml_summary_report(["ab", "ab" + "c" * extra], repo="PolicyEngine/" + repo_name)
+    path.write_text(json.dumps(report))
+    lines = runner.summarize(path)
+    if extra:
+        assert lines[-1] == "- ... and 1 more; see the report artifact."
+    else:
+        assert len(lines) == 2
+        assert len("\n".join(lines) + "\n") == 60_000
+    assert len("\n".join(lines) + "\n") <= 60_000
+
+
+def test_summarize_reserves_room_for_the_overflow_line(tmp_path):
+    path = tmp_path / "report.json"
+    # A line can fit by itself yet leave no room for the overflow pointer;
+    # it must be removed as well when another line would exceed the budget.
+    first = "- `us:x` entries[0].tests[0]: `PolicyEngine/"
+    suffix = "@cccccccccccc:tests/a.yaml::ab` failed\n"
+    repo_name = "a" * (60_000 - len(first) - len(suffix))
+    path.write_text(json.dumps(_yaml_summary_report(["ab", "cd"], repo="PolicyEngine/" + repo_name)))
+    assert runner.summarize(path) == ["- ... and 2 more; see the report artifact."]
 
 
 def test_summarize_without_a_report(tmp_path):
@@ -1968,9 +2109,11 @@ def test_record_provenance_covers_the_household_choices(tmp_path, monkeypatch):
     base = tmp_path / "repos"
     head = fixture_repo(base, "PolicyEngine/fixture-meta", {"tests/test_a.py": "def test_a():\n    pass\n"})
     other = fixture_repo(base, "PolicyEngine/fixture-choice", {"tests/test_b.py": "def test_b():\n    pass\n"})
+    third = fixture_repo(base, "PolicyEngine/fixture-named", {"tests/test_c.py": "def test_c():\n    pass\n"})
+    assert len({head, other, third}) == 3
     monkeypatch.setattr(sc, "github_api", lambda token=None, base_url=None: FakeGitHub(base))
-    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-choice", ("fixture_core.cli", ()))
-    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-meta", ("fixture_core.cli", ()))
+    for repo in ("PolicyEngine/fixture-meta", "PolicyEngine/fixture-choice", "PolicyEngine/fixture-named"):
+        monkeypatch.setitem(runner.YAML_RUNNERS, repo, ("fixture_core.cli", ()))
     root = tmp_path / "root"
     root.mkdir()
     (root / "known-source-conflicts.yaml").write_text(yaml.safe_dump(register(*pinned("PolicyEngine/fixture-meta", head, ["tests/test_a.py::test_a"]))))
@@ -1986,13 +2129,110 @@ def test_record_provenance_covers_the_household_choices(tmp_path, monkeypatch):
     (root / "household-choices.yaml").write_text(yaml.safe_dump(choices(choice)))
     assert runner.main(["--root", str(root), "--record-provenance", str(out)]) == 0
     assert recorded() == [("PolicyEngine/fixture-choice", other), ("PolicyEngine/fixture-meta", head)]
-    # So is one named explicitly, which must exist.
+    # So is one named explicitly, in place of the file beside the register.
+    # Its pin is a third commit, which only reading that file can record.
     named = tmp_path / "named.yaml"
-    named.write_text(yaml.safe_dump(choices({**choice, "commit": head, "repo": "PolicyEngine/fixture-meta"})))
+    named.write_text(yaml.safe_dump(choices({**choice, "repo": "PolicyEngine/fixture-named", "commit": third})))
     assert runner.main(["--root", str(root), "--choices", str(named), "--record-provenance", str(out)]) == 0
-    assert recorded() == [("PolicyEngine/fixture-meta", head)]
+    assert recorded() == [("PolicyEngine/fixture-meta", head), ("PolicyEngine/fixture-named", third)]
+    # A named file that doesn't exist fails, with no record.
     assert runner.main(["--root", str(root), "--choices", str(tmp_path / "absent.yaml"), "--record-provenance", str(tmp_path / "none.json")]) == 1
     assert not (tmp_path / "none.json").exists()
+
+
+def test_a_dangling_household_choices_link_fails_in_both_modes(tmp_path, monkeypatch):
+    # A household-choices.yaml that links to nothing is not an absent file.
+    # Read as absent, its pins would be neither recorded nor run, and both
+    # modes would pass.
+    monkeypatch.setattr(sc, "github_api", lambda token=None, base_url=None: FakeGitHub(tmp_path / "repos"))
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "known-source-conflicts.yaml").write_text(yaml.safe_dump(register()))
+    out = tmp_path / "provenance.json"
+    report_path = tmp_path / "report.json"
+    record = ["--root", str(root), "--record-provenance", str(out)]
+    run = ["--root", str(root), "--report", str(report_path), "--uv", sys.executable, "--git", sys.executable]
+    (root / "household-choices.yaml").symlink_to(tmp_path / "gone.yaml")
+    assert runner.main(record) == 1
+    assert not out.exists()
+    assert runner.main(run) == 1
+    assert json.loads(report_path.read_text())["issues"][0].startswith("runner error:")
+    # With no file at all there are no household choices, and both pass.
+    (root / "household-choices.yaml").unlink()
+    assert runner.main(record) == 0
+    assert json.loads(out.read_text())["records"] == []
+    assert runner.main(run) == 0
+
+
+@pytest.mark.parametrize("selection", ["root", "register", "choices"])
+def test_a_run_finds_every_pin_it_selects_in_the_record(tmp_path, monkeypatch, selection):
+    # Given the same selection, --record-provenance and a run read the same
+    # files, so the run never asks GitHub (unauthenticated) about a pin.
+    base = tmp_path / "repos"
+    head = fixture_repo(base, "PolicyEngine/fixture-meta", {"tests/test_a.py": "def test_a():\n    pass\n"})
+    other = fixture_repo(base, "PolicyEngine/fixture-choice", {"tests/test_b.py": "def test_b():\n    pass\n"})
+    monkeypatch.setitem(runner.YAML_RUNNERS, "PolicyEngine/fixture-choice", ("fixture_core.cli", ()))
+    folder = tmp_path / ("root" if selection == "root" else "elsewhere")
+    folder.mkdir()
+    register_path = folder / ("known-source-conflicts.yaml" if selection == "root" else "register.yaml")
+    register_path.write_text(yaml.safe_dump(register(*pinned("PolicyEngine/fixture-meta", head, ["tests/test_a.py::test_a"]))))
+    choices_path = tmp_path / "named.yaml" if selection == "choices" else folder / "household-choices.yaml"
+    choice = {**OPTIMUM, "repo": "PolicyEngine/fixture-choice", "commit": other, "path": "tests/b.yaml", "name": "Itemizes"}
+    choices_path.write_text(yaml.safe_dump(choices(choice)))
+    args = {
+        "root": ["--root", str(folder)],
+        "register": ["--register", str(register_path)],
+        "choices": ["--register", str(register_path), "--choices", str(choices_path)],
+    }[selection]
+    out = tmp_path / "provenance.json"
+    monkeypatch.setattr(sc, "github_api", lambda token=None, base_url=None: FakeGitHub(base))
+    assert runner.main([*args, "--record-provenance", str(out)]) == 0
+
+    def refuse(path):
+        raise AssertionError(f"the run asked GitHub for {path}")
+
+    seen = []
+
+    def run_register(payload, settings, choices=None):
+        seen.append((payload, settings, choices))
+        raise RuntimeError("stop before running anything")
+
+    monkeypatch.setattr(sc, "github_api", lambda token=None, base_url=None: refuse)
+    monkeypatch.setattr(runner, "run_register", run_register)
+    tools = ["--uv", sys.executable, "--git", sys.executable]
+    assert runner.main([*args, "--provenance", str(out), "--report", str(tmp_path / "report.json"), *tools]) == 1
+    ((payload, settings, chosen),) = seen
+    groups, _ = runner.collect_pins(payload, chosen)
+    assert set(groups) == {("PolicyEngine/fixture-meta", head), ("PolicyEngine/fixture-choice", other)}
+    assert set(settings.provenance) == set(groups)
+    assert all(settings.provenance[key]["shipped"] is True for key in groups)
+
+
+def pin_runner_selection(run: str) -> dict[str, str]:
+    """The options that choose a pin_runner.py command's files, in a step's script."""
+
+    words = shlex.split(run.replace("\\\n", " "))
+    (start,) = [index for index, word in enumerate(words) if word.endswith("tools/pin_runner.py")]
+    chosen: dict[str, str] = {}
+    rest = words[start + 1:]
+    for index, word in enumerate(rest):
+        flag, equals, value = word.partition("=")
+        if flag in ("--root", "--register", "--choices"):
+            chosen[flag] = value if equals else rest[index + 1]
+    return chosen
+
+
+def test_pin_provenance_and_pinned_tests_select_the_same_files():
+    # The record holds the commits of the files pin-provenance selected. If
+    # pinned-tests selected others, their commits would be asked of GitHub
+    # without a token, where the rate limit runs out.
+    jobs = workflow()["jobs"]
+    (record,) = [step["run"] for step in jobs["pin-provenance"]["steps"] if "tools/pin_runner.py" in step.get("run", "")]
+    (run,) = [step["run"] for step in jobs["pinned-tests"]["steps"] if "tools/pin_runner.py" in step.get("run", "")]
+    assert pin_runner_selection(record) == pin_runner_selection(run)
+    assert pin_runner_selection(run)["--root"] == "rulespec-us"
+    # The parser sees through line continuations and either spelling.
+    assert pin_runner_selection("python a/tools/pin_runner.py --root r \\\n  --choices=c --report x") == {"--root": "r", "--choices": "c"}
 
 
 @pytest.mark.parametrize(

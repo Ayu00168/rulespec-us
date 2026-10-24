@@ -9,7 +9,7 @@ collects and passes that test depends on import-time code, conftest files,
 plugins and ini settings, which no static check can decide. This runner asks
 pytest.
 
-For each (repository, commit) the register pins, it:
+For each (repository, commit) the register or the household choices pin, it:
 
 0. asks GitHub, before fetching anything, whether the commit is shipped code
    of that repository (`source_conflicts.commit_provenance`), or reads the
@@ -95,6 +95,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from decimal import Decimal
 from pathlib import Path
@@ -1087,16 +1088,64 @@ def render(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-# A Python pin id, or a YAML case's (`path.yaml::Case name (2024)`): no
-# backtick, @, angle bracket or line break, so nothing in it can format,
-# mention or link in the alarm issue.
-_SAFE_ID_RE = re.compile(
-    r"[A-Za-z0-9_./-]+::[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)?"
-    r"|[A-Za-z0-9_./-]+\.ya?ml::[A-Za-z0-9][A-Za-z0-9 ,.;:()'%$&+/_#-]*"
+# A Python pin id (`path.py::test` or `path.py::Class::test`), or a YAML
+# case's (`path.yaml::Case name (2024)`). The alarm prints an id inside an
+# inline code span, so a YAML case name, which is free text, is printed only
+# when it holds no backtick (which would end the span), no @ or angle
+# bracket, no category C character (control, format, private-use, surrogate
+# or unassigned), no separator other than a space, and no default-ignorable
+# character. Any other letter or punctuation is fine: "Café", "A case!".
+_SAFE_PYTHON_ID_RE = re.compile(r"[A-Za-z0-9_./-]+::[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)?")
+_SAFE_YAML_PATH_RE = re.compile(r"[A-Za-z0-9_./-]+\.ya?ml")
+_UNSAFE_IN_NAME = frozenset("`@<>")
+# Default_Ignorable_Code_Point ranges outside category C, from Unicode's
+# DerivedCoreProperties. Category C is refused separately below.
+_DEFAULT_IGNORABLE_RANGES = (
+    (0x034F, 0x034F),
+    (0x115F, 0x1160),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180D),
+    (0x180F, 0x180F),
+    (0x3164, 0x3164),
+    (0xFE00, 0xFE0F),
+    (0xFFA0, 0xFFA0),
+    (0xE0100, 0xE01EF),
 )
+
+
+def _safe_id(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    if _SAFE_PYTHON_ID_RE.fullmatch(value):
+        return True
+    path, separator, name = value.partition("::")
+    return (
+        bool(separator)
+        and _SAFE_YAML_PATH_RE.fullmatch(path) is not None
+        and name != ""
+        and name == name.strip()
+        and all(
+            char == " " or (
+                char not in _UNSAFE_IN_NAME
+                and unicodedata.category(char)[0] not in "CZ"
+                and not any(start <= ord(char) <= end for start, end in _DEFAULT_IGNORABLE_RANGES)
+            )
+            for char in name
+        )
+    )
+
+
 _SAFE_ENTRY_RE = re.compile(r"[a-z0-9-]+:[a-z0-9-]+")
 _SAFE_LABEL_RE = re.compile(r"(?:choices\.)?entries\[[0-9]+\]\.tests\[[0-9]+\]")
 _SUMMARY_LIMIT = 100
+# GitHub counts an issue body in UTF-16 code units (65,536 at most); the
+# summary keeps room for the workflow's own text.
+_SUMMARY_UTF16_LIMIT = 60_000
+
+
+def _utf16_units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+_CASE_NAME_LIMIT = 200
 
 
 MISSING_ARTIFACT = "- pinned-tests artifact missing or unreadable; the `pinned-tests` job's log has the details."
@@ -1133,13 +1182,17 @@ def _summary_lines(report: Mapping[str, Any]) -> list[str]:
                 isinstance(pin, Mapping)
                 and _safe(pin.get("entry"), _SAFE_ENTRY_RE)
                 and _safe(pin.get("label"), _SAFE_LABEL_RE)
-                and _safe(pin.get("id"), _SAFE_ID_RE)
+                and _safe_id(pin.get("id"))
                 and isinstance(outcome, str)
                 and outcome in OUTCOMES
             ):
                 malformed += 1
             elif outcome != PASSED:
-                lines.append(f"- `{pin['entry']}` {pin['label']}: `{where}:{pin['id']}` {outcome}")
+                identifier = pin["id"]
+                path, _, name = identifier.partition("::")
+                if _SAFE_YAML_PATH_RE.fullmatch(path) and len(name) > _CASE_NAME_LIMIT:
+                    identifier = f"{path}::{name[:_CASE_NAME_LIMIT].rstrip()}…"
+                lines.append(f"- `{pin['entry']}` {pin['label']}: `{where}:{identifier}` {outcome}")
     for pin in _items(report.get("unrun")):
         if isinstance(pin, Mapping) and _safe(pin.get("entry"), _SAFE_ENTRY_RE) and _safe(pin.get("label"), _SAFE_LABEL_RE):
             lines.append(f"- `{pin['entry']}` {pin['label']}: the runner can't execute this pin.")
@@ -1153,18 +1206,31 @@ def _summary_lines(report: Mapping[str, Any]) -> list[str]:
             lines.append(f"- The runner reported {len(issues)} issue(s) outside any pin; see the `pinned-tests` job's log.")
         else:
             lines.append("No pinned test failed.")
-    if len(lines) > _SUMMARY_LIMIT:
-        lines = lines[:_SUMMARY_LIMIT] + [f"- ... and {len(lines) - _SUMMARY_LIMIT} more; see the report artifact."]
-    return lines
+    kept: list[str] = []
+    characters = 0
+    for line in lines:
+        # Count the newline main() prints after every line as well. All
+        # fields, including an unusually long repository or path, fit only
+        # if the complete rendered summary stays within the budget.
+        if len(kept) >= _SUMMARY_LIMIT or characters + _utf16_units(line) + 1 > _SUMMARY_UTF16_LIMIT:
+            while True:
+                overflow = f"- ... and {len(lines) - len(kept)} more; see the report artifact."
+                if characters + _utf16_units(overflow) + 1 <= _SUMMARY_UTF16_LIMIT:
+                    return [*kept, overflow]
+                characters -= _utf16_units(kept.pop()) + 1
+        kept.append(line)
+        characters += _utf16_units(line) + 1
+    return kept
 
 
 def summarize(path: Path) -> list[str]:
     """Markdown lines naming the pins that did not pass, for the alarm issue.
 
     The report comes from a job that ran other repositories' code, so it is
-    data: every field's type and pattern is checked before use, only fields
-    that match fixed patterns (ids, commits, the outcome vocabulary) are
-    printed, and free text from the run never is. A missing or malformed
+    data: every field's type and pattern is checked before use. Free text
+    from the run is printed in one place: a YAML case name under _safe_id's
+    rule, shortened after 200 characters. Other printed fields match fixed
+    patterns (ids, commits, the outcome vocabulary). A missing or malformed
     artifact is itself an alarm line; this never raises."""
 
     try:

@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -710,6 +711,44 @@ def test_an_unreadable_other_file_fails_both_checks(tmp_path):
     assert has(issues, "cannot read household-choices.yaml to check that no global id is in both files")
 
 
+def test_files_read_beside_the_payload_never_raise(tmp_path):
+    # #1844 review round 7 (P3): a value YAML cannot construct (a date such
+    # as 2026-02-30) in a referenced module or the other root file raised
+    # ValueError, and so did a local test file that couldn't be read.
+    ctx = make_repo(tmp_path)
+    module = tmp_path / "us" / "statutes" / "26" / "152" / "c.yaml"
+    module.write_text(module.read_text().replace("'1990-01-01'", "2026-02-30"))
+    assert hc._module_rules(module) is None and hc._declared_inputs(module) == {}
+    issues = check(ctx, child_entry())
+    assert has(issues, "us/statutes/26/152/c.yaml is not readable YAML"), issues
+    ctx = make_repo(tmp_path)
+    (tmp_path / sc.REGISTER_FILENAME).write_text("version: 1\nentries: []\nextra: 2026-02-30\n")
+    assert has(check(ctx, entry()), "cannot read known-source-conflicts.yaml to check that no global id is in both files")
+    (tmp_path / sc.REGISTER_FILENAME).unlink()
+    (tmp_path / hc.CHOICES_FILENAME).write_text("version: 1\nentries: []\nextra: 2026-02-30\n")
+    issues = sc.check_register({"version": 1, "entries": []}, ctx, scan_modules=False)
+    assert has(issues, "cannot read household-choices.yaml to check that no global id is in both files")
+    (tmp_path / hc.CHOICES_FILENAME).unlink()
+
+
+def test_a_local_default_pin_whose_file_cannot_be_read_is_an_issue(tmp_path):
+    ctx = make_repo(tmp_path)
+    local = {"path": "tests/default.test.yaml", "name": "Local default", "pins": ["default"]}
+    value = entry(tests=[entry()["tests"][0], local])
+    test_file = tmp_path / "tests" / "default.test.yaml"
+    test_file.write_text("- name: Local default\n  period: 2026\n")
+    assert check(ctx, value) == []
+    for text in ("- name: Local default\n  period: 2026-02-30\n", "[" * 600 + "]" * 600):
+        test_file.write_text(text)
+        assert has(check(ctx, value), "Local default is not a test case in tests/default.test.yaml")
+    if os.geteuid() != 0:  # root reads a chmod-0 file
+        test_file.chmod(0)
+        try:
+            assert has(check(ctx, value), "tests/default.test.yaml cannot be read")
+        finally:
+            test_file.chmod(0o644)
+
+
 # ---------------------------------------------------------------------------
 # statutory_not_choice, hygiene, money
 
@@ -1004,6 +1043,28 @@ def test_markdown_escapes_cells():
     view, _ = hc.aggregate({"TheAxiomFoundation/rulespec-us": payload(entry(actor="a|b\nc"))})
     row = hc.render_markdown(view).splitlines()[6]
     assert "a\\|b c" in row and row.count(" | ") == 5
+
+
+def test_the_view_holds_copies_of_every_row():
+    # #1844 review round 7 (P3): removing the copy from the
+    # statutory_not_choice rows passed every test.
+    files = {"TheAxiomFoundation/rulespec-us-mt": {
+        "version": 1, "entries": [entry(jurisdiction="us-mt")],
+        "statutory_not_choice": [{"jurisdiction": "us-mt", "citation": "MCA 2021 15-30-2131", "note": "Split equally."}],
+    }}
+    before = copy.deepcopy(files)
+    view, _ = hc.aggregate(files)
+    view["entries"][0]["entry"]["question"] = "changed"
+    view["statutory_not_choice"][0]["item"]["note"] = "changed"
+    view["repositories"][0]["version"] = "changed"
+    assert files == before
+
+
+def test_aggregate_cli_reports_an_unreadable_local_file(tmp_path, capsys):
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("version: 1\nentries: []\nextra: 2026-02-30\n")
+    assert hc.main(["aggregate", "--file", f"TheAxiomFoundation/rulespec-uk={bad}", "--json", str(tmp_path / "v.json")]) == 1
+    assert "TheAxiomFoundation/rulespec-uk: " in capsys.readouterr().err
 
 
 def test_aggregate_cli_writes_the_same_bytes_twice(tmp_path, capsys):
