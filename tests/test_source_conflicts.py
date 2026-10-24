@@ -1398,6 +1398,11 @@ def test_quoted_words(text, words):
         ('\uff02 :\uff02the\uff02 ', 1, False),
         ('\u2039 :\u203athe\u2039 ', 1, False),
         ('A 12" form said\uff1a"one two three four five"', 6, True),
+        # The colon can lower a count too (#1867 round 7's review): the " after
+        # it now starts a nested quotation, so strict doesn't close there, and
+        # by the word rule (a whitespace token holding a letter or digit)
+        # two:"three is one word. Before the colon fix this counted 5.
+        ("'\"one two:\"three four five\"", 4, False),
     ],
 )
 def test_publication_regressions(tmp_path, description, count, refused):

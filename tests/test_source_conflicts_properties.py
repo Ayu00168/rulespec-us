@@ -1324,8 +1324,10 @@ def text_around_a_quotation(draw):
     # is itself a nested quotation starts with a quotation mark, which starts
     # a quotation only at the start or after whitespace; after punctuation,
     # inside a quotation a stray mark before it left open, it is the second
-    # known limit (pinned in test_publication_regressions).
-    prefix = draw(st.sampled_from(["", "\u00a0"] if nested_first else ["", ":", "\u2014", "(", "/", "\u00a0"]))
+    # known limit (pinned in test_publication_regressions). So only that shape,
+    # after a quotation mark, keeps to a whitespace prefix (#1867 round 7).
+    stray = any(char in sc._QUOTATION_MARKS for token in before for char in token)
+    prefix = draw(st.sampled_from(["", "\u00a0"] if nested_first and stray else ["", ":", "\u2014", "(", "/", "\u00a0"]))
     return "".join(before) + " " + prefix + opener + words_text + closer + " " + "".join(after), len(words)
 
 
